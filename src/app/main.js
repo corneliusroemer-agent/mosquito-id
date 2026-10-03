@@ -1033,54 +1033,6 @@ const TEMPERATURE = 2.5;
 // would silently turn the whole pool into NaN.
 // The sentence the score panel leads with. It is a claim about the photograph,
 // never about our machinery: there is deliberately no "analysing" state here.
-// Do the views of this photo agree on the species, and if not, by how much do
-// the fused top two sit apart? Measured on the benchmark: when the views agree
-// the fused answer is right 94.3% of the time, when they disagree 50.0% - so
-// this is worth showing, and worth more than the fused number alone.
-//
-// `views` is the list of per-view spP arrays; `fusedSpP` the pooled posterior.
-function viewAgreement(views, fusedSpP) {
-  if (!views || views.length < 2) return null;
-  const S = EMB.species.length;
-  const argmax = (p) => {
-    let b = 0;
-    for (let i = 1; i < S; i++) if (p[i] > p[b]) b = i;
-    return b;
-  };
-  const winners = views.map(argmax);
-  const top = argmax(fusedSpP);
-  const ranked = [...fusedSpP].sort((a, b) => b - a);
-  // Margin between the fused top two, in percentage points. Below this the
-  // photo is not really decidable from the classifier's own output, whatever it
-  // reports as its top score.
-  const marginPts = views.length >= 2 ? (ranked[0] - ranked[1]) * 100 : 0;
-
-  return {
-    agree: winners.every((w) => w === top),
-    topSpecies: EMB.species[top],
-    runnersUp: EMB.species.filter((_, i) => winners.includes(i) && i !== top),
-    marginPts,
-    fusedTop: fusedSpP[top]
-  };
-}
-
-// One-line plain-English rendering of the agreement signal. Not rendered: the
-// two-view agreement was shown as a sentence in the score panel, and the panel
-// shows species scores only. Kept for the data path and for anyone who wants
-// the signal in a tooltip or a log.
-// because it is a statement about the photograph, not about the model: it says
-// what the two views of this picture disagree about and how close the call is.
-function agreementSentence(a) {
-  if (!a) return "";
-  if (a.agree) {
-    return `Both views of this photo pick ${a.topSpecies} — the close-up and the whole picture agree.`;
-  }
-  const other = a.runnersUp.length ? a.runnersUp[0] : null;
-  const gap = other
-    ? `, with ${other} close behind`
-    : "";
-  return `The close-up and the whole picture disagree${gap}. The two leading species are within ${a.marginPts.toFixed(1)} points, so treat this one as undecided.`;
-}
 
 // Whether there is a crop to draw, and where it sits in each panel, answered in
 // one place. Both panels used to gate the outline on their own independent
