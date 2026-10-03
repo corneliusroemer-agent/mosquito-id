@@ -22,8 +22,8 @@ import { fuseViews as _fuseViews } from "../confidence/fuseViews";
 import { genusOf, speciesGenusIndex } from "../confidence/genus";
 import { verdictFrom as _verdictFrom, verdictSentence } from "../confidence/verdict";
 import { pooledPosterior as _pooledPosterior,
-         splitPoolable, poolingWeights, aggregateLogits, pooledCandidates,
-         pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
+         splitPoolable, poolingWeights, aggregateLogits, aggregateAdjacent,
+         pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
 import { render as renderSpeciesPage } from "./speciesPage";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
@@ -41,7 +41,7 @@ const genusScores = (spP) => _genusScores(EMB, spP);
 const fuseViews = (viewResults) => _fuseViews(EMB, viewResults);
 const verdictFrom = (spP, agreement, adP) => _verdictFrom(EMB, spP, agreement, adP);
 const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
-const pooledVerdictOf = (aggLogits, included) => _pooledVerdictOf(EMB, aggLogits, included);
+const pooledVerdictOf = (aggLogits, included, aggAdjLogits) => _pooledVerdictOf(EMB, aggLogits, included, aggAdjLogits);
 
 const DET_SIZE = 640;
 const CLIP_SIZE = 224;
@@ -389,6 +389,11 @@ function commitScores(p, r) {
   p.scores = r.labels;
   p.detail = r.detail;
   p.logits = r.logits;
+  // The adjacent posteriors, index-aligned with EMB.adjacent, so the pooled card
+  // can carry the pool's non-mosquito evidence through its own softmax. Absent
+  // where the scoring path reports none - the server path has no adjacent
+  // classes - and then the pool has no non-mosquito evidence to speak of.
+  p.adP = r.adP || null;
   // A verdict that claims nothing must not keep the one it had: pooling reads it.
   p.verdict = r.verdict || null;
   // The per-class non-mosquito posteriors, for the score panel to name the winner
@@ -1386,7 +1391,8 @@ async function classifyImage(imgBitmap, filename) {
     scores: fused.labels,
     detail: fused.detail,
     logits: fused.logits,
-        verdict: fused.verdict,
+    adP: fused.adP,
+    verdict: fused.verdict,
     adjacentDetail: fused.adjacentDetail,
     agreement: fused.agreement,
     viewsLanded: views.length,
@@ -1459,7 +1465,7 @@ async function processFiles(fileList) {
     name: file.name, file,
     fullCanvas: null, cropCanvas: null, contextCanvas: null,
     cropBox: null, contextBox: null,
-    scores: {}, detail: {}, logits: null,
+    scores: {}, detail: {}, logits: null, adP: null,
     status: "queued…", fallback: false, is_cropped: false, verdict: null,
     manual_full_photo: false, fingerprint: null,
     rev: 0, pending: true, error: null,
@@ -1558,7 +1564,8 @@ async function processFiles(fileList) {
           cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
           detail: fused.detail, logits: fused.logits, status: data.status, fallback: data.fallback,
           is_cropped: data.is_cropped,
-                    verdict: fused.verdict,
+          adP: fused.adP,
+          verdict: fused.verdict,
           adjacentDetail: fused.adjacentDetail,
           agreement: fused.agreement,
           viewsLanded: views.length, viewsTotal: views.length,
@@ -2514,6 +2521,10 @@ function updatePooling() {
 
   const aggLogits = aggregateLogits(EMB, included, weights);
 
+  // The same sum for the adjacent (non-mosquito) classes, so the pooled card can
+  // say "this is not a mosquito" instead of being structurally unable to ask.
+  const aggAdjLogits = aggregateAdjacent(EMB, included, weights);
+
   // Relative Log Scores (Axis: -20 to 0)
   const candidates = pooledCandidates(EMB, aggLogits);
 
@@ -2534,7 +2545,7 @@ function updatePooling() {
   //
   // `included` is passed so the pool can also gate its SPECIES claim on the
   // photos rather than on its own sharpened posterior: see pooledVerdict().
-  const pooledVerdict = pooledVerdictOf(aggLogits, included);
+  const pooledVerdict = pooledVerdictOf(aggLogits, included, aggAdjLogits);
   const pooledLine = pooledVerdict ? verdictSentence(pooledVerdict) : "";
 
   poolScores.innerHTML = "";
