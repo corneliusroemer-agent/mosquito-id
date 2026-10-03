@@ -45,7 +45,7 @@ area. The delete button and the badge must stay within their own tile's box.
 
 This is the part every recorded bug lived in: the gaps between these rows.
 
-| State | `fallback` | `pending` | `error` | `verdict.state` | `is_cropped` | Badge | Meaning |
+| State | `crop_rejected` | `pending` | `error` | `verdict.state` | `is_cropped` | Badge | Meaning |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Queued / pending | any | `true` | — | — | any | `…` | Decode or inference in flight |
 
@@ -55,8 +55,9 @@ opposite of what happened, and it is what R4.3 forbids.
 | Cropped, decided | `false` | `false` | — | `species` \| `genus` | `true` | `✓` | A mosquito was found and named, or named to genus |
 | Cropped, unsure | `false` | `false` | — | `unsure` | `true` | `?` | Valid photo, classifier would not name a genus |
 | Cropped, non-mosquito | `false` | `false` | — | `non-mosquito` | `true` | `✕` | Valid photo, the gate says it is not a mosquito |
-| **Uncropped, no detection** | `true` | `false` | — | — | `false` | `✕` | The detector found no mosquito in this photo |
-| Uncropped, no flag | `false` | `false` | — | — | `false` | `✕` | As above, without the fallback flag set |
+| **Uncropped, crop rejected** | `true` | `false` | — | `species` \| `genus` | `false` | `–` | The crop lost to the nuisance gate; the whole frame was classified and named |
+| Uncropped, no box | `false` | `false` | — | `species` \| `genus` | `false` | `–` | The detector found no box, so the whole frame was the only view |
+| Uncropped, no verdict | any | `false` | — | `null` | `false` | `–` | The frame was classified and nothing came of it |
 | Error | any | `false` | set | — | any | `!` | The photo is readable; classification failed |
 
 ## 3. Selection and inclusion are different decisions
@@ -66,16 +67,23 @@ opposite of what happened, and it is what R4.3 forbids.
 > checkbox is.
 
 `canView(p)` and `contributesToPool(p)` answer different questions and must never
-be one predicate. Conflating them is what made a `fallback` photo behave as
-though it did not exist.
+be one predicate. Conflating them is what made a photo behave as though it did
+not exist.
 
-**R3.2** `contributesToPool(p)` is false for `pending`, `error`, `fallback`, and
-`verdict.state === "non-mosquito"`. A `fallback` photo must not enter a mosquito
-pool — the pooled card fuses evidence about a mosquito, and a photo with no
-mosquito in it is not that evidence.
+**R3.2** `contributesToPool(p)` is false for `pending`, `error`, and
+`verdict.state === "non-mosquito"`. Each is a statement about the photo: its
+pixels are unreadable, its analysis failed, or the classifier looked at this
+photo and it is not a mosquito. A pool fuses evidence about a mosquito, and a
+photo with no mosquito in it is not that evidence.
 
-**R3.3** `canView(p)` is true for every photo the app holds, including `fallback`
-and `error` ones. A failed classification is not a missing photo; the full frame
+A `crop_rejected` photo is **not** excluded. The nuisance gate judges the crop;
+the whole frame was classified either way and the verdict was read off that
+frame. Excluding the photo on the crop's verdict is what made feeding images to
+the classifier whole achieve nothing — the classifier had its answer, and the
+answer was then thrown away.
+
+**R3.3** `canView(p)` is true for every photo the app holds, including `error`
+ones. A failed classification is not a missing photo; the full frame
 is on screen beside the failure message.
 
 ## 4. What each element does, per state
@@ -109,15 +117,22 @@ analysed at all, which both refutes a photo nobody has looked at yet and makes t
 queued photos indistinguishable. It names the photo and its state instead.
 
 **R4.3 The badge states the photo's analysis state** as in §2, and its `title`
-carries a full sentence. A badge reading `✕` alone is not sufficient — it must
-also say that no mosquito was detected.
+carries a full sentence.
+
+**R4.3a An uncropped photo is not a failed one.** Failure to crop can mean no
+mosquito, or a photo already cropped to one, and the app cannot tell those apart;
+on GBIF and iNaturalist data the second is common. The badge says what happened —
+the whole frame was the view it analysed — and neither its glyph nor its wording
+may assert an absence the app did not establish. `✕` and any wording about a
+mosquito that was not looked for are both defects here; they are correct on a
+`non-mosquito` photo, where the classifier did look.
 
 **R4.4 The delete button is enabled in every state.** Removing a photo must
 always be possible, including mid-inference.
 
 **R4.5 The checkbox is enabled exactly when `contributesToPool(p)`.** Per §2 that
-means disabled for: pending, error, `fallback`, and non-mosquito. Enabled for:
-cropped-and-decided, cropped-unsure, and uncropped-without-fallback.
+means disabled for: pending, error, and non-mosquito. Enabled for everything
+else, including an uncropped photo and one whose crop the gate rejected.
 
 **R4.6 A disabled checkbox explains itself.** Its accessible name, its `title`
 and the badge's `title` must each name the reason — the cause, not a restatement
@@ -127,9 +142,9 @@ defect: a control that silently ignores clicks is indistinguishable from a broke
 one.
 
 **R4.6a A disabled checkbox never offers inclusion.** Its name and `title` must
-not begin "Include photo" when the checkbox is disabled. The queued, errored,
-non-mosquito and fallback states each carry their own reason, and no reason is
-ever the empty string.
+not begin "Include photo" when the checkbox is disabled. The queued, errored and
+non-mosquito states each carry their own reason, and no reason is ever the empty
+string.
 
 **R4.6b The checkbox's accessible name and its `title` are one string**, so the
 two cannot drift into telling the user two different things.
@@ -243,10 +258,13 @@ Why the rules that are not directly observable:
   tile cannot be pooled is genuinely interesting to the person looking at it — a
   photo they photographed has nothing in it the detector could find — and hiding
   that converts an informative result into a broken-looking one.
-- **`fallback` must not contribute to a pool** (R3.2) because the fusion step sums
-  a photo's evidence into a claim about a mosquito. This is the invariant that
-  matters most on this strip, and it is why the checkbox is disabled rather than
-  silently ignored.
+- **A `non-mosquito` verdict must not contribute to a pool** (R3.2) because the
+  fusion step sums a photo's evidence into a claim about a mosquito, and this
+  photo's evidence is about a midge. This is the invariant that matters most on
+  this strip, and it is why the checkbox is disabled rather than silently ignored.
+  The crop's own verdict is deliberately not part of it: the whole frame was
+  classified regardless, and a photo named on its frame is the best evidence in
+  the batch however the crop went.
 - **Ablation, not refinement:** a photo that is neither cropped nor classified has
   no verdict, so the pool has nothing to gate on. Rather than inventing a default,
   it is excluded and named.

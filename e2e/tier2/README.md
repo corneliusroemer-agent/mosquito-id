@@ -46,7 +46,7 @@ Real CDN fetch, real `processFiles`, real sample photos, WASM EP:
 | Footer reads | `inference: BioCLIP B/16 FP16 (WASM CPU) · 1063ms/photo` |
 
 Verdicts on real samples: `species` *Aedes vexans* p=0.70; `species` *Aedes
-albopictus* p=0.61; `species` *Aedes albopictus* p=0.88 — all `fallback: false`,
+albopictus* p=0.61; `species` *Aedes albopictus* p=0.88 — all `crop_rejected: false`,
 `is_cropped: true`, one detector box each.
 
 A blank canvas comes back **`unsure`**, not `non-mosquito`: the detector finds no
@@ -88,8 +88,8 @@ token and Cornelius's go-ahead. **A test must not do that.**
 ### 2. Headless WebGPU has no `shader-f16`, and the app hangs rather than falling back
 
 WebGPU itself works headless: the SwiftShader adapter exists and both sessions
-report the WebGPU EP. But the adapter lacks `shader-f16`, all three registered
-engines ship FP16 or INT8 weights, and every BioCLIP compute pipeline fails to
+report the WebGPU EP. But the adapter lacks `shader-f16`, every remaining
+registered engine ships FP16 weights, and every BioCLIP compute pipeline fails to
 compile:
 
 ```

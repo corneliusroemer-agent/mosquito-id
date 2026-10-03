@@ -963,6 +963,10 @@
      green cropped one, which asserted the opposite of what happened. */
   .tile .crop-badge.non-mosquito { background: rgba(220, 38, 38, 0.85); color: #fff; }
   .tile .crop-badge.unsure { background: #fef3c7; color: #b45309; }
+  /* Uncropped is not a failure: it is the whole frame having been the view, on a
+     photo that was analysed and may well be the very best one in the batch. The
+     inherited red badge said otherwise at a glance. */
+  .tile .crop-badge.uncropped { background: rgba(100, 116, 139, 0.9); color: #fff; }
 
   /* The zoomed panel's "no image" line changes text as the selection moves, so its
      height is reserved: the longest message must not be able to resize the panel
@@ -1034,7 +1038,6 @@
           <option value="webgpu-culico">⚡ culico-net-cls-v1 (experimental · 81 MB)</option>
           <option value="webgpu-b16">⚡ WebGPU: BioCLIP B/16 (Ultra-fast · 172 MB)</option>
           <option value="webgpu-fp16" selected>💻 WebGPU: BioCLIP 2.5 FP16 (1.25 GB) · Most accurate</option>
-          <option value="webgpu-int8">🐢 WebGPU: BioCLIP 2.5 INT8 (609 MB) — runs on CPU, slow</option>
           <option value="server-gpu" id="opt-server" disabled>⚡ Server Inference — unavailable in the web version</option>
         </select>
       </div>

@@ -14,7 +14,7 @@ import type { ClassifiedPhoto, Verdictish } from "../src/app/types";
  *
  * The strip accumulated six defects that all lived *between* states rather than
  * inside one, so the enumeration here is exhaustive rather than sampled: every
- * combination of `pending` / `error` / `fallback` / `is_cropped` /
+ * combination of `pending` / `error` / `crop_rejected` / `is_cropped` /
  * `verdict.state`, including combinations the app never builds, because the
  * predicates must still be total.
  *
@@ -49,24 +49,24 @@ function photo(over: Partial<ClassifiedPhoto> = {}): ClassifiedPhoto {
     is_cropped: true,
     pending: false,
     error: null,
-    fallback: false,
+    crop_rejected: false,
     ...over,
   };
 }
 
 const PENDING = [true, false] as const;
 const ERRORS = [null, "decode failed"] as const;
-const FALLBACKS = [true, false] as const;
+const CROP_REJECTED = [true, false] as const;
 const CROPPED = [true, false] as const;
 const VERDICTS = [null, "species", "genus", "unsure", "non-mosquito"] as const;
 
 /** Every combination of the five inputs a tile's enabled/disabled state reads. */
 const COMBINATIONS = PENDING.flatMap((pending) =>
   ERRORS.flatMap((error) =>
-    FALLBACKS.flatMap((fallback) =>
+    CROP_REJECTED.flatMap((crop_rejected) =>
       CROPPED.flatMap((is_cropped) =>
         VERDICTS.map((v) => ({
-          pending, error, fallback, is_cropped,
+          pending, error, crop_rejected, is_cropped,
           verdict: v === null ? null : verdict(v),
         })),
       ),
@@ -111,17 +111,27 @@ describe("canView (spec §1.1)", () => {
 });
 
 describe("contributesToPool (spec §1.1)", () => {
-  it("is exactly: not pending, not errored, not fallback, not non-mosquito", () => {
+  it("is exactly: not pending, not errored, not non-mosquito", () => {
     for (const c of COMBINATIONS) {
-      const expected = !c.pending && !c.error && !c.fallback && c.verdict?.state !== "non-mosquito";
+      const expected = !c.pending && !c.error && c.verdict?.state !== "non-mosquito";
       expect(contributesToPool(photo(c)), JSON.stringify(c)).toBe(expected);
     }
   });
 
-  it("closes the checkbox on a fallback photo even though the photo is viewable", () => {
-    const fb = photo({ fallback: true, is_cropped: false, verdict: null });
-    expect(canView(fb)).toBe(true);
-    expect(contributesToPool(fb)).toBe(false);
+  it("keeps a photo whose crop the nuisance gate rejected, named on its whole frame", () => {
+    // The record classifyImage builds when the crop loses to a nuisance class:
+    // uncropped, the crop rejected, and a verdict read off the whole frame. The
+    // gate judged the crop; the frame is what the evidence is.
+    const rejected = photo({ crop_rejected: true, is_cropped: false, verdict: verdict("species") });
+    expect(canView(rejected)).toBe(true);
+    expect(contributesToPool(rejected)).toBe(true);
+    expect(entersPooledSum(rejected)).toBe(true);
+  });
+
+  it("still closes the checkbox on a rejected crop the frame found no mosquito in", () => {
+    // The gate's verdict survives the crop's rejection: a frame that reads as not
+    // a mosquito is not pooled, however it came to be uncropped.
+    expect(contributesToPool(photo({ crop_rejected: true, is_cropped: false, verdict: verdict("non-mosquito") }))).toBe(false);
   });
 
   it("leaves an unsure photo checkable, and pools what the user checks", () => {
@@ -170,19 +180,25 @@ describe("entersPooledSum agrees with splitPoolable (spec §1.1)", () => {
     }
   });
 
-  it("differs from the strip's permission only on fallback, which is the seam §1 records", () => {
-    // splitPoolable sums a whole-frame view it is handed; the strip is what
-    // keeps the nuisance gate's rejected photo out of the fusion step.
-    const fb = photo({ fallback: true, is_cropped: false });
-    expect(contributesToPool(fb)).toBe(false);
-    expect(entersPooledSum(fb)).toBe(true);
+  it("is never stricter than the sum: nothing the strip lets in is refused by the gate", () => {
+    // The strip permits (pending/error/non-mosquito excluded); the gate decides
+    // which of the permitted photos carry a name. `unsure` is the gap, and it is
+    // the user's to cross.
+    for (const c of COMBINATIONS) {
+      const p = photo(c);
+      if (entersPooledSum(p)) expect(contributesToPool(p), JSON.stringify(c)).toBe(true);
+    }
+    // An unsure photo pools, down-weighted; what it does not do is get a name
+    // out of the gate on its own.
+    expect(contributesToPool(photo({ verdict: verdict("unsure") }))).toBe(true);
+    expect(entersPooledSum(photo({ verdict: verdict("unsure") }))).toBe(true);
   });
 
   it("never lets a photo into the sum that the strip has closed the checkbox for", () => {
     // The one combination where the strip's rule is strictly tighter.
     for (const c of COMBINATIONS) {
       if (contributesToPool(photo(c))) continue;
-      expect(c.pending || !!c.error || c.fallback || c.verdict?.state === "non-mosquito",
+      expect(c.pending || !!c.error || c.verdict?.state === "non-mosquito",
         JSON.stringify(c)).toBe(true);
     }
   });
@@ -208,8 +224,6 @@ describe("checkLabel (spec §3.3)", () => {
     expect(checkLabel(photo({ pending: true, verdict: null }), 1))
       .toBe("Still classifying - waiting for this photo to be analysed");
     expect(checkLabel(photo({ error: "decode failed", verdict: null }), 1)).toBe("This photo failed: decode failed");
-    expect(checkLabel(photo({ fallback: true, is_cropped: false, verdict: null }), 1))
-      .toMatch(/detect|classif|confidence|mosquito|pending|processing|fail/i);
     expect(checkLabel(photo({ verdict: verdict("non-mosquito") }), 1)).toContain("found no mosquito");
   });
 
@@ -242,14 +256,13 @@ describe("poolExclusionReason (spec §3.3)", () => {
     }
   });
 
-  it("says something different about each of the four reasons", () => {
+  it("says something different about each of the three reasons", () => {
     const reasons = new Set([
       poolExclusionReason(photo({ error: "x", verdict: null })),
       poolExclusionReason(photo({ pending: true, verdict: null })),
-      poolExclusionReason(photo({ fallback: true, is_cropped: false, verdict: null })),
       poolExclusionReason(photo({ verdict: verdict("non-mosquito") })),
     ]);
-    expect(reasons.size).toBe(4);
+    expect(reasons.size).toBe(3);
   });
 
   it("carries the error text through", () => {
@@ -274,8 +287,19 @@ describe("badge (spec §3.5)", () => {
   });
 
   it("distinguishes no-mosquito from no-crop", () => {
-    expect(badge(photo({ fallback: true, is_cropped: false, verdict: null })).title)
+    expect(badge(photo({ crop_rejected: true, is_cropped: false, verdict: null })).title)
       .not.toBe(badge(photo({ verdict: verdict("non-mosquito") })).title);
+  });
+
+  it("does not render a no-crop photo as a failure", () => {
+    // Failing to crop can mean no mosquito, or a photo already cropped to one -
+    // and on GBIF and iNaturalist the second is common. A cross, and any wording
+    // about a mosquito the app did not look for, is a claim it cannot support.
+    for (const state of ["species", "genus", "unsure"] as const) {
+      const b = badge(photo({ is_cropped: false, verdict: verdict(state) }));
+      expect(b.glyph, state).not.toBe("✕");
+      expect(b.title.toLowerCase(), state).not.toMatch(/no mosquito|not a mosquito|failed/);
+    }
   });
 
   it("gives the queued and unsure states their own glyphs", () => {

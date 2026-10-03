@@ -82,7 +82,7 @@ test.describe("the built site", () => {
         detail: {}, scores: {}, logits: null, adP: null,
         pending: false,
         error: "Classification failed: session is not initialised",
-        is_cropped: false, fallback: false, status: "failed",
+        is_cropped: false, crop_rejected: false, status: "failed",
         rev: 0, agreement: null, viewsLanded: 0, viewsTotal: 0,
         verdict: null,
       };

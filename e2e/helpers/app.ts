@@ -292,7 +292,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         pending: spec.pending ?? false,
         error: spec.error ?? null,
         is_cropped: spec.is_cropped ?? true,
-        fallback: false,
+        crop_rejected: false,
         status: spec.error ? "failed" : "ok",
         rev: 0,
         agreement: null,
