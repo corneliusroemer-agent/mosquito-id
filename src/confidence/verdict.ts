@@ -109,10 +109,31 @@ export function verdictFrom(
     agreement && !agreement.agree && floors.viewDisagreementVetoesSpecies,
   );
   if (!vetoed && topSpeciesP >= floors.species) {
-    return { state: "species", genus: topGenus, species: speciesName, topGenusP, topSpeciesP, runnersUp };
+    return {
+      state: "species",
+      genus: topGenus,
+      species: speciesName,
+      topSpecies: speciesName,
+      topGenusP,
+      topSpeciesP,
+      runnersUp,
+    };
   }
   if (topGenusP >= floors.genus) {
-    return { state: "genus", genus: topGenus, species: null, topGenusP, topSpeciesP, runnersUp };
+    // `species` stays null here because the verdict does not CLAIM a species: it is
+    // under the species floor, or the views disagreed and the veto demoted it. But
+    // the winner is still the most likely species, and the sentence needs it in
+    // order to rank the genus's members - `runnersUp` excludes it by construction,
+    // so dropping it left the sentence naming only the second and third place.
+    return {
+      state: "genus",
+      genus: topGenus,
+      species: null,
+      topSpecies: speciesName,
+      topGenusP,
+      topSpeciesP,
+      runnersUp,
+    };
   }
   return { state: "unsure", genus: null, species: null, topGenusP, topSpeciesP, runnersUp };
 }
@@ -140,9 +161,27 @@ export function verdictSentence(v: Verdict | null | undefined): string {
       const parts = r!.name.trim().split(/\s+/);
       return parts.length > 1 ? parts.slice(1).join(" ") : r!.name;
     });
-    if (!names.length) return `Definitely ${v.genus}`;
-    if (names.length === 1) return `Definitely ${v.genus} - maybe ${names[0]}`;
-    return `Definitely ${v.genus} - maybe ${names[0]} or ${names[1]}`;
+    // The winner is `v.species`, not the head of `runnersUp`: `runnersUp` is
+    // every sibling EXCEPT it, so leading with the runners-up named the second
+    // and third place and dropped the most likely species entirely. The ranking
+    // below the sentence already carries every probability; this line has to
+    // rank them in words, or it reads as though the top three were a tie.
+    const short = (n: string) => {
+      const parts = n.trim().split(/\s+/);
+      return parts.length > 1 ? parts.slice(1).join(" ") : n;
+    };
+    // No winner recorded: the genus is still the claim, so fall back to the
+    // runners-up rather than dropping them. This happens when every species in
+    // the genus sits under the species floor while the genus total clears the
+    // genus floor, which is the ordinary genus-only outcome.
+    const lead = v.topSpecies;
+    if (!lead) {
+      if (!names.length) return `Definitely ${v.genus}`;
+      if (names.length === 1) return `Definitely ${v.genus} - maybe ${names[0]}`;
+      return `Definitely ${v.genus} - maybe ${names[0]} or ${names[1]}`;
+    }
+    if (!names.length) return `Definitely ${v.genus} - most likely ${short(lead)}`;
+    return `Definitely ${v.genus} - most likely ${short(lead)}, possibly ${names[0]} or ${names[1]}`;
   }
   return "Not confident enough to name a genus";
 }

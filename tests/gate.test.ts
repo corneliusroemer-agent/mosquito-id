@@ -92,7 +92,9 @@ describe("the three states", () => {
     null, []);
     // albopictus leads at 0.35 - under the species floor - and the two runners-up
     // are named in descending order after it.
-    expect(verdictSentence(v)).toBe("Definitely Aedes - maybe aegypti or vexans");
+    expect(verdictSentence(v)).toBe(
+      "Definitely Aedes - most likely albopictus, possibly aegypti or vexans"
+    );
     // Runners-up are siblings of the genus, never a species from another genus.
     expect(v.runnersUp.every((r) => genusOf(r.name) === "Aedes")).toBe(true);
   });
@@ -318,5 +320,54 @@ null, []);
 describe("adjacent class count", () => {
   it("the head carries adjacent classes at all", () => {
     expect(AD(head)).toBeGreaterThan(0);
+  });
+});
+
+describe("the genus sentence ranks the species it is uncertain between", () => {
+  // `runnersUp` holds every sibling EXCEPT the winner, so a sentence built from
+  // its head names the second and third place and never mentions the most likely
+  // species. The sentence is the one line that ranks them, so dropping the top of
+  // the ranking makes a 3-way call read as a tie between the two least likely.
+  //
+  // Each case puts every species of one genus above the genus floor and under the
+  // species floor, which is the ordinary genus-only outcome.
+
+  it("leads with the most likely species, not a runner-up", () => {
+    const v = verdictFrom(
+      head,
+      post(head, { "Aedes albopictus": 0.355, "Aedes aegypti": 0.30, "Aedes koreicus": 0.245 }),
+      null, [],
+    );
+    expect(v.state).toBe("genus");
+    expect(v.genus).toBe("Aedes");
+    // `species` is the CLAIM and stays null: nothing cleared the species floor.
+    expect(v.species).toBeNull();
+    // `topSpecies` is the LEADER, and is what the sentence ranks from.
+    expect(v.topSpecies).toBe("Aedes albopictus");
+    expect(verdictSentence(v)).toBe(
+      "Definitely Aedes - most likely albopictus, possibly aegypti or koreicus"
+    );
+  });
+
+  it("names every species the ranking shows, in descending order", () => {
+    const v = verdictFrom(
+      head,
+      post(head, { "Aedes albopictus": 0.355, "Aedes aegypti": 0.30, "Aedes koreicus": 0.245 }),
+      null, [],
+    );
+    const said = verdictSentence(v);
+    const at = [said.indexOf("albopictus"), said.indexOf("aegypti"), said.indexOf("koreicus")];
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+  });
+
+  it("clears the species floor into the species sentence, which names the winner", () => {
+    // The sibling case: once the top species passes SPECIES_CONFIDENCE_FLOOR the
+    // sentence is empty and the ranking carries it, so `species` on the verdict
+    // is what this fix reads. Assert it here so the two states cannot diverge.
+    const v = verdictFrom(head, post(head, { "Aedes albopictus": 0.85 }), null, []);
+    expect(v.state).toBe("species");
+    expect(v.topSpecies).toBe("Aedes albopictus");
+    expect(verdictSentence(v)).toBe("");
   });
 });
