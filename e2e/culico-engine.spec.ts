@@ -124,25 +124,38 @@ const modelsReady = (page: Page) =>
     timeout: 60_000,
   });
 
-test("only culico's ONNX is fetched, not culico and H/14 together", async ({ page }) => {
+test("only the selected engine's ONNX is fetched, never two at once", async ({ page }) => {
   const onnx = await watchOnnx(page);
 
+  // H/14 is the default, not culico: culico's species readout is not yet good
+  // enough to be what a visitor lands on. So this test selects culico explicitly
+  // rather than relying on the default, which keeps it testing the thing that
+  // matters -- that picking an engine fetches that engine and nothing else --
+  // regardless of which one the app defaults to.
   await page.goto("/");
+  await modelsReady(page);
+
+  expect(onnx.seen, "every .onnx requested on load").toContain(DETECTOR);
+  expect(onnx.classifiers(), "classifiers requested on load").toEqual([H14_FP16]);
+  expect(onnx.maxConcurrentClassifiers()).toBe(1);
+
+  await page.selectOption("#engine-select", "webgpu-culico");
   await modelsReady(page);
 
   // The detector, plus culico and nothing else. A phone pays 81 MB, not 81 MB
   // + 1.2 GB.
-  expect(onnx.seen, "every .onnx requested").toContain(DETECTOR);
-  expect(onnx.classifiers(), "classifiers requested").toEqual([CULICO]);
+  expect(onnx.classifiers(), "classifiers after switching to culico")
+    .toEqual([H14_FP16, CULICO]);
   expect(onnx.maxConcurrentClassifiers()).toBe(1);
 
-  // culico is the default, it is what the page says is running, and its known
-  // limitation is on the page rather than only in the dropdown text.
   await expect(page.locator("#engine-select")).toHaveValue("webgpu-culico");
   await expect(page.locator("#pipeline-sub")).toContainText("culico-net-cls-v1");
   await expect(page.locator("#footer-device")).toContainText("culico-net-cls-v1");
-  await expect(page.locator("#engine-caveat")).toBeVisible();
-  await expect(page.locator("#engine-caveat")).toContainText("no mosquito in it");
+  // "experimental" is the whole labelling requirement, and it lives in the
+  // selector. There is no header caveat line: it was removed for moving the page,
+  // so asserting its absence is what stops it creeping back in.
+  await expect(page.locator("#engine-select")).toContainText("experimental");
+  await expect(page.locator("#engine-caveat")).toHaveCount(0);
 });
 
 test("switching engines fetches the second classifier, and only that one", async ({ page }) => {
@@ -150,29 +163,23 @@ test("switching engines fetches the second classifier, and only that one", async
 
   await page.goto("/");
   await modelsReady(page);
-  expect(onnx.classifiers(), "before the switch").toEqual([CULICO]);
+  expect(onnx.classifiers(), "on load").toEqual([H14_FP16]);
 
-  // A/B: pick H/14 FP16. The change handler loads that model, so a second,
-  // different classifier ONNX must appear - and culico must not be asked for
-  // again on the way.
-  await page.selectOption("#engine-select", "webgpu-fp16");
+  // A/B: pick culico. The change handler loads that model, so a second, different
+  // classifier ONNX must appear - and H/14 must not be asked for again on the way.
+  await page.selectOption("#engine-select", "webgpu-culico");
   await expect
     .poll(() => onnx.classifiers().length, { timeout: 60_000, message: `onnx seen: ${onnx.seen.join(", ")}` })
     .toBe(2);
 
-  expect(onnx.classifiers()).toEqual([CULICO, H14_FP16]);
+  expect(onnx.classifiers()).toEqual([H14_FP16, CULICO]);
   // Still one classifier at a time. A regression that eagerly loads both would
   // put two in this set at once, and would also have fetched H/14 before the
   // switch - which the `toEqual([CULICO])` above already rules out.
   expect(onnx.maxConcurrentClassifiers()).toBe(1);
-  // culico's session is already built and cached, so switching does not refetch it.
-  expect(onnx.seen.filter((f) => f === CULICO), "culico request count").toHaveLength(1);
+  // H/14's session is already built and cached, so switching does not refetch it.
+  expect(onnx.seen.filter((f) => f === H14_FP16), "H/14 request count").toHaveLength(1);
 
   await modelsReady(page);
-  await expect(page.locator("#pipeline-sub")).toContainText("BioCLIP 2.5 H/14");
-  // H/14 has no caveat, so the notice is CLEARED rather than left stale. The line
-  // itself keeps its box on purpose -- showing and hiding it moved everything
-  // below it, which is a layout shift -- so the assertion is on the text being
-  // empty, not on the element being hidden.
-  await expect(page.locator("#engine-caveat")).toHaveText("");
+  await expect(page.locator("#pipeline-sub")).toContainText("culico-net-cls-v1");
 });

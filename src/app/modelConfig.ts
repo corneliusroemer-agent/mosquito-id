@@ -84,16 +84,6 @@ export interface ModelConfig {
   label: string;
   name: string;
   size: number;
-  /**
-   * A limitation of this model that the user should be told about before they
-   * trust it, shown in the header rather than only in the dropdown text.
-   *
-   * Present on culico because its head is a linear probe fitted on this model's
-   * own features, which gives it a weaker non-mosquito gate than the shipped
-   * BioCLIP text head: it will name a species on a photo with no mosquito in it
-   * more often than H/14 does. That is only acceptable while it is visible.
-   */
-  caveat?: string;
 }
 
 /**
@@ -105,15 +95,15 @@ export interface ModelConfig {
  */
 export const WEBGPU_MODELS: Record<string, ModelConfig> = {
   // culico-net-cls-v1: a 21M-parameter TinyViT, 15x smaller than H/14, which
-  // is what makes it the one engine a phone can actually fetch. Experimental:
-  // see the caveat below.
+  // is what makes it the one engine a phone can actually fetch. Its head is a
+  // linear probe rather than a text head, so it is labelled experimental in the
+  // selector; see the dropdown option text.
   "webgpu-culico": {
     path: "culico-net-cls-v1-17-embed.onnx",
     embedsPath: "text_embeds_culico.json",
     label: "culico-net (experimental · 81 MB)",
     name: "culico-net-cls-v1",
-    size: 85378550,
-    caveat: "Experimental. This model cannot reliably tell a photo with no mosquito in it from one with: its head is a linear probe, so a photograph of a wall is sometimes named as a species. Only photograph mosquitoes with it."
+    size: 85378550
   },
   "webgpu-b16": {
     path: "bioclip_visual_b16_fp16.onnx",

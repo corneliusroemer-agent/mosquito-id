@@ -410,15 +410,20 @@ async function initEngine() {
   }
 
   // Preference: URL query param > localStorage > default. fp16 is skipped while
-  // it is unavailable, so a stale saved choice falls through instead of 404ing.
-  // culico is the default because it is the only engine a phone can fetch
-  // without caring about its data plan: 81 MB against H/14's 1.2 GB. It is
-  // experimental - its head is a linear probe and it cannot reject a photo with
-  // no mosquito in it as reliably as H/14 - so H/14 stays one click away and is
-  // the better answer on a connection that can afford it. INT8 is never the
-  // default: onnxruntime-web has no int8 WebGPU kernels, so the session silently
-  // falls back to WASM CPU and runs an order of magnitude slower.
-  const defaultEngine = "webgpu-culico";
+// it is unavailable, so a stale saved choice falls through instead of 404ing.
+//
+// H/14 is the default, and it is the default because culico's head cannot yet be
+// made to serve this app: its species argmax sits at 22% because the ten species
+// the corpus never labels carry the GENUS weight row, so on a correctly-identified
+// Aedes photo those three rows outscore the species probe. Pinning them instead
+// lifts species to 71% but drops genus from 83% to 57%, and the app's default
+// read is a genus, so the honest position is that the head needs fitting that
+// treats a genus-only label as evidence about the genus rather than copying it
+// into every species column. That is analysis, not a UI default.
+//
+// INT8 is never the default: onnxruntime-web has no int8 WebGPU kernels, so the
+// session silently falls back to WASM CPU and runs an order of magnitude slower.
+  const defaultEngine = "webgpu-fp16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
   const savedEngine = localStorage.getItem("mosquito_engine");
@@ -479,23 +484,18 @@ async function initEngine() {
 const loadModels = () => initEngine();
 
 /**
- * State what the selected model can and cannot do, in the header, and keep the
- * pipeline line naming the classifier that is actually running.
+ * Name the classifier that is actually running, under the title.
  *
- * The caveat text is not decoration. culico's head is a linear probe whose
- * non-mosquito gate is measurably weaker than H/14's text head, so on a photo
- * of a wall it will sometimes name a species. That is only acceptable while the
- * page says so rather than leaving a user to find out by being wrong in public.
- *
- * The caveat line keeps its box whether or not the model has a caveat: showing
- * and hiding it moved everything below it, which is a layout shift (CLS 0.27 on
- * desktop when it was toggled). A model with nothing to declare renders as an
- * empty reserved line.
+ * It used to also render a per-model caveat line here. That is gone: it was a
+ * block above the content whose visibility moved with the model, which cost 0.27
+ * of Cumulative Layout Shift on desktop before the line was given a reserved box,
+ * and a permanent header paragraph about one engine's limitations is not worth a
+ * reserved box. The engine is labelled "experimental" in the dropdown instead,
+ * which is where someone chooses it and therefore the only place the label has to
+ * be seen.
  */
 function applyEngineNotices(engineKey) {
   const cfg = WEBGPU_MODELS[engineKey];
-  const caveat = document.getElementById("engine-caveat");
-  if (caveat) caveat.textContent = cfg?.caveat || "";
   const sub = document.getElementById("pipeline-sub");
   if (sub) {
     sub.textContent =
@@ -537,12 +537,47 @@ async function clipEmbed(sourceCanvas) {
 
   const inName = sessClip.inputNames[0];
   const res = await sessClip.run({ [inName]: new ort.Tensor("float32", out, [1, 3, CLIP_SIZE, CLIP_SIZE]) });
-  const e = res[Object.keys(res)[0]].data;
+  const e = pickEmbedding(res).data;
+  // L2-normalise the feature coordinates only. The last one is a constant `1.0`
+  // appended to the model's output to carry the probe's bias term, and dividing
+  // it by the feature norm shrinks it by that same factor (~40x here), which
+  // throws away most of the bias.
+  const feats = EMB ? EMB.dim : e.length;
   let norm = 0;
-  for (let i = 0; i < e.length; i++) norm += e[i] * e[i];
-  norm = Math.sqrt(norm);
-  for (let i = 0; i < e.length; i++) e[i] /= norm;
+  for (let i = 0; i < feats && i < e.length; i++) norm += e[i] * e[i];
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < feats && i < e.length; i++) e[i] /= norm;
   return e;
+}
+
+/**
+ * Which of a model's outputs is the embedding.
+ *
+ * Selected by width, checked against the head's dimension, then by name - never
+ * by position. `Object.keys()` sorts integer-like keys ahead of string keys, so
+ * a graph whose outputs are `1747` and `culico_embedding` yields `1747` first
+ * regardless of the order the graph declares them in. Reading positionally would
+ * hand an 18-element probe-logit vector to a softmax whose rows are 1153 wide,
+ * every product past index 17 becomes `undefined * number` = NaN, and the
+ * non-finite guard in `verdictFrom` returns "not confident" for every photo.
+ * H/14 and B/16 have a single output, which is why this only ever bit culico.
+ */
+function pickEmbedding(res) {
+  const want = EMB ? EMB.dim : null;
+  const keys = Object.keys(res);
+  if (want) {
+    for (const k of keys) {
+      const t = res[k];
+      if (t && t.dims && t.dims.length === 2 && t.dims[1] === want) return t;
+    }
+  }
+  for (const k of keys) {
+    if (/embedding|embed/i.test(k) && res[k]?.data) return res[k];
+  }
+  throw new Error(
+    `No embedding among the model's outputs (${keys.join(", ")}); none is ${want} wide. ` +
+    `The app reads features, not classifier logits.`
+  );
 }
 
 // Temperature 2.5, applied by dividing the logit scale. Measured on the 112-image
