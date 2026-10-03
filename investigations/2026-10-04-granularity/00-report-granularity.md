@@ -178,3 +178,57 @@ no posterior could be shaped.
   engine-selector tests, which are timing-sensitive and were still being
   re-run. The box had every CORS-allowlisted port held by another clone for long
   stretches, so several runs never got a server.
+
+## What each state actually renders
+
+Captured against the built `dist/` with the head swapped through the test seam, one
+screenshot per state in `screenshots/`, reproducible with
+`npx vite preview --port 5050` and `node screenshots/shoot.mjs` (no model: the
+posterior is set through the same seam the e2e helper uses).
+
+**culico, 90% on a grouped species** (`screenshots/culico-grouped-species.png`):
+
+```
+#score-uncertain   Aedes (vexans / geniculatus / cinereus not separable)
+score list         8 rows
+  Aedes (vexans / geniculatus / cinereus not separable)      90.0%
+  🔗 Aedes albopictus (Asian tiger mosquito)                 0.7%
+  🔗 Aedes aegypti (Yellow fever mosquito)                    0.7%
+  🔗 Aedes japonicus (Asian bush mosquito)                    0.7%
+  🔗 Aedes koreicus (Korean mosquito)                         0.7%
+  Culex (pipiens / torrentium / quinquefasciatus not separable) 0.7%
+results table      aedes_vexans.jpg | Aedes | 94.0% |
+                   Aedes (vexans / geniculatus / cinereus not separable) | 90.0%
+```
+
+**culico, 90% on a separable species** (`culico-singleton-species.png`): the
+sentence is empty, the top row is the binomial with its link and common name, and
+the table reads `Aedes albopictus`. The rest of the list still collapses to 8 rows
+— that is a property of the head, not of the photo.
+
+**culico, genus decided with no species over the floor**
+(`culico-genus-decided.png`):
+
+```
+#score-uncertain   Definitely Aedes - most likely albopictus, possibly aegypti or japonicus
+results table      aedes_torn.jpg | Aedes | 81.0% | Aedes (genus only) | 30.0%
+```
+
+**H/14, 90% on the same photo** (`h14-species.png`): 16 rows, sentence empty, top
+row `🔗 Aedes vexans (Inland floodwater mosquito) 90.0%`, table `Aedes vexans`.
+Byte-for-byte what the app printed before this change.
+
+**The dropdown**, from the first screenshot:
+
+```
+⚡ culico-net-cls-v1 (experimental · 81 MB) · genus only
+⚡ WebGPU: BioCLIP B/16 (Ultra-fast · 172 MB)
+💻 WebGPU: BioCLIP 2.5 FP16 (1.25 GB) · Most accurate
+🐢 WebGPU: BioCLIP 2.5 H/14 INT8 (609 MB) — runs on CPU, slow
+⚡ Server (Offline)
+```
+
+One observation from the capture that a test cannot make: the group row carries
+no 🔗 and no common name, because it stands for a class — linking it to one
+member's page would assert the very identification the phrase withholds. The four
+singleton rows keep both.
