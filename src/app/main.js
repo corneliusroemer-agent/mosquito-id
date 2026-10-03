@@ -31,6 +31,7 @@ import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZ
 import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
+import { decodeDets, letterbox, selectDetection } from "./detector";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -515,97 +516,6 @@ async function initEngine() {
 
 const loadModels = () => initEngine();
 
-// ---- Client-Side Inference Helpers ----
-function chwFromCanvas(cv) {
-  const d = cv.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, cv.width, cv.height).data;
-  const n = cv.width * cv.height;
-  const out = new Float32Array(3 * n);
-  for (let i = 0; i < n; i++) {
-    out[i] = d[4 * i] / 255;
-    out[n + i] = d[4 * i + 1] / 255;
-    out[2 * n + i] = d[4 * i + 2] / 255;
-  }
-  return out;
-}
-
-function letterbox(imgCv) {
-  const w = imgCv.width;
-  const h = imgCv.height;
-  const r = Math.min(DET_SIZE / w, DET_SIZE / h);
-  const dw = Math.round(w * r);
-  const dh = Math.round(h * r);
-  const dx = (DET_SIZE - dw) / 2;
-  const dy = (DET_SIZE - dh) / 2;
-
-  const cv = document.createElement("canvas");
-  cv.width = DET_SIZE;
-  cv.height = DET_SIZE;
-  const cx = cv.getContext("2d");
-  cx.fillStyle = "#727272";
-  cx.fillRect(0, 0, DET_SIZE, DET_SIZE);
-  cx.drawImage(imgCv, 0, 0, w, h, Math.round(dx), Math.round(dy), dw, dh);
-
-  return { tensor: new ort.Tensor("float32", chwFromCanvas(cv), [1, 3, DET_SIZE, DET_SIZE]), r, dx, dy };
-}
-
-function decodeDets(outTensor, r, dx, dy) {
-  const data = outTensor.data;
-  const dims = outTensor.dims;
-  const nc = dims[1] - 4;
-  const N = dims[2];
-  const cand = [];
-
-  for (let i = 0; i < N; i++) {
-    let best = -1;
-    let bc = 0;
-    for (let c = 0; c < nc; c++) {
-      const s = data[(4 + c) * N + i];
-      if (s > bc) { bc = s; best = c; }
-    }
-    if (bc < DET_CONF) continue;
-    const cx = data[i];
-    const cy = data[N + i];
-    const w = data[2 * N + i];
-    const h = data[3 * N + i];
-    cand.push({
-      cls: best,
-      conf: bc,
-      box: [(cx - w / 2 - dx) / r, (cy - h / 2 - dy) / r, (cx + w / 2 - dx) / r, (cy + h / 2 - dy) / r]
-    });
-  }
-  cand.sort((a, b) => b.conf - a.conf);
-  const kept = [];
-  for (const c of cand) {
-    if (kept.length >= 300) break;
-    if (kept.every((k) => k.cls !== c.cls || iou(k.box, c.box) <= NMS_IOU)) kept.push(c);
-  }
-  return kept;
-}
-
-function iou(a, b) {
-  const ix1 = Math.max(a[0], b[0]), iy1 = Math.max(a[1], b[1]);
-  const ix2 = Math.min(a[2], b[2]), iy2 = Math.min(a[3], b[3]);
-  const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
-  const aa = (a[2] - a[0]) * (a[3] - a[1]);
-  const bb = (b[2] - b[0]) * (b[3] - b[1]);
-  return inter / (aa + bb - inter);
-}
-
-function selectDetection(dets) {
-  if (!dets || !dets.length) return null;
-  const best = dets[0];
-  const [x1, y1, x2, y2] = best.box;
-  const area = Math.max(1, (x2 - x1) * (y2 - y1));
-  const surrounding = [];
-  for (const candidate of dets) {
-    const [a, b, c, d] = candidate.box;
-    const overlap = Math.max(0, Math.min(x2, c) - Math.max(x1, a)) * Math.max(0, Math.min(y2, d) - Math.max(y1, b));
-    if (overlap / area >= 0.9 && (c - a) * (d - b) >= 2 * area) {
-      surrounding.push(candidate);
-    }
-  }
-  return surrounding.length ? surrounding.reduce((m, c) => (c.conf > m.conf ? c : m), surrounding[0]) : best;
-}
 
 async function clipEmbed(sourceCanvas) {
   const cw = sourceCanvas.width;
