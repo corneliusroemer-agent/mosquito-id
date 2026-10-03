@@ -253,14 +253,11 @@
     margin-bottom: 6px;
   }
   .combined-scores {
-    /* Sized by its content, and that content is fixed in size: the pooled list
-       is always the same ten candidates, so every populated state of this card
-       is exactly as tall as every other and re-pooling never resizes it. The
-       previous fixed 240px scroll area was the opposite of both - it clipped the
-       ten rows into a scroller and reserved two and a third of its height in a
-       card that had nothing pooled to show. 320px is the cap that only a very
-       long species name reaches, and it is where the scrollbar appears. */
-    max-height: 320px;
+    /* A stable scroll area rather than a box that grows with the result: the
+       pooled row count changes with the selection, and a card that grew and
+       shrank with it resized the whole row above the gallery. Content varies,
+       the region does not. */
+    height: 240px;
     overflow-y: auto;
     scrollbar-gutter: stable;
     padding-right: 4px;
