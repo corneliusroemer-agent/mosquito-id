@@ -874,13 +874,25 @@ function serverViewScale() {
   return EMB.logit_scale;
 }
 
+// The adjacent classes - Diptera that a non-expert reads as a mosquito - share
+// the one softmax with the species and the nuisance classes, so "this is a biting
+// midge" competes with "this is a mosquito" on the same numbers rather than
+// through a second, separately-scaled score.
+const ADJACENT_DEFAULT = [];
+
+function adjacentNames() {
+  return EMB.adjacent && EMB.adjacent.length ? EMB.adjacent : ADJACENT_DEFAULT;
+}
+
 function softmaxJoint(emb) {
   const S = EMB.species.length;
   const N = EMB.nuisance.length;
+  const AD = adjacentNames().length;
   const D = EMB.dim;
   const scale = localViewScale();
   const spCos = [];
   const nuCos = [];
+  const adCos = [];
 
   let s = 0;
   for (let i = 0; i < S; i++) {
@@ -896,8 +908,15 @@ function softmaxJoint(emb) {
     s += D;
     nuCos.push(d);
   }
+  s = 0;
+  for (let i = 0; i < AD; i++) {
+    let d = 0;
+    for (let k = 0; k < D; k++) d += EMB.adjacent_emb[s + k] * emb[k];
+    s += D;
+    adCos.push(d);
+  }
 
-  const sims = spCos.concat(nuCos).map((c) => scale * c);
+  const sims = spCos.concat(nuCos, adCos).map((c) => scale * c);
   const mx = Math.max(...sims);
   const ex = sims.map((v) => Math.exp(v - mx));
   const sum = ex.reduce((a, b) => a + b, 0);
@@ -905,7 +924,13 @@ function softmaxJoint(emb) {
 
   const logits = {};
   EMB.species.forEach((name, i) => { logits[name] = scale * spCos[i]; });
-  return { spP: p.slice(0, S), nuP: p.slice(S), spCos, logits };
+  return {
+    spP: p.slice(0, S),
+    nuP: p.slice(S, S + N),
+    adP: p.slice(S + N),
+    spCos,
+    logits
+  };
 }
 
 // Group the species posteriors by genus - the first whitespace-delimited word of
@@ -1020,6 +1045,28 @@ function fuseViews(viewResults) {
   const sum = ex.reduce((a, b) => a + b, 0) + nu;
   const spP = ex.map((e) => e / sum);
   const nuP = [nu / sum];
+
+  // The adjacent classes are pooled the same log-linear way as everything else,
+  // but unlike the nuisance classes they keep their individual identities: the
+  // whole point of having them is to be able to say WHICH non-mosquito it was, so
+  // collapsing them to one number here would throw away the only thing they were
+  // added for. Each view contributes its own adjacent posterior per class, and the
+  // class that survives the pool is the one the views agree on.
+  const adjNames = adjacentNames();
+  const A = adjNames.length;
+  let adP = [];
+  if (A) {
+    const logAd = new Array(A).fill(0);
+    for (const v of viewResults) {
+      for (let i = 0; i < A; i++) logAd[i] += Math.log(Math.max(v.adP[i], 1e-12));
+    }
+    const mxAd = Math.max(logNu, ...logSum, ...logAd);
+    const exAd = logAd.map((l) => Math.exp(l - mxAd));
+    const sumAd = logSum.reduce((a, l) => a + Math.exp(l - mxAd), 0)
+      + Math.exp(logNu - mxAd)
+      + exAd.reduce((a, b) => a + b, 0);
+    adP = exAd.map((e) => e / sumAd);
+  }
 
   // genusScores needs cosine similarities to apply GENUS_MARGIN, and
   // updatePooling needs logits. Recovering both from the fused posterior is not
