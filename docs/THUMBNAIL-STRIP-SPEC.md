@@ -171,6 +171,14 @@ index that no longer names a photo, and used to drop it in silence. The strip is
 the only writer of `includedIndices`, so `renderThumbnails` re-validates the set
 on every render (`validateIncluded`) and nothing dangling survives a delete.
 
+**R4.12 The bulk actions are in the header row, not the strip's row.** `#btn-select-all`,
+`#btn-select-none` and `#btn-delete-all` are descendants of `.gallery-nav`, beside
+`.gallery-arrows` and before it. Nothing but `.thumbnail-strip` may be a sibling of
+the strip. In the strip's row they took horizontal space from the one element in the
+app whose width is a budget, and the strip lost tiles to horizontal scroll because
+of it. The header row is allowed to wrap at widths where the actions and the arrows
+cannot fit; the strip's row has nothing in it that can.
+
 ## 5. Index stability
 
 A tile's index changes whenever a photo before it is deleted. Tile *nodes* are
@@ -265,6 +273,12 @@ Why the rules that are not directly observable:
   The crop's own verdict is deliberately not part of it: the whole frame was
   classified regardless, and a photo named on its frame is the best evidence in
   the batch however the crop went.
+- **The strip's width is a budget, and it is the only one.** Every row in this app
+  can afford to grow; the strip cannot afford to shrink, because a tile that scrolls
+  out of sight is a photo the user cannot reach. The three bulk actions were laid out
+  beside it for the length of this app's life and took ~270 px from it. They are in
+  the header row now (R4.12) because they are about the set of photos rather than
+  about any one of them, and the header row is the row with room to spare.
 - **Ablation, not refinement:** a photo that is neither cropped nor classified has
   no verdict, so the pool has nothing to gate on. Rather than inventing a default,
   it is excluded and named.
