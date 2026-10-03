@@ -24,7 +24,6 @@ import { verdictFrom as _verdictFrom, verdictSentence } from "../confidence/verd
 import { pooledPosterior as _pooledPosterior,
          splitPoolable, poolingWeights, aggregateLogits, aggregateAdjacent,
          pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
-import { render as renderSpeciesPage } from "./speciesPage";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
          FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, resolveModelUrl } from "./modelConfig";
@@ -36,6 +35,7 @@ import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCro
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
 import { downloadCSV, renderResultsTable } from "./resultsTable";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
+import { initRouter } from "./router";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -2097,50 +2097,6 @@ function updatePooling() {
 
 
 
-// ---- Router ----
-//
-// Hash routes, not history.pushState with clean paths. The site is deployed at
-// /mosquito-id/ as plain static files on GitHub Pages, with no rewrite rules:
-// a clean path such as /mosquito-id/species/aedes-albopictus is a 404 on
-// refresh and for anyone the link is shared with, because Pages looks for a
-// file of that name. Everything the router needs is after the '#', which the
-// server never sees, so deep links and reloads work with no server config.
-//
-// The classifier's DOM is never rebuilt, only hidden. That is the whole of the
-// state preservation: previews[], selectedIndex, the crop boxes, the rendered
-// scores and the loaded ONNX sessions all keep living in memory and in the
-// document across a navigation, so nothing has to be serialised or restored.
-
-const CLASSIFIER_TITLE = document.title;
-
-function parseRoute() {
-  const hash = location.hash.replace(/^#/, "");
-  const m = hash.match(/^\/species(?:\/(.*))?$/);
-  if (!m) return { view: "classifier" };
-  return { view: "species", slug: m[1] ? decodeURIComponent(m[1]) : "" };
-}
-
-function showClassifier() {
-  document.querySelector(".app-container").classList.remove("route-off");
-  document.getElementById("kb-view").classList.add("route-off");
-  document.title = CLASSIFIER_TITLE;
-}
-
-function applyRoute() {
-  const route = parseRoute();
-  if (route.view === "classifier") {
-    showClassifier();
-    return;
-  }
-  const app = document.querySelector(".app-container");
-  const kb = document.getElementById("kb-view");
-  app.classList.add("route-off");
-  kb.classList.remove("route-off");
-  window.scrollTo(0, 0);
-  // species.js fetches species-data.json once and caches the promise, so
-  // repeated navigations cost nothing beyond the render.
-  renderSpeciesPage(route.slug, document.getElementById("kb-body"));
-}
 
 // ---- Initialization & Event Listeners ----
 window.addEventListener("DOMContentLoaded", () => {
@@ -2154,8 +2110,12 @@ window.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("resize", invalidateViewerAspectCache);
   window.addEventListener("orientationchange", invalidateViewerAspectCache);
 
-  window.addEventListener("hashchange", applyRoute);
-  applyRoute();
+  // initRouter captures the classifier's own title once and returns the handler
+  // that applies a route against it, so both the initial render and every
+  // subsequent hashchange go through the same function.
+  const onRouteChange = initRouter();
+  window.addEventListener("hashchange", onRouteChange);
+  onRouteChange();
 
   const dropzone = document.getElementById("dropzone");
   const fileInput = document.getElementById("file-input");
