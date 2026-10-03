@@ -107,7 +107,11 @@ describe("the three states", () => {
     expect(v.state).toBe("unsure");
     expect(v.genus).toBeNull();
     expect(v.species).toBeNull();
-    expect(verdictSentence(v)).toBe("Not confident enough to name a genus");
+    // Still an abstention, and it now says what it is torn between: a fixed line
+    // is true of every unconfident photo and so says nothing about any of them.
+    expect(verdictSentence(v)).toMatch(/^Not confident enough to name a genus/);
+    expect(verdictSentence(v)).toContain("pipiens");
+    expect(verdictSentence(v)).toContain("annulata");
   });
 
   it("a genus below the genus floor is not claimed even when a genus leads", () => {
@@ -190,7 +194,7 @@ describe("a disagreement between the views costs the photo its species claim", (
     expect(verdictFrom(head, spP, { agree: true } as never, []).species).toBe("Culex pipiens");
     const v = verdictFrom(head, spP, { agree: false } as never, []);
     expect(v.state).toBe("unsure");
-    expect(verdictSentence(v)).toBe("Not confident enough to name a genus");
+    expect(verdictSentence(v)).toMatch(/^Not confident enough to name a genus/);
   });
 
   it("the disagreement measure is computed once, by fuseViews, and is the same object", () => {
