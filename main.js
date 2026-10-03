@@ -710,6 +710,8 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   clearProgress("model");
   window.modelsReady = true;
   sendLog("webgpu_models_ready", { engine: engineKey, clipEP, detEP });
+  // Photos dropped while this download was running start now.
+  drainQueuedBatches();
 }
 
 async function initEngine() {
@@ -762,6 +764,7 @@ async function initEngine() {
           footerDevice.textContent = `inference: ${serverEngineLabel} · YOLO11n & BioCLIP 2.5 H/14 (Instant)`;
         }
         window.modelsReady = true;
+        drainQueuedBatches();
       } else {
         currentEngine = chosen;
         if (footerDevice) {
@@ -779,6 +782,7 @@ async function initEngine() {
     }
     window.modelsReady = true;
     sendLog("engine_init", { mode: "server", label: serverEngineLabel });
+    drainQueuedBatches();
   } else {
     if (!serverAvailable && optServer) {
       optServer.disabled = true;
@@ -1792,10 +1796,56 @@ async function classifyImage(imgBitmap, filename) {
 }
 
 // ---- Batch Processing ----
-async function processFiles(fileList) {
+// Photos accepted before the engine was ready, or while a batch was running.
+// Draining is driven by the engine-finished path and by the end of a batch, so
+// a queue is a queue rather than a promise nobody keeps.
+let queuedBatches = [];
+
+// The one bit of state worth saying out loud when a drop has to wait: the
+// photos are safe, and what they are waiting for. It lives in the shared
+// progress slot, which is already always present and already the only place
+// transient progress is drawn, so it adds no new element to look at.
+function showEngineLoadingNotice(count) {
+  const slot = document.getElementById("progress-slot");
+  if (!slot) return;
+  slot.style.visibility = "visible";
+  const msg = document.getElementById("progress-msg");
+  if (msg) msg.textContent = `${count} photo${count === 1 ? "" : "s"} queued - waiting for the model to finish loading`;
+  const fill = document.getElementById("progress-fill");
+  if (fill) fill.style.width = "0%";
+}
+
+// Called once the engine is usable. Anything dropped while it was loading starts
+// now, so the queue never needs the user to click a second time.
+function drainQueuedBatches() {
+  if (!queuedBatches.length) return;
   if (isProcessingBatch) return;
+  if (currentEngine !== "server-gpu" && (!sessDet || !sessClip)) return;
+  const next = queuedBatches.shift();
+  sendLog("process_files_drain", { count: next.length });
+  processFiles(next);
+}
+
+async function processFiles(fileList) {
+  if (isProcessingBatch) {
+    // A drop during a batch is not nothing: the photos have to run, so they
+    // queue behind the batch rather than being dropped on the floor. Silently
+    // refusing them is the same "clicks that go nowhere" as any other.
+    queuedBatches.push(Array.from(fileList));
+    sendLog("process_files_queued", { count: fileList.length });
+    setProgress("batch", `Queued ${queuedBatches.reduce((n, b) => n + b.length, 0)} more photos…`, null);
+    return;
+  }
   if (currentEngine !== "server-gpu" && (!sessDet || !sessClip)) {
-    console.warn("Models not loaded yet for", currentEngine);
+    // Dropping photos before the model is ready used to be a console.warn and
+    // nothing else: the drop zone took the files, showed no error, added no
+    // tiles, and looked broken. The model takes a while to arrive, so this is
+    // the first thing most people do. Queue the photos instead, and let the
+    // engine-finished path below pick them up.
+    console.warn("Models not loaded yet for", currentEngine, "- queueing", fileList.length, "files");
+    queuedBatches.push(Array.from(fileList));
+    sendLog("process_files_queued", { count: fileList.length, reason: "models_loading" });
+    showEngineLoadingNotice(fileList.length);
     return;
   }
   isProcessingBatch = true;
@@ -2005,6 +2055,12 @@ async function processFiles(fileList) {
   updatePooling();
   renderResultsTable();
   sendLog("process_files_completed", { added: slots.length, total: previews.length });
+
+  // Anything dropped or queued while this batch ran goes next, before the
+  // progress slot is handed back to a model load.
+  if (queuedBatches.length) {
+    drainQueuedBatches();
+  }
 }
 
 // A batch result lands on its own slot, under the same guard a crop release
@@ -3169,34 +3225,77 @@ function downloadCSV() {
 }
 
 // Sample Photos Loader
+const SAMPLE_NAMES = [
+  "IMG-20261002-WA0007.jpeg",
+  "PXL_20261002_182523087.jpg",
+  "PXL_20261002_182614990.jpg",
+  "PXL_20261002_182628741.jpg",
+  "PXL_20261002_182632161.jpg",
+  "PXL_20261002_182639488.jpg",
+  "PXL_20261002_182720758.jpg",
+  "PXL_20261002_182737596.jpg",
+  "PXL_20261002_182741226.jpg",
+  "PXL_20261002_182754446.jpg"
+];
+
+// One sample, as a File. Kept separate so the preload below can populate the
+// cache and the click below can read it, without fetching twice.
+async function fetchSampleFile(name) {
+  const resp = await fetch(`samples/${name}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  return new File([blob], name, { type: blob.type || "image/jpeg" });
+}
+
+const sampleFileCache = new Map();
+async function getSampleFile(name) {
+  if (!sampleFileCache.has(name)) {
+    sampleFileCache.set(name, fetchSampleFile(name));
+  }
+  return sampleFileCache.get(name);
+}
+
+// All ten at once, bounded so a cold cache on a phone does not open ten
+// connections for images nobody asked for.
+//
+// The sequential version paid ten round trips back to back, and the wait was
+// visible: the button did nothing until the last download landed.
+const SAMPLE_PREFETCH_CONCURRENCY = 5;
+async function prefetchSamples() {
+  const names = SAMPLE_NAMES.slice();
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(SAMPLE_PREFETCH_CONCURRENCY, names.length) }, async () => {
+    for (;;) {
+      const idx = i++;
+      if (idx >= names.length) return;
+      try {
+        await getSampleFile(names[idx]);
+      } catch (e) {
+        // A sample that will not prefetch must not poison the cache: drop it so
+        // the click retries rather than replaying this failure forever.
+        sampleFileCache.delete(names[idx]);
+        console.warn("Could not prefetch sample:", names[idx], e);
+      }
+    }
+  }));
+}
+
 async function loadSamplePhotos() {
   sendLog("sample_photos_clicked");
-  const sampleNames = [
-    "IMG-20261002-WA0007.jpeg",
-    "PXL_20261002_182523087.jpg",
-    "PXL_20261002_182614990.jpg",
-    "PXL_20261002_182628741.jpg",
-    "PXL_20261002_182632161.jpg",
-    "PXL_20261002_182639488.jpg",
-    "PXL_20261002_182720758.jpg",
-    "PXL_20261002_182737596.jpg",
-    "PXL_20261002_182741226.jpg",
-    "PXL_20261002_182754446.jpg"
-  ];
-  const files = [];
-  for (const name of sampleNames) {
-    try {
-      const resp = await fetch(`samples/${name}`);
-      if (resp.ok) {
-        const blob = await resp.blob();
-        files.push(new File([blob], name, { type: blob.type || "image/jpeg" }));
-      }
-    } catch (e) {
-      console.warn("Could not fetch sample:", name, e);
+  setProgress("samples", "Fetching sample photos…", null);
+  const results = await Promise.allSettled(SAMPLE_NAMES.map(getSampleFile));
+  clearProgress("samples");
+  const files = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  for (let i = 0; i < results.length; i++) {
+    if (results[i].status === "rejected") {
+      sampleFileCache.delete(SAMPLE_NAMES[i]);
+      console.warn("Could not fetch sample:", SAMPLE_NAMES[i], results[i].reason);
     }
   }
   if (files.length) {
     processFiles(files);
+  } else {
+    setProgressError("Could not load the sample photos.");
   }
 }
 
@@ -3390,4 +3489,20 @@ window.addEventListener("DOMContentLoaded", () => {
     setProgress("model", null, null);
     setProgressError(`Error: ${err.message}`);
   });
+
+  // Warm the sample photos once the page is up, in the background.
+  //
+  // Deliberately after the engine load is started and never awaited: the model is
+  // the long pole and must not queue behind ten images, and the first render
+  // must not either. `requestIdleCallback` keeps the download off the frames the
+  // user is actually looking at; the setTimeout is the fallback for a browser
+  // without it.
+  const warmSamples = () => {
+    prefetchSamples().catch(err => console.warn("Sample prefetch failed", err));
+  };
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(warmSamples, { timeout: 3000 });
+  } else {
+    setTimeout(warmSamples, 1500);
+  }
 });
