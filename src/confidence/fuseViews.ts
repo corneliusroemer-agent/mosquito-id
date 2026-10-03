@@ -156,6 +156,10 @@ export function fuseViews(
     viewResults.map((v) => v.spP),
     spP,
   );
+  // `nuP` goes to the gate as well as to the caller. It used to stop here, which
+  // is why a photograph of a wall could be named a species: the nuisance rows are
+  // the ones that describe a non-insect picture, and the gate only ever saw the
+  // adjacent block.
   // The per-class non-mosquito posteriors keyed by the plain-language name, so
   // the score panel can say WHICH non-mosquito it is without re-deriving the
   // softmax. A class the head does not carry is simply absent here and the
@@ -176,6 +180,6 @@ export function fuseViews(
     nViews: V,
     adjacentDetail,
     agreement,
-    verdict: verdictFrom(head, spP, agreement, adP, floors),
+    verdict: verdictFrom(head, spP, agreement, adP, floors, nuP),
   };
 }

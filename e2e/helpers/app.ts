@@ -21,7 +21,7 @@ export interface MosqAsync {
   selectedIndex: number;
   includedIndices: Set<number>;
   embeds: any;
-  verdictFrom: (spP: number[], agreement: unknown, adP: number[]) => any;
+  verdictFrom: (spP: number[], agreement: unknown, adP: number[], nuP?: number[]) => any;
   verdictSentence: (v: any) => string;
   selectPhoto: (i: number) => void;
   processFiles: (files: FileList | File[]) => Promise<void>;
@@ -123,6 +123,18 @@ export interface PhotoSpec {
   top?: number;
   /** Adjacent mass, for the `non-mosquito` state. */
   adjTop?: number;
+  /**
+   * Nuisance class NAME, for a `non-mosquito` state tripped by the nuisance block
+   * rather than the adjacent one - a photograph of a wall, a hand, a plant.
+   *
+   * The two are separate states to the user even though they share
+   * `state: "non-mosquito"`: a midge is a finding and is named as one, a wall is
+   * an absence and is reported as one. `nuTop` carries the mass, the same way
+   * `adjTop` does for the adjacent block.
+   */
+  nuisance?: string;
+  /** Nuisance mass, for a nuisance-block `non-mosquito`. */
+  nuTop?: number;
   pending?: boolean;
   error?: string | null;
   is_cropped?: boolean;
@@ -196,6 +208,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
 
     const N = emb.species.length;
     const ADJ = emb.adjacent.length;
+    const NUI = emb.nuisance.length;
 
     /** Posterior peaked on one species, the remainder spread evenly. */
     const peaked = (idx, top) => {
@@ -206,6 +219,12 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
     /** Adjacent posterior concentrated on one class; the rest are exactly zero. */
     const adjacentP = (idx, top) => {
       const p = new Array(ADJ).fill(0);
+      p[idx] = top;
+      return p;
+    };
+    /** Nuisance posterior concentrated on one class; the rest are exactly zero. */
+    const nuisanceP = (idx, top) => {
+      const p = new Array(NUI).fill(0);
       p[idx] = top;
       return p;
     };
@@ -227,11 +246,20 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
       const spP = peaked(sidx, top);
 
       let adP = [];
+      let nuP = [];
       if (spec.state === "non-mosquito") {
-        const aname = spec.adjacent ?? emb.adjacent[0];
-        const aidx = emb.adjacent.indexOf(aname);
-        if (aidx < 0) throw new Error("fixture names an adjacent class the head lacks: " + aname);
-        adP = adjacentP(aidx, spec.adjTop ?? 0.93);
+        if (spec.nuisance) {
+          // The nuisance block carries its own mass and clears its own floor,
+          // which is a different number from the adjacent one - see Floors.
+          const nidx = emb.nuisance.indexOf(spec.nuisance);
+          if (nidx < 0) throw new Error("fixture names a nuisance class the head lacks: " + spec.nuisance);
+          nuP = nuisanceP(nidx, spec.nuTop ?? 0.9);
+        } else {
+          const aname = spec.adjacent ?? emb.adjacent[0];
+          const aidx = emb.adjacent.indexOf(aname);
+          if (aidx < 0) throw new Error("fixture names an adjacent class the head lacks: " + aname);
+          adP = adjacentP(aidx, spec.adjTop ?? 0.93);
+        }
       }
 
       const detail = Object.fromEntries(emb.species.map((s, j) => [s, spP[j]]));
@@ -259,6 +287,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         adjacentDetail: adP.length
           ? Object.fromEntries(emb.adjacent.map((a, j) => [a, adP[j]]).filter(([, v]) => v > 0))
           : null,
+        nuP: nuP.length ? nuP : null,
         verdict: null,
         pending: spec.pending ?? false,
         error: spec.error ?? null,
@@ -272,8 +301,9 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         fingerprint: "fp_" + i,
         manual_full_photo: false,
       };
-      // The real gate's answer, not ours.
-      p.verdict = A.verdictFrom(spP, null, adP);
+      // The real gate's answer, not ours - and the nuisance posteriors go with it,
+      // because the gate reads that block and the seam drops nothing.
+      p.verdict = A.verdictFrom(spP, null, adP, nuP);
       return p;
     });
 
