@@ -601,6 +601,16 @@
     border-radius: 3px;
     transition: width 0.3s ease;
   }
+  /* The one row shown when the classifier says this is not a mosquito. The
+     warning colour is deliberate and is not the accent: every other row in this
+     panel is a species, so a row in the same blue would read as one more
+     candidate rather than as the answer to a different question. */
+  .score-item.is-not-mosquito .score-item-fill {
+    background: #b45309;
+  }
+  .score-item.is-not-mosquito .species-name-wrap {
+    font-weight: 600;
+  }
 
   /* Species name in a score row opens the standalone species page. */
   .species-kb-link {
