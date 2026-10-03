@@ -8,6 +8,7 @@
  * say why, which is most of the reason this file exists rather than inlining
  * each constant at its use.
  */
+import { PER_GENUS_COSINE_OFFSET } from "../confidence/calibration";
 
 /** Detector input is a square of this side, in pixels. */
 export const DET_SIZE = 640;
@@ -40,6 +41,38 @@ export const TEMPERATURE = 2.5;
 // them cross-origin at all. HuggingFace works, but a free account caps at 1 GB
 // per repository and bioclip_2_5_fp16.onnx is 1207 MB, so it cannot hold the
 // full set however the models are split across repos.
+/**
+ * Per-genus cosine calibration, and which engines it applies to.
+ *
+ * `PER_GENUS_COSINE_OFFSET` was fitted on the H/14 embedding cache, correcting a
+ * prompt artefact in a zero-shot text head. culico's head is a trained linear
+ * probe on a different encoder, so those four numbers are not merely useless for
+ * it - applying them would bias its posteriors with a correction derived from a
+ * model that has nothing to do with it, and the result would look entirely
+ * plausible. So the map is opt-in per engine: only the heads it was fitted
+ * against may set it.
+ *
+ * An engine that omits this gets NO calibration, which is the correct state for
+ * a probe -- its intercepts already carry the class priors the offset would
+ * otherwise be correcting.
+ */
+/** The offsets to pass for an engine the calibration was not fitted for. */
+const EMPTY_OFFSETS: Readonly<Record<string, number>> = Object.freeze({});
+
+export const CALIBRATED_ENGINES: ReadonlySet<string> = new Set(["webgpu-fp16", "webgpu-int8"]);
+
+/**
+ * The cosine offsets to apply for an engine, or an empty map for an engine the
+ * calibration was not fitted for.
+ *
+ * An empty map is NOT the same as no map: `softmaxJoint` defaults to
+ * `PER_GENUS_COSINE_OFFSET` when `opts.offsets` is undefined, so an uncalibrated
+ * engine has to pass `{}` explicitly to opt out.
+ */
+export function cosineOffsetsFor(engineKey: string): Readonly<Record<string, number>> {
+  return CALIBRATED_ENGINES.has(engineKey) ? PER_GENUS_COSINE_OFFSET : EMPTY_OFFSETS;
+}
+
 export const MODEL_BASE_URL =
   "https://pub-2bbf73b4e93d40c9af925724fbd48d51.r2.dev/";
 export const FP16_AVAILABLE = true;
@@ -51,6 +84,16 @@ export interface ModelConfig {
   label: string;
   name: string;
   size: number;
+  /**
+   * A limitation of this model that the user should be told about before they
+   * trust it, shown in the header rather than only in the dropdown text.
+   *
+   * Present on culico because its head is a linear probe fitted on this model's
+   * own features, which gives it a weaker non-mosquito gate than the shipped
+   * BioCLIP text head: it will name a species on a photo with no mosquito in it
+   * more often than H/14 does. That is only acceptable while it is visible.
+   */
+  caveat?: string;
 }
 
 /**
@@ -61,6 +104,17 @@ export interface ModelConfig {
  * key reads as undefined, which the callers already handle.
  */
 export const WEBGPU_MODELS: Record<string, ModelConfig> = {
+  // culico-net-cls-v1: a 21M-parameter TinyViT, 15x smaller than H/14, which
+  // is what makes it the one engine a phone can actually fetch. Experimental:
+  // see the caveat below.
+  "webgpu-culico": {
+    path: "culico-net-cls-v1-17-embed.onnx",
+    embedsPath: "text_embeds_culico.json",
+    label: "culico-net (experimental · 81 MB)",
+    name: "culico-net-cls-v1",
+    size: 85378550,
+    caveat: "Experimental. This model cannot reliably tell a photo with no mosquito in it from one with: its head is a linear probe, so a photograph of a wall is sometimes named as a species. Only photograph mosquitoes with it."
+  },
   "webgpu-b16": {
     path: "bioclip_visual_b16_fp16.onnx",
     embedsPath: "text_embeds_b16.json",
