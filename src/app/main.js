@@ -537,6 +537,33 @@ async function clipEmbed(sourceCanvas) {
 
   const inName = sessClip.inputNames[0];
   const res = await sessClip.run({ [inName]: new ort.Tensor("float32", out, [1, 3, CLIP_SIZE, CLIP_SIZE]) });
+  // DIAGNOSTIC ONLY - reports which graph output this is about to read and how
+  // it lines up with the head, without changing what is read. Remove with the
+  // branch. A head whose ONNX has more than one output (culico exports its probe
+  // logits alongside the embedding) makes `Object.keys(res)[0]` a positional
+  // guess that silently picks the wrong tensor, and nothing downstream says so:
+  // the softmax just returns a non-finite posterior.
+  {
+    const keys = Object.keys(res);
+    const shapes = keys.map((k) => `${k}=[${res[k].dims.join("x")}]`);
+    const first = keys[0];
+    const picked = res[first];
+    const need = EMB?.dim ?? -1;
+    const row0 = EMB?.species_emb?.slice(0, need);
+    let probe = null;
+    if (row0) {
+      const d = row0.reduce((a, v, i) => a + v * (picked.data[i] ?? Number.NaN), 0);
+      probe = { dot: d, finite: Number.isFinite(d) };
+    }
+    sendLog("clip_output_probe", {
+      outputs: shapes,
+      picked: first,
+      pickedDims: picked.dims,
+      headDim: need,
+      first6: Array.from(picked.data.slice(0, 6)),
+      speciesRow0Dot: probe
+    });
+  }
   const e = res[Object.keys(res)[0]].data;
   let norm = 0;
   for (let i = 0; i < e.length; i++) norm += e[i] * e[i];
