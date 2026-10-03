@@ -165,6 +165,41 @@ substrate for `prior-art-search`, both mining skills, and resuming anything at a
 `false` and snapshotted. An earlier investigation had found this on 2026-09-17
 (`investigations/claude-session-rediscoverability/`) and it was still unfixed a fortnight later.
 
+## Third round — 2026-10-03, one session
+
+Reports 06 and 07 mine a single nineteen-hour day rather than the whole corpus, because that day is
+where nearly all of the current behaviour lives: 379 Claude messages plus 68 Antigravity ones, of
+which 137 Claude messages are harness noise (the coordinator ticks, Stop-hook goal echoes, `/compact`,
+compaction summaries). **Every rule in 06 is a rule that was broken at least once that day**, which
+is the property the earlier rounds could not offer.
+
+What changed most, in order:
+
+1. **Shipping cadence became the dominant failure.** Pushing was requested **six separate times**
+   (02:52, 02:53, 03:34, 06:05, 07:16, 15:51). Nine commits ended the day stranded on unmerged
+   branches, including *"this is not a mosquito"* complete and pushed while he believed it was live.
+   **Merge your own work** is now a rule with evidence behind it, not just a preference.
+2. **Verification split into two rules.** *"push if you think you might have a fix, don't let
+   verification be the enemy of progres"* (05:10) and, the same day, two tests found green and
+   measuring nothing (09:32). The reconciliation is **push unverified, never claim unverified**.
+3. **Prioritisation became a recommendation, not a veto** (05:43) — he quotes the agent's own
+   reasoning back, agrees with it, and overrides it anyway.
+4. **Subagent lifecycle got numbers.** Updates every ~10 min (04:53), a real status report rather
+   than *"fine"* (05:23), **~45 minutes then hand off** (16:13), up to 2 subagents of its own for
+   independent perspective (13:40).
+5. **The 45-minute collision was resolved**, not just noted. *"don't let agents assume they have only
+   45 min"* (15:42) sits thirty seconds from *"prefer fresh ones after 45min"* (16:13). They are
+   different objects — **job runtime versus agent lifetime** — and resolving that class of collision
+   is more useful than either rule alone.
+
+**Two things the brief asked for that the evidence does not support**, recorded because a plausible
+rule with no message behind it is worse than no rule: *"draft PRs are for Loculus work only"* and
+*"a green test that measured nothing is worse than no test"*. The first has **no message anywhere** in
+today's corpus, the last sixty transcripts, or the memory notes — every draft PR in the session was
+an agent's choice. The second is real and well-supported, but the agent found it and the coordinator
+relayed it; **Cornelius never stated it as a rule.** Both are flagged in 06 §"Where the record is too
+thin" and in `STANDING-INSTRUCTIONS.md`.
+
 ## A safety finding about the corpus itself
 
 The corpus contains **pasted credentials** — 49 lines of `user_own_words.tsv` match a
@@ -179,15 +214,25 @@ investigation files. The slices live in `tmp/`, which is gitignored, and the `bi
 ## The layout of this directory
 
 ```
-00-synthesis.md              this file — the entry point
+STANDING-INSTRUCTIONS.md     the one page. Read this before dispatching an agent.
+00-synthesis.md              this file — the entry point and the index
 01-task-shapes.md                    subagent 1 — repeated task shapes
-02-standing-corrections.md           subagent 2 — standing corrections
+02-standing-corrections.md           subagent 2 — standing corrections (extended 2026-10-03)
 03-meta-tooling.md                   subagent 3 — questions about the tooling
 04-explaining.md                     subagent 4 — explanation requests
 05-drafting-and-continuity.md        subagent 5 — drafting text, resuming work
+06-session-2026-10-03.md             one day in full: 15 rules, 11 product decisions
+07-unresolved-asks.md                what was asked on 2026-10-03 and is still open
 03-meta-tooling/ 04-explaining/ 05-drafting-and-continuity/   their scratch
 scripts/                             extract_user.py, cluster.py
 ```
+
+`STANDING-INSTRUCTIONS.md` is what to read in the thirty seconds before dispatching an agent. It
+holds only rules that can be traced to a message and a date, one line each, and it is **deliberately
+capped at one page** — if it grows past that it has stopped being usable and belongs back in the
+numbered files, where the evidence and the reasoning live. `06` and `07` are the two most recent
+reports and supersede `02` where they overlap; `02`'s addendum names each extension rather than
+restating it.
 
 Numbered reports at the top level, no script at the top level, and the work committed rather than
 left in `tmp/` where a single `rm` would have lost both subagent reports. `scripts/` is shared

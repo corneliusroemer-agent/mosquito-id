@@ -15,6 +15,8 @@ write-ups so they are readable without either.
 | `2026-10-03-precision/40-precision/97-relabel/` | 640 genus-rank rows recovered to species rank, all human-expert. |
 | `2026-10-04-session-mining.md` | Request-level: 66 rows of what was asked versus what shipped, each with `git log` or served-bytes evidence. |
 | `2026-10-03-rewrite/00-ON-HOLD.md` | **The Svelte rewrite is parked.** No new code, nothing merged, not a source of truth. Read it; port ideas out of it; do not build on it. |
-| `2026-10-01-user-message-mining.md` | Standing corrections and recurring requests. |
+| `2026-10-01-user-message-mining/STANDING-INSTRUCTIONS.md` | **Read this before dispatching an agent.** One page: the rules that must not be violated, each with the message and date behind it. |
+| `2026-10-01-user-message-mining/06-session-2026-10-03.md` | One day in full — 15 rules and 11 product decisions, every one a correction made after an agent got it wrong. |
+| `2026-10-01-user-message-mining/07-unresolved-asks.md` | What was asked on 2026-10-03 and is still open: six never started, five pushed-but-unmerged. |
 
 Written with agents; commit when a finding is worth keeping, not when it is tidy.
