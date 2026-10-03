@@ -5,10 +5,15 @@ element. Every rule here is stated so a test can check it; the rationale section
 at the end carries the rules that are not.
 
 This document is the target, not a description. Entries marked **WRONG IN CODE**
-are places where the implementation currently does something else. `e2e/tier1/
-tile-states.spec.ts` and `e2e/tier1/strip-index-stability.spec.ts` encode the
-tables below as assertions; a change to the strip that breaks a rule here fails
-those tests rather than passing review.
+are places where the implementation currently does something else. `e2e/tier1/tile-states.spec.ts`
+and `e2e/tier1/strip-index-stability.spec.ts` encode the tables below as
+assertions; a change to the strip that breaks a rule here fails those tests
+rather than passing review.
+
+**`strip-index-stability.spec.ts` is committed RED.** Its three failures are the
+reproduction for R5.1–R5.3, kept as tests so the fix is verifiable rather than
+asserted. They are excluded from `npm run test:e2e` for that reason, and from CI;
+they are not passing tests. Everything else in `e2e/tier1/` passes.
 
 ## 1. What a tile is
 

@@ -24,7 +24,51 @@ const tier2 = process.env.MOSQ_E2E_TIER2 === "1";
 // WINNER's dist - a false pass on someone else's build, which is the exact trap
 // BUILD-VERIFICATION.md warns about. The port is therefore per-worktree and
 // derived from the directory name.
-const PORT = Number(process.env.MOSQ_E2E_PORT ?? 4173 + (process.cwd().length % 200));
+//
+// DERIVATION IS CONSTRAINED BY THE R2 CORS ALLOWLIST. The model bucket answers
+// `Access-Control-Allow-Origin` for these origins only:
+//
+//   https://corneliusroemer-agent.github.io
+//   http://127.0.0.1:4173  4199  4299  8100  8153  8907
+//   http://localhost:4173  5173
+//
+// Methods are GET/HEAD; ExposeHeaders is Content-Length, Content-Type, ETag.
+// Content-Length is load-bearing - the app's download bar reads its percentage
+// from it, and without it the bar goes indeterminate with no error.
+//
+// So the per-worktree port must be one of the LOCAL entries above, not an
+// arbitrary offset from 4173: on any other port every model fetch dies with
+// "blocked by CORS policy", and the app does not throw - initEngine's catch only
+// paints the message, `window.modelsReady` stays false forever, and a tier2 test
+// awaiting it HANGS instead of failing. 8907 is usually already taken on this
+// box, so it is last in the list. An unlisted port needs the Cloudflare API
+// token and Cornelius's explicit go-ahead; the account has no S3 route.
+const CORS_LOCAL_PORTS = [4173, 4199, 4299, 8100, 8153, 8907] as const;
+const PORT = Number(
+  process.env.MOSQ_E2E_PORT ??
+    CORS_LOCAL_PORTS[process.cwd().length % CORS_LOCAL_PORTS.length],
+);
+
+// Headless chromium on this box has a SwiftShader WebGPU adapter with no
+// `shader-f16`. All three registered engines ship FP16 or INT8 weights, so every
+// BioCLIP compute pipeline fails to compile:
+//
+//   Error while parsing WGSL: 'f16' type used without 'f16' extension enabled
+//
+// and the classifier then HANGS RATHER THAN THROWS - `InferenceSession.create`
+// with `executionProviders: ["webgpu"]` SUCCEEDS, so the app's WASM fallback
+// never fires; the pipelines are only invalid at dispatch time, so
+// `processFiles` never settles and the photo stays `pending` forever. That is
+// why tier2 must stub `navigator.gpu` before any app script runs, making the
+// webgpu EP genuinely unavailable so the app's own try/catch takes the WASM
+// branch. Measured on that path: models ready in ~6 s, ~2.0 s per photo.
+//
+// This is a property of the HEADLESS ADAPTER, not of the app: real Chrome runs
+// WebGPU fine, which is where the ~164 ms/photo figure comes from.
+//
+// tier2 must also fail loudly rather than hang: bound the `modelsReady` wait
+// and assert on the footer/EP text, so this class of silent failure surfaces as
+// a readable assertion instead of a test timeout with no cause.
 
 const projects: Project[] = [
   {
