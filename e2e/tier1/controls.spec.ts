@@ -74,27 +74,38 @@ test.describe("controls in the populated state", () => {
     await populate(page, POPULATED);
     await settle(page);
 
-    const pooled = page.locator("#combined-scores .combined-candidate").first();
-    const before = await pooled.locator(".species-name-wrap").innerText();
+    // The weighted shares are the thing a checkbox changes. The pooled LEAD can
+    // legitimately stay the same (two Aedes photos still lead whether or not a
+    // Culex one is in the pool), so asserting on the lead would be a test that
+    // passes for the wrong reason. The share of each photo's own row must move.
+    const shares = () =>
+      page.locator("#contribution-table tbody tr").evaluateAll((rows) =>
+        rows.map((r) => ((r as HTMLTableRowElement).cells[1] as HTMLElement).innerText.trim()),
+      );
+
+    const before = await shares();
+    expect(before).toHaveLength(3);
 
     await page.locator("#thumbnail-strip .tile").nth(2).locator(".thumb-optin").uncheck();
     await settle(page);
-
-    // Unchecking a Culex photo when two Aedes ones remain must change the pooled
-    // lead - if the checkbox only flipped a class and left the aggregate alone,
-    // that is a control that goes nowhere.
-    const after = await pooled.locator(".species-name-wrap").innerText();
-    expect(after, "unchecking a photo did not change the pooled result").not.toBe(before);
 
     await expect(
       page.locator("#contribution-table tbody tr", { hasText: "pipiens_01.jpg" }),
     ).toHaveCount(0);
     await expect(page.locator("#contribution-table tbody tr")).toHaveCount(2);
 
+    const after = await shares();
+    expect(after, "unchecking a photo did not change any pooled share").not.toEqual(before);
+    // r=0.5 over two photos is a 50/50 split, whatever the method.
+    expect(after).toEqual(["50.0%", "50.0%"]);
+
     // And back again: the pool must be reachable from the other direction too.
     await page.locator("#thumbnail-strip .tile").nth(2).locator(".thumb-optin").check();
     await settle(page);
     await expect(page.locator("#contribution-table tbody tr")).toHaveCount(3);
+    await expect
+      .poll(async () => (await shares()).join(","))
+      .toBe(before.join(","));
   });
 
   test("select all, select none and delete all each change the gallery", async ({ page }) => {
@@ -123,7 +134,11 @@ test.describe("controls in the populated state", () => {
     // and it says why it is empty.
     await expect(page.locator("#gallery-section")).toBeHidden();
     await expect(page.locator("#combined-card")).toBeVisible();
-    await expect(page.locator("#table-summary")).toHaveText("Processed 0 images.");
+    // The results section is hidden rather than emptied, so its summary still
+    // reads from before the delete. Nothing is visible, so there is nothing to
+    // read; the assertion is on what a user can actually see.
+    await expect(page.locator("#results-table-section")).toBeHidden();
+    await expect(page.locator("#thumbnail-strip .tile")).toHaveCount(0);
   });
 
   test("the strip actions are disabled with no photos and enabled with some", async ({ page }) => {
@@ -204,6 +219,11 @@ test.describe("controls in the populated state", () => {
       { name: "c_01.jpg", state: "species", species: "Culex pipiens", top: 0.5 },
     ]);
     await settle(page);
+
+    // The method radios are inside a collapsed <details>: the card is permanent
+    // but its options are opt-in, and Playwright cannot click what is not laid out.
+    await page.locator("#combined-options summary").click();
+    await expect(page.locator("#combined-options")).toHaveAttribute("open", "");
 
     // "Weight by lead" weights the decisive photo far above the undecided ones,
     // "Equal weight" does not, so the pool's ranking has to move between them.

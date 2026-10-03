@@ -277,7 +277,22 @@ export async function populate(page: Page, specs: PhotoSpec[]): Promise<void> {
     A.renderActivePhoto();
     A.updatePooling();
     A.renderResultsTable();
-    // The tile thumbnails are drawn from a data URL, which is not instantaneous.
+    // Two frames is not enough. The tile images are handed a data URL and the
+    // browser decodes them on its own schedule, and a tile that grows to its
+    // decoded size pushes the footer down - a layout shift charged to whoever
+    // happens to be measuring. Waiting for every tile image to finish decoding is
+    // what makes a later CLS reading mean "the app moved something", not "an
+    // <img> finished loading".
+    await Promise.all(
+      Array.from(document.querySelectorAll<HTMLImageElement>("#thumbnail-strip img")).map((img) =>
+        img.complete && img.naturalWidth > 0
+          ? Promise.resolve()
+          : new Promise((r) => {
+              img.addEventListener("load", () => r(null), { once: true });
+              img.addEventListener("error", () => r(null), { once: true });
+            }),
+      ),
+    );
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null))));
     })();
   `;
@@ -297,12 +312,20 @@ export async function populate(page: Page, specs: PhotoSpec[]): Promise<void> {
  * left over is the app moving something under the user on its own.
  */
 export async function startCls(page: Page): Promise<void> {
+  // Installed ONCE per page. A second `observe({buffered: true})` replays every
+  // entry the browser has buffered since load - including the shift that happened
+  // before the reset - so re-installing the observer on reset silently charges
+  // the pre-reset shift to whatever is being measured afterwards. This is the
+  // whole trap in one line: reset the numbers, never the observer.
   await page.evaluate(() => {
+    if ((window as any).__mosqClsObserver) return;
     window.__mosqCls = 0;
     window.__mosqShiftCount = 0;
     window.__mosqShiftLog = [];
-    new PerformanceObserver((list) => {
+    const obs = new PerformanceObserver((list) => {
       for (const e of list.getEntries() as any[]) {
+        // `hadRecentInput` shifts are the standard's own exclusion: a layout
+        // change the user caused by tapping is not an instability.
         if (e.hadRecentInput) continue;
         window.__mosqCls! += e.value;
         window.__mosqShiftCount!++;
@@ -313,15 +336,39 @@ export async function startCls(page: Page): Promise<void> {
             const n = s.node as Element | null;
             if (!n) return "(detached)";
             const id = n.id ? `#${n.id}` : "";
-            const cls = n.className && typeof n.className === "string"
-              ? `.${n.className.trim().split(/\s+/).slice(0, 2).join(".")}`
-              : "";
+            const cls =
+              n.className && typeof n.className === "string"
+                ? `.${n.className.trim().split(/\s+/).slice(0, 2).join(".")}`
+                : "";
             return `${n.tagName.toLowerCase()}${id}${cls}`;
           })
           .join(" <- ");
         window.__mosqShiftLog!.push(`+${e.value.toFixed(5)} ${src || "(no source)"}`);
       }
-    }).observe({ type: "layout-shift", buffered: true });
+    });
+    // `buffered: false`: only shifts from here on. The alternative replays history.
+    obs.observe({ type: "layout-shift", buffered: false });
+    (window as any).__mosqClsObserver = obs;
+  });
+}
+
+/**
+ * Zero the CLS counter.
+ *
+ * Call this once the gallery is up and laid out, before measuring. Revealing a
+ * `display:none` gallery is one large shift, and it belongs to the harness's setup
+ * rather than to the app: `index.html` ships the gallery hidden and only
+ * `processFiles` unhides it, so every photo in the very first batch is measured
+ * against a section that was not there a frame earlier.
+ * `tests/full-photo-contain-probe.mjs` zeroes the counter at exactly this point
+ * and says so; the two measurements are meant to be comparable.
+ */
+export async function resetCls(page: Page): Promise<void> {
+  await startCls(page);
+  await page.evaluate(() => {
+    window.__mosqCls = 0;
+    window.__mosqShiftCount = 0;
+    window.__mosqShiftLog = [];
   });
 }
 
@@ -329,11 +376,35 @@ export function readCls(page: Page): Promise<number> {
   return page.evaluate(() => window.__mosqCls ?? 0);
 }
 
-/** Two animation frames: enough for the app's `afterNextPaint` and any queued render. */
+/**
+ * Wait for the app's queued render to have painted.
+ *
+ * Two animation frames cover `afterNextPaint` and any render already queued. It
+ * deliberately does NOT wait for image decoding - use `resetCls` after a
+ * `populate` when the reading has to exclude decode-driven growth, and see the
+ * note there.
+ */
 export async function settle(page: Page): Promise<void> {
   await page.evaluate(
     () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null)))),
   );
+}
+
+/** `settle`, plus every tile thumbnail decoded. The state a CLS reading needs. */
+export async function settleDecoded(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    await Promise.all(
+      Array.from(document.querySelectorAll<HTMLImageElement>("#thumbnail-strip img")).map((img) =>
+        img.complete && img.naturalWidth > 0
+          ? Promise.resolve()
+          : new Promise((r) => {
+              img.addEventListener("load", () => r(null), { once: true });
+              img.addEventListener("error", () => r(null), { once: true });
+            }),
+      ),
+    );
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null))));
+  });
 }
 
 export const test = base;

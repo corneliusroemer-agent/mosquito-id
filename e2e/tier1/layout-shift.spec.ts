@@ -1,4 +1,4 @@
-import { test, expect, boot, populate, settle, startCls, readCls, errors } from "../helpers/app";
+import { test, expect, boot, populate, settle, settleDecoded, resetCls, readCls, errors } from "../helpers/app";
 import type { PhotoSpec } from "../helpers/app";
 
 /**
@@ -24,9 +24,12 @@ const BATCH: PhotoSpec[] = Array.from({ length: 10 }, (_, i) => ({
 test.describe("cumulative layout shift", () => {
   test("a batch landing moves nothing", async ({ page }) => {
     await boot(page);
-    await startCls(page);
-
     await populate(page, BATCH);
+    // Zeroed after the gallery is up: the unhide is the harness's shift, not the
+    // app's. What is measured here is photos landing into an OPEN gallery.
+    await settleDecoded(page);
+    await resetCls(page);
+    await page.evaluate(() => window.__mosqAsync!.renderThumbnails());
     await settle(page);
 
     expect(await readCls(page), await describeShifts(page)).toBe(0);
@@ -36,7 +39,7 @@ test.describe("cumulative layout shift", () => {
   test("moving the selection around moves nothing", async ({ page }) => {
     await boot(page);
     await populate(page, BATCH);
-    await startCls(page);
+    await resetCls(page);
 
     for (let i = 0; i < 10; i++) {
       await page.locator("#thumbnail-strip .tile").nth(i).locator(".tile-btn").click();
@@ -48,7 +51,7 @@ test.describe("cumulative layout shift", () => {
   test("selecting and deselecting photos moves nothing", async ({ page }) => {
     await boot(page);
     await populate(page, BATCH);
-    await startCls(page);
+    await resetCls(page);
 
     await page.locator("#btn-select-none").click();
     await settle(page);
@@ -68,7 +71,7 @@ test.describe("cumulative layout shift", () => {
   test("deleting the leftmost and the last photo moves nothing", async ({ page }) => {
     await boot(page);
     await populate(page, BATCH);
-    await startCls(page);
+    await resetCls(page);
 
     // Leftmost first: it is the case that renumbers every tile after it and
     // shifts the selection down, so it is the one that would move the page if
@@ -89,9 +92,12 @@ test.describe("cumulative layout shift", () => {
     // The measured value the requirement names is the total across all of it, not
     // each step alone: four steps that each shift 0.4 sum to a CLS that fails.
     await boot(page);
-    await startCls(page);
-
     await populate(page, BATCH);
+    // Zeroed after the gallery is up: the unhide is the harness's shift, not the
+    // app's. What is measured here is photos landing into an OPEN gallery.
+    await settleDecoded(page);
+    await resetCls(page);
+    await page.evaluate(() => window.__mosqAsync!.renderThumbnails());
     await settle(page);
     const afterBatch = await readCls(page);
 
@@ -118,8 +124,8 @@ test.describe("cumulative layout shift", () => {
       { name: "a_02.jpg", state: "unsure", species: "Aedes aegypti" },
       { name: "c_01.jpg", state: "species", species: "Culex pipiens" },
     ]);
-    await settle(page);
-    await startCls(page);
+    await settleDecoded(page);
+    await resetCls(page);
 
     await page.evaluate(async () => {
       const A = window.__mosqAsync!;

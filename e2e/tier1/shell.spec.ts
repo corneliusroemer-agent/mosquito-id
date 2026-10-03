@@ -28,10 +28,17 @@ test.describe("the built site", () => {
     const scripts = await page.evaluate(() =>
       Array.from(document.querySelectorAll("script[src]")).map((s) => (s as HTMLScriptElement).src),
     );
+    // The ENTRY script is the thing that distinguishes a built page from a dev
+    // server: jszip is loaded from a CDN and is legitimately not ours.
     expect(scripts.length).toBeGreaterThan(0);
+    const entry = scripts.filter((s) => !s.includes("cdn.jsdelivr.net"));
+    expect(entry, "no first-party script on the page").toHaveLength(1);
+    expect(
+      entry[0],
+      "the served page must reference the built bundle, not /src/app/main.js",
+    ).toMatch(/\/assets\/index-[\w-]+\.js$/);
     for (const src of scripts) {
-      expect(src, "the served page must reference the built bundle").toMatch(/\/assets\/index-[\w-]+\.js$/);
-      expect(src, "a dev-server path means dist/ was not served").not.toContain("/src/");
+      expect(src, "a /src/ path means the dev server answered instead of dist/").not.toContain("/src/");
     }
     const styles = await page.evaluate(() =>
       Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map((l) => (l as HTMLLinkElement).href),
@@ -63,9 +70,10 @@ test.describe("the built site", () => {
     // simply stops spinning tells the user nothing to act on.
     await page.evaluate(async () => {
       const A = window.__mosqAsync!;
-      const emb = A.embeds;
-      const spP = new Array(emb.species.length).fill(0.05);
-      spP[emb.species.indexOf("Aedes aegypti")] = 0.7;
+      // The embeddings are not loaded in this tier (no model session builds them),
+      // and this test needs none of the arithmetic - a failed photo has no verdict
+      // at all. Only the canvas is needed.
+      void A;
       const p: any = {
         name: "broken.jpg",
         fullCanvas: document.createElement("canvas"),
@@ -92,11 +100,24 @@ test.describe("the built site", () => {
 
     await expect(page.locator("#photo-name")).toContainText("broken.jpg");
     await expect(page.locator("#photo-name")).toContainText(/analysis failed/i);
-    // The row exists and says the photo was not analysed, rather than carrying
-    // zeros as though it were.
+    // The row exists and its four unknown cells are EMPTY rather than carrying
+    // zeros or a name: a colspan there changed the table's column widths and the
+    // replaced text changed the row's height, which moved the row below it on
+    // every photo that finished.
     const row = page.locator("#results-table tbody tr").first();
     await expect(row).toContainText("broken.jpg");
-    await expect(row).toContainText("-");
+    await expect(row).toHaveClass(/row-pending/);
+    const cells = await row.locator("td").evaluateAll((tds) =>
+      tds.map((t) => (t as HTMLElement).innerText.trim()),
+    );
+    expect(cells).toHaveLength(5);
+    expect(cells[0]).toContain("broken.jpg");
+    expect(cells.slice(1), "a failed photo must not report a genus or a species").toEqual([
+      "",
+      "",
+      "",
+      "",
+    ]);
   });
 
   test("photos dropped before the model is ready are queued, not lost", async ({ page }) => {
