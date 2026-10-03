@@ -1210,7 +1210,11 @@ function renderActivePhoto() {
   const cropEmpty = document.getElementById("crop-empty");
   const zoomedActiveBox = document.getElementById("zoomed-active-crop-box");
 
-  if (p.cropBox && !p.fallback && !p.manual_full_photo && p.contextCanvas) {
+  // Draw whenever there is a context canvas. Reverting to the full photo sets
+  // cropBox = null and manual_full_photo = true while still populating
+  // contextCanvas with the whole image, so gating on cropBox showed the
+  // "full picture used" placeholder over an image that was available.
+  if (p.contextCanvas) {
     surfaceZoomed.style.width = "100%";
     surfaceZoomed.style.height = "100%";
     contextImg.src = p.contextCanvas.toDataURL("image/jpeg", 0.9);
@@ -1221,7 +1225,7 @@ function renderActivePhoto() {
     cropEmpty.style.display = "none";
 
     // Draw where the crop sits within the context region
-    if (zoomedActiveBox && p.contextBox) {
+    if (zoomedActiveBox && p.contextBox && p.cropBox) {
       const [cx1, cy1, cx2, cy2] = p.cropBox;
       const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
       const ctx_w = ctx_x2 - ctx_x1;
@@ -1238,6 +1242,10 @@ function renderActivePhoto() {
       zoomedActiveBox.style.width = `${w}%`;
       zoomedActiveBox.style.height = `${h}%`;
       zoomedActiveBox.style.display = "block";
+    } else if (zoomedActiveBox) {
+      // Showing the whole photo: no crop, so no box to outline. The else branch
+      // that used to hide it no longer runs for this case.
+      zoomedActiveBox.style.display = "none";
     }
   } else {
     contextImg.style.display = "none";
