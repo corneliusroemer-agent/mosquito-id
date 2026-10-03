@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mosquito-id</title>
+<style>
+  :root {
+    --color-accent: #f97316;
+    --color-accent-hover: #ea580c;
+    --color-accent-subdued: rgba(249, 115, 22, 0.15);
+    --body-text-color: #0f172a;
+    --body-text-color-subdued: #64748b;
+    --background-fill-primary: #ffffff;
+    --background-fill-secondary: #f8fafc;
+    --background-fill-tertiary: #f1f5f9;
+    --border-color-primary: #e2e8f0;
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --body-text-color: #f1f5f9;
+      --body-text-color-subdued: #94a3b8;
+      --background-fill-primary: #0b0f19;
+      --background-fill-secondary: #1e293b;
+      --background-fill-tertiary: #334155;
+      --border-color-primary: #334155;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--body-text-color);
+    background: var(--background-fill-primary);
+    line-height: 1.5;
+  }
+  .app-container {
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+  .app-header {
+    margin-bottom: 20px;
+  }
+  .header-titles h1 {
+    margin: 0 0 4px;
+    font-size: 24px;
+    font-weight: 700;
+  }
+  .header-titles .sub {
+    margin: 0 0 12px;
+    color: var(--body-text-color-subdued);
+    font-size: 14px;
+  }
+
+  .card {
+    background: var(--background-fill-secondary);
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-md);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  .load-card {
+    background: #ecfdf5;
+    border-color: #a7f3d0;
+    color: #065f46;
+    margin-top: 8px;
+    padding: 12px 16px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .load-card {
+      background: #064e3b33;
+      border-color: #065f46;
+      color: #6ee7b7;
+    }
+  }
+  .load-msg {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+
+  .progress-bar-track {
+    height: 6px;
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  @media (prefers-color-scheme: dark) {
+    .progress-bar-track { background: rgba(255, 255, 255, 0.15); }
+  }
+  .progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--color-accent);
+    border-radius: 4px;
+    transition: width 0.2s ease;
+  }
+  .load-card .progress-bar-fill {
+    background: #10b981;
+  }
+
+  .top-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    align-items: start;
+    margin-bottom: 16px;
+  }
+  @media (max-width: 768px) {
+    .top-grid { grid-template-columns: 1fr; }
+  }
+
+  .upload-card {
+    display: flex;
+    flex-direction: column;
+    min-height: 280px;
+  }
+  .dropzone {
+    flex: 1;
+    border: 2px dashed var(--border-color-primary);
+    border-radius: var(--radius-md);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+    text-align: center;
+    cursor: pointer;
+    background: var(--background-fill-primary);
+    transition: border-color 0.2s;
+  }
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--color-accent);
+    background: var(--color-accent-subdued);
+  }
+  .dropzone-icon { font-size: 32px; margin-bottom: 8px; }
+  .dropzone-text { font-size: 14px; font-weight: 500; }
+  .dropzone-sub { font-size: 12px; color: var(--body-text-color-subdued); margin-top: 4px; }
+
+  .btn {
+    padding: 8px 16px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--border-color-primary);
+    background: var(--background-fill-primary);
+    color: var(--body-text-color);
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .btn:hover { background: var(--background-fill-tertiary); }
+  .btn-primary {
+    background: var(--color-accent);
+    color: #ffffff;
+    border-color: var(--color-accent);
+  }
+  .btn-primary:hover { background: var(--color-accent-hover); }
+  .btn-sm { padding: 4px 12px; font-size: 12px; }
+
+  .batch-progress {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--body-text-color-subdued);
+  }
+  .batch-progress .progress-bar-track { margin-top: 4px; }
+
+  /* Combined result panel */
+  .combined-card {
+    min-height: 280px;
+    max-height: 480px;
+    overflow-y: auto;
+  }
+  .combined-header h2 {
+    font-size: 16px;
+    margin: 0 0 6px;
+  }
+  .combined-axis {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--body-text-color-subdued);
+    padding-right: 6px;
+    margin-bottom: 6px;
+  }
+  .combined-scores {
+    max-height: 240px;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    padding-right: 4px;
+  }
+  .combined-candidate { margin-bottom: 8px; }
+  .combined-score-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 13px;
+    padding: 2px 0;
+  }
+  .combined-bar-track {
+    height: 5px;
+    background: var(--border-color-primary);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .combined-bar {
+    height: 100%;
+    background: var(--color-accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+  .combined-options {
+    margin-top: 12px;
+    border-top: 1px solid var(--border-color-primary);
+    padding-top: 10px;
+    font-size: 13px;
+  }
+  .combined-options summary {
+    cursor: pointer;
+    color: var(--body-text-color-subdued);
+    font-weight: 500;
+  }
+  .options-body { margin-top: 10px; }
+  .option-field { margin-bottom: 10px; }
+  .option-field label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 4px; }
+  .radio-group { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+  .radio-group label { font-weight: normal; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+  .option-hint { font-size: 11px; color: var(--body-text-color-subdued); margin: 6px 0; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  .data-table th, .data-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border-color-primary); }
+  .data-table th { color: var(--body-text-color-subdued); font-weight: 500; }
+
+  /* Gallery section */
+  .gallery-nav {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 10px;
+    font-size: 14px;
+  }
+  .gallery-nav span { color: var(--body-text-color-subdued); }
+  .gallery-arrows { margin-left: auto; display: flex; gap: 6px; }
+
+  .thumbnail-strip {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-top: 6px;
+    padding-bottom: 8px;
+    margin-bottom: 12px;
+    scrollbar-width: thin;
+  }
+  .tile {
+    position: relative;
+    flex-shrink: 0;
+    width: 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .tile.excluded .tile-btn img {
+    opacity: 0.95;
+  }
+  .tile-btn {
+    position: relative;
+    width: 64px;
+    height: 64px;
+    padding: 0;
+    border: 2px solid transparent;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    cursor: pointer;
+    background: var(--background-fill-tertiary);
+  }
+  .tile.active .tile-btn {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 1px var(--color-accent);
+  }
+  .tile-btn img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    transition: opacity 0.2s, filter 0.2s;
+  }
+  .tile .number {
+    position: absolute;
+    bottom: 2px;
+    left: 2px;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    font-size: 10px;
+    padding: 1px 4px;
+    border-radius: 2px;
+    line-height: 1.1;
+  }
+  .tile .crop-badge {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    background: rgba(220, 38, 38, 0.85);
+    color: #fff;
+  }
+  .tile .crop-badge.cropped {
+    background: rgba(16, 185, 129, 0.9);
+  }
+  .tile-delete-btn {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.75);
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    z-index: 10;
+    opacity: 0.85;
+    transition: opacity 0.15s, background 0.15s, transform 0.15s;
+    padding: 0;
+  }
+  .tile-delete-btn:hover {
+    opacity: 1;
+    background: #ef4444;
+    transform: scale(1.1);
+  }
+  .crop-active-box {
+    position: absolute;
+    border: 2px solid #ef4444;
+    background: rgba(239, 68, 68, 0.15);
+    border-radius: 3px;
+    pointer-events: none;
+    box-sizing: border-box;
+  }
+  .tile .include {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .thumb-optin {
+    margin: 0;
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+    accent-color: var(--color-accent);
+  }
+  .hint { font-size: 12px; color: var(--body-text-color-subdued); margin: 0 0 12px; }
+
+  /* 3-Panel Viewer Grid */
+  .viewer-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
+    align-items: stretch;
+  }
+  @media (max-width: 900px) {
+    .viewer-grid { grid-template-columns: 1fr; }
+  }
+
+  figure, .scores-panel {
+    margin: 0;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--radius-md);
+    background: var(--background-fill-primary);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  figcaption, .scores-header {
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--body-text-color-subdued);
+    border-bottom: 1px solid var(--border-color-primary);
+  }
+  .drag-hint { font-size: 11px; font-weight: normal; color: var(--color-accent); }
+
+  .crop-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 320px;
+    overflow: hidden;
+    position: relative;
+    background: var(--background-fill-secondary);
+  }
+  .crop-surface {
+    position: relative;
+    display: inline-block;
+    cursor: crosshair;
+    touch-action: none;
+    line-height: 0;
+    max-height: 320px;
+    max-width: 100%;
+  }
+  .crop-surface img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    user-select: none;
+  }
+  .crop-rectangle {
+    position: absolute;
+    border: 2px solid var(--color-accent);
+    background: rgba(249, 115, 22, 0.25);
+    pointer-events: none;
+    box-sizing: border-box;
+  }
+  .crop-empty {
+    color: var(--body-text-color-subdued);
+    font-size: 13px;
+  }
+
+  .scores-panel { padding: 0 12px 12px; }
+  .score-list {
+    height: 320px;
+    overflow-y: auto;
+    padding-right: 6px;
+    scrollbar-gutter: stable;
+  }
+  .uncertain {
+    font-size: 13px;
+    color: #b45309;
+    margin: 8px 0;
+  }
+  .score-item { margin: 12px 0; }
+  .score-item-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+  .score-item-track {
+    height: 5px;
+    background: var(--border-color-primary);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .score-item-fill {
+    height: 100%;
+    background: var(--color-accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+
+  .metadata-line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--body-text-color-subdued);
+  }
+
+  .table-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .table-wrap {
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .app-footer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--body-text-color-subdued);
+    margin-top: 32px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color-primary);
+  }
+  .divider { opacity: 0.6; }
+</style>
+</head>
+<body>
+<div class="app-container">
+  <header class="app-header">
+    <div class="header-titles" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
+      <div>
+        <h1 style="margin:0 0 4px;">mosquito-id</h1>
+        <p class="sub" style="margin:0;">Cascade: YOLO11n crop &rarr; BioCLIP 2.5 H/14 analysis</p>
+      </div>
+      <div class="engine-control-box" style="display:flex;align-items:center;gap:8px;">
+        <label for="engine-select" style="font-size:12px;font-weight:600;color:var(--body-text-color-subdued);">ENGINE:</label>
+        <select id="engine-select" class="btn" style="padding:6px 12px;font-size:13px;font-weight:500;border-radius:var(--radius-sm);cursor:pointer;background:var(--background-fill-secondary);">
+          <option value="webgpu-b16">⚡ WebGPU: BioCLIP B/16 (Ultra-fast · 172 MB)</option>
+          <option value="webgpu-fp16" selected>💻 WebGPU: BioCLIP 2.5 FP16 (Fastest GPU · 1.25 GB) · Recommended</option>
+          <option value="webgpu-int8">💻 WebGPU: BioCLIP 2.5 INT8 (WASM/CPU fallback · 609 MB)</option>
+          <option value="server-gpu" id="opt-server">⚡ Server Inference</option>
+        </select>
+      </div>
+    </div>
+    <div id="load-card" class="card load-card" style="display:none;">
+      <div id="load-msg" class="load-msg">Initializing engine...</div>
+      <div class="progress-bar-track"><div id="load-fill" class="progress-bar-fill"></div></div>
+    </div>
+  </header>
+
+  <div class="top-grid">
+    <div class="card upload-card">
+      <div id="dropzone" class="dropzone" tabindex="0">
+        <div class="dropzone-icon">📷</div>
+        <div class="dropzone-text">Drop photos or ZIP · paste images with ⌘V / Ctrl+V</div>
+        <div class="dropzone-sub">or click to browse files</div>
+        <input id="file-input" type="file" multiple accept="image/*,.zip" style="display:none">
+      </div>
+      <button id="btn-samples" class="btn btn-primary" style="margin-top:12px;width:100%;">Try 10 sample photos</button>
+      <div id="batch-progress" class="batch-progress" style="display:none;margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <span id="batch-progress-text" style="font-size:12px;font-weight:500;">Processing photos…</span>
+          <button id="btn-cancel-batch" class="btn btn-sm" style="background:#fee2e2;color:#ef4444;border-color:#fca5a5;padding:2px 8px;font-size:11px;">Abort</button>
+        </div>
+        <div class="progress-bar-track"><div id="batch-progress-fill" class="progress-bar-fill"></div></div>
+      </div>
+    </div>
+
+    <div class="card combined-card" id="combined-card" style="display:none;">
+      <div class="combined-header">
+        <h2>Combined result · checked photos</h2>
+        <div class="combined-axis"><span>−20</span><span>−10</span><span>0 (best)</span></div>
+      </div>
+      <div id="combined-scores" class="combined-scores"></div>
+      <details class="combined-options" id="combined-options">
+        <summary>Aggregation options</summary>
+        <div class="options-body">
+          <div class="option-field">
+            <label>Method</label>
+            <div class="radio-group" id="pooling-methods">
+              <label><input type="radio" name="pooling-method" value="Dependent evidence" checked> Dependent evidence</label>
+              <label><input type="radio" name="pooling-method" value="Accumulate evidence"> Accumulate evidence</label>
+              <label><input type="radio" name="pooling-method" value="Weight by lead"> Weight by lead</label>
+              <label><input type="radio" name="pooling-method" value="Equal weight"> Equal weight</label>
+            </div>
+          </div>
+          <div class="option-field">
+            <label>Assumed correlation between views: <strong id="corr-val">0.50</strong></label>
+            <input type="range" id="corr-slider" min="0" max="1" step="0.05" value="0.5" style="width:100%;">
+          </div>
+          <p class="option-hint">Dependent evidence sums species logits, counts identical crops once, then divides by 1 + (n − 1) × assumed correlation. Scores are relative model affinities.</p>
+          <div class="contribution-table-wrap">
+            <table class="data-table" id="contribution-table">
+              <thead><tr><th>Photo</th><th style="text-align:right">Share (%)</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <div id="gallery-section" class="card gallery-section" style="display:none;">
+    <div class="gallery-nav">
+      <strong>Photos</strong>
+      <span id="gallery-counter">1 / 10</span>
+      <div class="gallery-arrows">
+        <button id="btn-prev" class="btn btn-sm" aria-label="Previous photo">←</button>
+        <button id="btn-next" class="btn btn-sm" aria-label="Next photo">→</button>
+      </div>
+    </div>
+    
+    <div id="thumbnail-strip" class="thumbnail-strip"></div>
+    <p class="hint">Select a photo to inspect it. Check photos of the same mosquito to combine their results.</p>
+
+    <div class="viewer-grid">
+      <!-- 1. Full Photo with Rough Crop -->
+      <figure class="full-photo-figure">
+        <figcaption>Full photo <span class="drag-hint">· rough crop</span></figcaption>
+        <div class="crop-container">
+          <div id="crop-surface-full" class="crop-surface" role="group" aria-label="Drag a rectangle on the photo for rough crop">
+            <img id="full-img" src="" alt="Full photo" draggable="false">
+            <div id="full-active-crop-box" class="crop-active-box" style="display:none;"></div>
+            <div id="full-drag-rect" class="crop-rectangle" style="display:none;"></div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- 2. Zoomed View with 50% Context Margin for Fine-Grained Crop -->
+      <figure class="crop-figure">
+        <figcaption id="crop-caption">Zoomed view <span class="drag-hint">· drag to fine-tune</span></figcaption>
+        <div class="crop-container">
+          <div id="crop-surface-zoomed" class="crop-surface" role="group" aria-label="Drag a rectangle on zoomed view to adjust">
+            <img id="context-img" src="" alt="Zoomed view" draggable="false" style="display:none;">
+            <div id="zoomed-active-crop-box" class="crop-active-box" style="display:none;"></div>
+            <div id="zoomed-drag-rect" class="crop-rectangle" style="display:none;"></div>
+            <div id="crop-empty" class="crop-empty" style="display:none;">No mosquito detected</div>
+          </div>
+        </div>
+      </figure>
+
+      <!-- 3. Species Classification Scores -->
+      <div class="scores-panel">
+        <div class="scores-header">Species scores</div>
+        <p id="score-uncertain" class="uncertain" style="display:none;"></p>
+        <div id="score-list" class="score-list"></div>
+      </div>
+    </div>
+
+    <div class="metadata-line">
+      <span id="photo-name" class="photo-name"></span>
+      <button id="btn-full-photo" class="btn btn-sm" style="display:none;">Use full photo instead</button>
+    </div>
+  </div>
+
+  <div id="results-table-section" class="card results-table-section" style="display:none;">
+    <div class="table-header">
+      <span id="table-summary">Processed 0 images.</span>
+      <button id="btn-csv" class="btn btn-sm">Download CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table" id="results-table">
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Top Complex</th>
+            <th style="text-align:right">Complex Score (%)</th>
+            <th>Top Species</th>
+            <th style="text-align:right">Species Score (%)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer class="app-footer">
+    <span>mosquito-id unified</span>
+    <span class="divider">·</span>
+    <span id="footer-device">inference: initializing...</span>
+    <span class="divider">·</span>
+    <span>Zero-server privacy in WebGPU mode</span>
+  </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.all.min.js"></script>
+<script src="main.js?v=20261003_4"></script>
+</body>
+</html>
