@@ -227,6 +227,11 @@ const ASYNC = (window.__mosqAsync = {
   get sessClip() { return sessClip; },
   get sessDet() { return sessDet; },
   get selectedIndex() { return selectedIndex; },
+  // Test seam. EMB is otherwise only assigned once a classifier session has been
+  // built, so a layout test cannot reach the pooled card without downloading the
+  // 1.26 GB model. Production never writes it.
+  get embeds() { return EMB; },
+  set embeds(v) { EMB = v; },
   selectPhoto,
   processFiles,
   deletePhoto
@@ -2051,14 +2056,20 @@ function renderActivePhoto() {
   for (const [name, score] of sortedScores) {
     const item = document.createElement("div");
     item.className = "score-item";
-    const percent = (score * 100).toFixed(1);
+    // A non-finite score must not reach the bar. Math.min/Math.max propagate NaN,
+    // and `width: NaN%` is an invalid declaration that the browser drops, so the
+    // fill falls back to its default and renders as a FULL-WIDTH bar - a
+    // confident-looking mark next to a number that means nothing. An unusable
+    // score draws nothing.
+    const barPct = Number.isFinite(score) ? Math.max(0, Math.min(100, score * 100)) : 0;
+    const percent = Number.isFinite(score) ? (score * 100).toFixed(1) : "0.0";
     item.innerHTML = `
       <div class="score-item-header">
         <span class="species-name-wrap">${speciesLabelHtml(name)}</span>
         <strong>${percent}%</strong>
       </div>
       <div class="score-item-track">
-        <div class="score-item-fill" style="width: ${Math.max(0, Math.min(100, score * 100))}%"></div>
+        <div class="score-item-fill" style="width: ${barPct}%"></div>
       </div>
     `;
     scoreList.appendChild(item);
@@ -2619,7 +2630,12 @@ function updatePooling() {
   candidates.slice(0, 10).forEach(c => {
     const row = document.createElement("div");
     row.className = "combined-candidate";
-    const widthPct = Math.max(0, Math.min(100, ((c.relScore + 20) / 20) * 100));
+    // Same non-finite guard as the score list: NaN here would be dropped as an
+    // invalid width and the bar would render full, claiming a certainty the
+    // number does not carry.
+    const widthPct = Number.isFinite(c.relScore)
+      ? Math.max(0, Math.min(100, ((c.relScore + 20) / 20) * 100))
+      : 0;
     row.innerHTML = `
       <div class="combined-score-row">
         <span class="species-name-wrap">${speciesLabelHtml(c.name)}</span>
