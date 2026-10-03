@@ -13,6 +13,48 @@ export function adjacentNames(head: Head): string[] {
   return head.adjacent && head.adjacent.length ? head.adjacent : [];
 }
 
+/**
+ * Which rows of an embedding block carry any image information at all.
+ *
+ * A head may carry a bias coordinate: one embedding dimension that `clipEmbed`'s
+ * model graph holds constant, so a linear probe's intercept has somewhere to
+ * live (`Head.biasIndex`, which a head declares rather than this guesses). A row
+ * whose ONLY non-zero weight is that coordinate is a constant vector - it scores
+ * the same on every photograph - so its posterior moves only with how confident
+ * the SPECIES block is, never with what is in the picture. It is a certainty
+ * signal wearing a class label, and a gate that reads it as evidence is reading
+ * the classifier's own hesitation back to it as a finding.
+ *
+ * This is not hypothetical. culico-net-cls-v1's head is a 16-row linear probe,
+ * but it carries the other two blocks because the gate and the score panel read
+ * them: eight nuisance rows and eight adjacent rows that the probe was never
+ * fitted on. Seven of each are placeholders of exactly this shape, so 15 of culico's
+ * 24 non-species classes are constants that tie with each other on every photo.
+ *
+ * A head without a bias coordinate has no such rows, and this returns all-true
+ * for it: the two shipped BioCLIP heads are unaffected, and so is every fixture
+ * that does not declare one.
+ */
+export function informativeRows(
+  head: Head,
+  base: Float32Array | number[] | undefined,
+  n: number,
+): boolean[] {
+  const out = new Array<boolean>(n).fill(false);
+  if (!base) return out;
+  const D = head.dim;
+  const bias = head.biasIndex ?? -1;
+  for (let i = 0; i < n; i++) {
+    let mass = 0;
+    for (let k = 0; k < D; k++) {
+      if (k === bias) continue;
+      mass += Math.abs(Number(base[i * D + k]!));
+    }
+    out[i] = mass > 1e-6;
+  }
+  return out;
+}
+
 export interface JointResult {
   /** Species posteriors, summing with nuP and adP to 1. */
   spP: number[];

@@ -1,6 +1,6 @@
 import type { Agreement, Floors, Head, RunnerUp, Verdict } from "./types";
 import { DEFAULT_FLOORS } from "./types";
-import { adjacentNames } from "./softmax";
+import { adjacentNames, informativeRows } from "./softmax";
 import { speciesGenusIndex } from "./genus";
 
 /** What tripped the non-mosquito gate, and what it is called. */
@@ -45,6 +45,12 @@ export interface GateHit {
  * When both blocks clear, the one whose winning class is more certain wins: that
  * is the claim the photo is actually making, and mixing the two into one message
  * would name a family on the strength of a wall.
+ *
+ * Only rows that can tell photographs apart are read (see informativeRows). The
+ * shipped BioCLIP heads have no rows that cannot, so this changes nothing there;
+ * culico's head does, and on it the nuisance block is entirely such rows, which is
+ * why that block never fires on culico and why it used to fire on 58% of the
+ * in-domain mosquitoes instead.
  */
 export function nonMosquitoGate(
   head: Head,
@@ -52,38 +58,72 @@ export function nonMosquitoGate(
   nuP: number[] | undefined | null,
   floors: Floors = DEFAULT_FLOORS,
 ): GateHit | null {
-  const best = (p: number[] | undefined | null): { i: number; p: number } => {
+  // Only rows that can tell one photograph from another count. A block with no
+  // such rows is not a weak detector, it is no detector, and a floor over its
+  // constant mass is a floor the gate can clear by being unsure - so it is not
+  // read at all. See informativeRows.
+  const keep = (
+    base: Float32Array | number[] | undefined,
+    n: number,
+  ): boolean[] => informativeRows(head, base, n);
+
+  const block = (
+    p: number[] | undefined | null,
+    informative: boolean[],
+  ): { i: number; p: number; mass: number } => {
     let i = -1;
     let top = 0;
+    let mass = 0;
     for (let k = 0; k < (p?.length ?? 0); k++) {
+      if (!informative[k]) continue;
       const v = p![k]!;
-      if (Number.isFinite(v) && v > top) {
+      if (!Number.isFinite(v)) continue;
+      mass += v;
+      if (v > top) {
         top = v;
         i = k;
       }
     }
-    return { i, p: top };
+    return { i, p: top, mass };
   };
-  const sum = (p: number[] | undefined | null): number =>
-    (p ?? []).reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
 
-  const adMass = sum(adP);
-  const nuMass = sum(nuP);
-  const adj = best(adP);
-  const nu = best(nuP);
+  const ad = block(adP, keep(head.adjacent_emb, adjacentNames(head).length));
+  const nu = block(nuP, keep(head.nuisance_emb, head.nuisance?.length ?? 0));
   const adjNames = adjacentNames(head);
 
   const adjHit =
-    adj.i >= 0 && adMass >= floors.nonMosquito
-      ? { kind: "adjacent" as const, name: adjNames[adj.i] ?? "", common: (head.adjacent_common || [])[adj.i] || adjNames[adj.i] || "", p: adj.p, mass: adMass }
+    ad.i >= 0 && ad.mass >= floors.nonMosquito
+      ? { kind: "adjacent" as const, name: adjNames[ad.i] ?? "", common: (head.adjacent_common || [])[ad.i] || adjNames[ad.i] || "", p: ad.p, mass: ad.mass }
       : null;
   const nuHit =
-    nu.i >= 0 && nuMass >= floors.nuisance
-      ? { kind: "nuisance" as const, name: (head.nuisance || [])[nu.i] ?? "", common: (head.nuisance || [])[nu.i] ?? "", p: nu.p, mass: nuMass }
+    nu.i >= 0 && nu.mass >= floors.nuisance
+      ? { kind: "nuisance" as const, name: (head.nuisance || [])[nu.i] ?? "", common: (head.nuisance || [])[nu.i] ?? "", p: nu.p, mass: nu.mass }
       : null;
 
   if (adjHit && nuHit) return adjHit.p >= nuHit.p ? adjHit : nuHit;
   return adjHit || nuHit;
+}
+
+/**
+ * The one class the non-mosquito verdict names, with the mass the gate compared
+ * its floor against.
+ *
+ * The score panel used to promote the highest-scoring ADJACENT class whatever the
+ * verdict had said, which put an adjacent family on top of a nuisance verdict -
+ * and, on a head whose adjacent rows are placeholders that all tie, put whichever
+ * one came first in the file on top of every refusal. The panel now shows the
+ * class the verdict actually named, or nothing when the verdict named none.
+ */
+export function nonMosquitoLabel(
+  v: Verdict | null | undefined,
+): { name: string; p: number } | null {
+  if (!v || v.state !== "non-mosquito") return null;
+  const name =
+    v.nonMosquitoKind === "nuisance"
+      ? v.nuisance
+      : v.adjacentCommon || v.adjacent;
+  if (!name) return null;
+  return { name, p: v.nonMosquitoP || 0 };
 }
 
 /**

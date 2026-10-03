@@ -20,7 +20,7 @@ import { adjacentNames as _adjacentNames, softmaxJoint } from "../confidence/sof
 import { genusScores as _genusScores } from "../confidence/genusScores";
 import { fuseViews as _fuseViews } from "../confidence/fuseViews";
 import { genusOf, speciesGenusIndex } from "../confidence/genus";
-import { verdictFrom as _verdictFrom, verdictSentence } from "../confidence/verdict";
+import { verdictFrom as _verdictFrom, verdictSentence, nonMosquitoLabel } from "../confidence/verdict";
 import { pooledPosterior as _pooledPosterior,
          splitPoolable, poolingWeights, aggregateLogits, aggregateAdjacent,
          pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
@@ -389,6 +389,10 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     for (const k of ["species_emb", "nuisance_emb"]) {
       data[k] = Float32Array.from(data[k]);
     }
+    // The head's one camelCase field, mapped from the file's snake_case like the
+    // rest of it. Which embedding coordinate is the probe's intercept is a fact
+    // about the artefact and the gate needs it - see Head.biasIndex.
+    data.biasIndex = data.bias_index ?? -1;
     embedsCache[targetEmbedsPath] = data;
   }
   EMB = embedsCache[targetEmbedsPath];
@@ -1662,31 +1666,35 @@ function renderActivePhoto() {
     scoreList.appendChild(item);
   }
 
-  // A photo the gate called not-a-mosquito gets the winning non-mosquito class
-  // on top of the list and the mosquito ranking dropped below it, because a
+  // A photo the gate called not-a-mosquito gets the class it was refused as on
+  // top of the list and the mosquito ranking dropped below it, because a
   // sixteen-row ranking of species this photo is not is the exact readout that
   // made a photograph of paper come back as a confident mosquito. The species
   // scores are still in p.detail for the pooling maths - they are simply not the
   // thing to put in front of someone here.
-  if (p.verdict?.state === "non-mosquito" && p.adjacentDetail) {
-    const top = Object.entries(p.adjacentDetail).sort((a, b) => b[1] - a[1])[0];
-    if (top) {
-      const notMosquito = document.createElement("div");
-      notMosquito.className = "score-item is-not-mosquito";
-      const pct = (top[1] * 100).toFixed(1);
-      notMosquito.innerHTML = `
-        <div class="score-item-header">
-          <span class="species-name-wrap">${top[0]}</span>
-          <strong>${pct}%</strong>
-        </div>
-        <div class="score-item-track">
-          <div class="score-item-fill" style="width: ${Math.max(0, Math.min(100, top[1] * 100))}%"></div>
-        </div>
-      `;
-      scoreList.insertBefore(notMosquito, scoreList.firstChild);
-      for (const item of scoreList.querySelectorAll(".score-item:not(.is-not-mosquito)")) {
-        item.style.display = "none";
-      }
+  //
+  // The row reads the VERDICT, not the highest-scoring adjacent class. Those are
+  // not the same thing: a nuisance refusal names no adjacent family at all, and on
+  // a head whose adjacent rows are placeholders that all score equally the top of
+  // that ranking is whichever row the file happens to list first, printed at the
+  // 0.4% it genuinely holds.
+  const refused = nonMosquitoLabel(p.verdict);
+  if (refused) {
+    const notMosquito = document.createElement("div");
+    notMosquito.className = "score-item is-not-mosquito";
+    const pct = (refused.p * 100).toFixed(1);
+    notMosquito.innerHTML = `
+      <div class="score-item-header">
+        <span class="species-name-wrap">${speciesLabelHtml(refused.name)}</span>
+        <strong>${pct}%</strong>
+      </div>
+      <div class="score-item-track">
+        <div class="score-item-fill" style="width: ${Math.max(0, Math.min(100, refused.p * 100))}%"></div>
+      </div>
+    `;
+    scoreList.insertBefore(notMosquito, scoreList.firstChild);
+    for (const item of scoreList.querySelectorAll(".score-item:not(.is-not-mosquito)")) {
+      item.style.display = "none";
     }
   }
 

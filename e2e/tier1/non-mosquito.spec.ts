@@ -36,8 +36,30 @@ test.describe("non-mosquito", () => {
     expect(await visible.count(), "the species ranking must still be in the DOM").toBe(16);
     await expect(visible.first()).toBeHidden();
     // The winning non-mosquito class IS shown, so the answer names what it saw.
+    // The plain-language name, which is what the sentence above it uses and what
+    // `fuseViews` keys `adjacentDetail` by - this fixture's own `adjacentDetail`
+    // was keyed by the family name, which production never was.
     await expect(page.locator("#score-list .score-item.is-not-mosquito")).toHaveCount(1);
-    await expect(page.locator("#score-list .score-item.is-not-mosquito")).toContainText("Chironomidae");
+    await expect(page.locator("#score-list .score-item.is-not-mosquito")).toContainText("a non-biting midge");
+  });
+
+  test("a nuisance-block refusal names what it saw, not a family", async ({ page }) => {
+    // The panel used to promote the top ADJACENT class whatever the verdict had
+    // said, so a photograph of a wall - which names no insect family at all -
+    // still had a midge pinned above it. On culico, where seven of the eight
+    // adjacent rows are placeholders that all score equally, it was "a biting
+    // midge" on every refusal, at the fraction it genuinely held.
+    await boot(page);
+    await populate(page, [
+      { name: "paper.jpg", state: "non-mosquito", nuisance: "a photograph of a wall", nuTop: 0.9 },
+    ]);
+    await settle(page);
+
+    const row = page.locator("#score-list .score-item.is-not-mosquito");
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText("a photograph of a wall");
+    await expect(row).not.toContainText("midge");
+    expect(errors(page)).toHaveLength(0);
   });
 
   test("a non-mosquito photo cannot be opted into the pool", async ({ page }) => {

@@ -23,10 +23,10 @@
 // investigations/2026-10-04-score-hardening/.
 import { describe, it, expect, beforeAll } from "vitest";
 import { realHead, post, adjPost, nuPost, splitHead, splitEmb, AD, NU, S } from "./fixtures";
-import type { Head } from "../src/confidence/types";
+import type { Head, Verdict } from "../src/confidence/types";
 import { DEFAULT_FLOORS } from "../src/confidence/types";
 import { softmaxJoint } from "../src/confidence/softmax";
-import { verdictFrom, verdictSentence, nonMosquitoGate } from "../src/confidence/verdict";
+import { verdictFrom, verdictSentence, nonMosquitoGate, nonMosquitoLabel } from "../src/confidence/verdict";
 
 let head: Head;
 beforeAll(() => {
@@ -235,5 +235,114 @@ describe("the floors are separate numbers for separate claims", () => {
     expect(j.nuP[0]).toBeLessThan(DEFAULT_FLOORS.nonMosquito);
     // And the gate that actually ships does fire on it.
     expect(nonMosquitoGate(h, [], j.nuP, DEFAULT_FLOORS)!.kind).toBe("nuisance");
+  });
+});
+
+/**
+ * A head whose non-species blocks are mostly placeholders.
+ *
+ * culico-net-cls-v1 is a 16-row linear probe whose graph appends a constant
+ * coordinate for the intercept, so `Head.biasIndex` points at the last one and
+ * the other fifteen classes it carries were never fitted. Modelling that shape
+ * here rather than reaching for the shipped file keeps this about the rule; the
+ * shipped file's own shape is pinned separately below.
+ *
+ *   dim 4, bias at index 3. Species rows on 0 and 1; every nuisance row and the
+ *   first two adjacent rows are (0,0,0,-20) - constants; the third adjacent row
+ *   is (0,0,1,-20) - the one row that can tell a photograph from another.
+ */
+function placeholderHead(): Head {
+  const rows = (r: number[][]): number[] => r.flat();
+  const species_emb = rows([[1, 0, 0, 0], [0, 1, 0, 0]]);
+  const nuisance_emb = rows([[0, 0, 0, -20], [0, 0, 0, -20]]);
+  const adjacent_emb = rows([[0, 0, 0, -20], [0, 0, 0, -20], [0, 0, 1, -20]]);
+  return {
+    species: ["Aedes aegypti", "Culex pipiens"],
+    nuisance: ["a photograph of a wall", "a photograph of a hand"],
+    adjacent: ["Ceratopogonidae", "Chironomidae", "a photograph without a mosquito"],
+    adjacent_common: ["a biting midge", "a non-biting midge", "a photo with no mosquito in it"],
+    dim: 4,
+    logit_scale: 1,
+    biasIndex: 3,
+    species_emb,
+    nuisance_emb,
+    adjacent_emb,
+  };
+}
+
+describe("a block of placeholders is not a detector", () => {
+  // The defect. A placeholder row scores the same on every photograph, so its
+  // posterior rises exactly when the classifier is unsure. Read as evidence, a
+  // block of them fires the gate on hesitation and names whichever row the file
+  // lists first: on culico, "a photograph of a person" on 3,730 of 6,264
+  // in-domain mosquitoes.
+  it("cannot fire the nuisance gate, however much mass it carries", () => {
+    const h = placeholderHead();
+    // All the mass on the placeholders, and none on anything that can tell
+    // photographs apart.
+    const nuP = [0.4, 0.4];
+    expect(nuP.reduce((a, b) => a + b, 0)).toBeGreaterThan(DEFAULT_FLOORS.nuisance);
+    expect(nonMosquitoGate(h, [], nuP, DEFAULT_FLOORS)).toBeNull();
+    const v = verdictFrom(h, post(h, { "Aedes aegypti": 0.9 }), agree, [], DEFAULT_FLOORS, nuP);
+    expect(v.state).not.toBe("non-mosquito");
+    expect(v.nuisance).toBeUndefined();
+  });
+
+  it("cannot fire the adjacent gate, and cannot be the class it names", () => {
+    const h = placeholderHead();
+    const adP = [0.45, 0.45, 0.02];
+    expect(adP[0]! + adP[1]!).toBeGreaterThan(DEFAULT_FLOORS.nonMosquito);
+    expect(nonMosquitoGate(h, adP, [], DEFAULT_FLOORS)).toBeNull();
+  });
+
+  it("still fires on the one row that carries image information", () => {
+    const h = placeholderHead();
+    const adP = [0.02, 0.02, 0.94];
+    const g = nonMosquitoGate(h, adP, [], DEFAULT_FLOORS)!;
+    expect(g.kind).toBe("adjacent");
+    // The fitted background row, not a placeholder that happens to be nearby.
+    expect(g.name).toBe("a photograph without a mosquito");
+    expect(g.common).toBe("a photo with no mosquito in it");
+    expect(g.mass).toBeCloseTo(0.94, 9);
+  });
+
+  it("a head with no bias coordinate is unaffected", () => {
+    // The rule reads a coordinate the head names, so a text head that has none
+    // has every one of its rows read - including rows whose only weight sits
+    // where culico's intercept sits.
+    const h = { ...placeholderHead(), biasIndex: -1 };
+    const nuP = [0.4, 0.4];
+    expect(nonMosquitoGate(h, [], nuP, DEFAULT_FLOORS)!.kind).toBe("nuisance");
+  });
+});
+
+describe("what the score panel is told to name", () => {
+  it("names the nuisance class when the gate tripped on the nuisance block", () => {
+    // The panel used to promote the top ADJACENT class whatever the verdict had
+    // said, so a wall was shown above a midge, and on a head of placeholders it
+    // showed whichever one the file listed first - at the fraction it really
+    // held.
+    const h = placeholderHead();
+    const v = verdictFrom(h, post(h, { "Aedes aegypti": 0.9 }), agree,
+      [0, 0, 0.9], DEFAULT_FLOORS, [0.9, 0]);
+    expect(v.nonMosquitoKind).toBe("adjacent");
+    const l = nonMosquitoLabel(v)!;
+    expect(l.name).toBe("a photo with no mosquito in it");
+    expect(l.p).toBeCloseTo(0.9, 9);
+  });
+
+  it("names the plain-language family for an adjacent verdict", () => {
+    const h = placeholderHead();
+    // A head whose only readable adjacent rows are the fitted background one.
+    const v: Verdict = { state: "non-mosquito", genus: null, species: null, topGenusP: 0, topSpeciesP: 0, runnersUp: [], nonMosquitoKind: "nuisance", nuisance: "a photograph of a wall", nonMosquitoP: 0.12 };
+    expect(nonMosquitoLabel(v)).toEqual({ name: "a photograph of a wall", p: 0.12 });
+    const adj: Verdict = { ...v, nonMosquitoKind: "adjacent", nuisance: undefined, adjacent: "Chironomidae", adjacentCommon: "a non-biting midge", nonMosquitoP: 0.8 };
+    expect(nonMosquitoLabel(adj)!.name).toBe("a non-biting midge");
+  });
+
+  it("is null for every state that named nothing", () => {
+    const h = placeholderHead();
+    expect(nonMosquitoLabel(null)).toBeNull();
+    expect(nonMosquitoLabel(verdictFrom(h, post(h, { "Aedes aegypti": 0.9 }), agree, [], DEFAULT_FLOORS, []))).toBeNull();
   });
 });

@@ -23,6 +23,20 @@ export interface Head {
   adjacent_common?: string[];
   /** Nuisance ("not an insect") classes. Pooled as mass only, never by name. */
   nuisance?: string[];
+  /**
+   * Index of the embedding coordinate that carries the probe's intercept, or
+   * absent/-1 when every coordinate is image information.
+   *
+   * The model graph for such a head appends a constant 1.0 to the embedding and
+   * the head's matching weight column is the intercept, so a row whose only
+   * non-zero weight is this coordinate scores the same on every photograph. The
+   * app has to be told which coordinate this is: it cannot infer it, because a
+   * text head's last coordinate is an ordinary feature. A head that fills a block
+   * with placeholders - which is what fitting 8 nuisance classes for a 16-species
+   * probe requires - then makes those placeholders invisible to the gate rather
+   * than letting them fire it on nothing. See `informativeRows`.
+   */
+  biasIndex?: number;
   species_emb?: Float32Array | number[];
   adjacent_emb?: Float32Array | number[];
   nuisance_emb?: Float32Array | number[];
@@ -162,6 +176,12 @@ export interface Floors {
    * the floor is expensive in the currency it was fitted in and weak in the one
    * it was not - which is why it is one number for one block rather than the
    * gate's single answer.
+   *
+   * Fitted on the BioCLIP H/14 head and applied unchanged to every head. That is
+   * sound wherever the block is made of real rows: culico's adjacent block holds
+   * one fitted row beside seven constants, and read on its own that row clears
+   * this floor on 59% of the held-out negatives and none of the 6,264 in-domain
+   * mosquitoes. See docs/HEADS.md.
    */
   nonMosquito: number;
   /**
@@ -180,6 +200,11 @@ export interface Floors {
    * rate the adjacent block already cost. Raising it to 0.10 buys half that
    * (5.7%) for 17 lost; 0.02 buys 26.9% for 60 lost. 0.05 is the knee, not a
    * round number chosen for how it reads.
+   *
+   * Every number above is H/14's, and a head with no fitted nuisance rows cannot
+   * use this floor at all: the block's mass there is a constant that tracks the
+   * species block's confidence, and 0.05 sits inside culico's healthy range. The
+   * gate does not read such a block at all - see docs/HEADS.md.
    */
   nuisance: number;
   /**
