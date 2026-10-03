@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+    cancel-in-progress: true
 
 jobs:
   deploy:
@@ -22,16 +22,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Stamp the commit into asset URLs
-        run: |
-          # Pages serves assets with max-age=600. The ?v= query is what makes a
-          # new deploy reach browsers that still hold the previous copy, so it
-          # has to change every deploy or it is not a cache buster at all.
-          sed -i "s/\([?&]v=\)[^\"']*/\1${GITHUB_SHA}/g" index.html
-          grep -n '?v=' index.html
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # The lockfile is committed, so `npm ci` is reproducible and fails the
+          # deploy rather than silently resolving different versions.
+          cache: npm
+      # The site is built, not served from the checkout: index.html loads a Vite
+      # bundle whose filename carries a content hash, which is what busts the
+      # cache per deploy. That replaces the old sed that rewrote a ?v= stamp -
+      # there is no query string left to rewrite, and editing the built HTML
+      # would only desync it from the hash Vite derived.
+      - name: Install and build
+        run: npm ci && npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: dist
       - id: deployment
         uses: actions/deploy-pages@v4

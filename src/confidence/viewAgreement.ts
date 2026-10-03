@@ -30,32 +30,11 @@ export function viewAgreement(
   };
   const winners = views.map(argmax);
   const top = argmax(fusedSpP);
-  const ranked = [...fusedSpP].sort((a, b) => b - a);
-  const marginPts = (ranked[0]! - ranked[1]!) * 100;
 
   return {
     agree: winners.every((w) => w === top),
     topSpecies: head.species[top]!,
     runnersUp: head.species.filter((_, i) => winners.includes(i) && i !== top),
-    marginPts,
     fusedTop: fusedSpP[top]!,
   };
-}
-
-/**
- * One-line plain-English rendering of the agreement signal. Not rendered: the
- * two-view agreement was shown as a sentence in the score panel, and the panel
- * shows species scores only. Kept for the data path and for anyone who wants
- * the signal in a tooltip or a log. It is a statement about the photograph, not
- * about the model: it says what the two views of this picture disagree about and
- * how close the call is.
- */
-export function agreementSentence(a: Agreement | null): string {
-  if (!a) return "";
-  if (a.agree) {
-    return `Both views of this photo pick ${a.topSpecies} — the close-up and the whole picture agree.`;
-  }
-  const other = a.runnersUp.length ? a.runnersUp[0]! : null;
-  const gap = other ? `, with ${other} close behind` : "";
-  return `The close-up and the whole picture disagree${gap}. The two leading species are within ${a.marginPts.toFixed(1)} points, so treat this one as undecided.`;
 }

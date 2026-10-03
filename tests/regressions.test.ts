@@ -18,6 +18,8 @@ import {
   pooledVerdict,
   poolingWeights,
   aggregateLogits,
+  aggregateAdjacent,
+  pooledAdjacentPosterior,
   type PoolablePhoto,
 } from "../src/confidence/pooling";
 
@@ -354,22 +356,24 @@ describe("the pooled gate reads the wrong floor for a sharpened pool", () => {
     expect(included).toHaveLength(photos.length);
     const w = poolingWeights(included, "Dependent evidence", 0.5);
     const agg = aggregateLogits(head, included, w);
-    return { spP: pooledPosterior(head, agg)!, verdict: pooledVerdict(head, agg)! };
+    return { spP: pooledPosterior(head, agg)!, verdict: pooledVerdict(head, agg, included)! };
   }
 
-  it("three genus-only blank photos pool into a species claim none of them made", () => {
+  it("three genus-only blank photos cannot pool into a species claim none of them made", () => {
     const { spP, verdict } = poolOf([
       { "Aedes aegypti": 0.355, "Aedes albopictus": 0.25, "Aedes japonicus": 0.215 },
       { "Aedes aegypti": 0.35, "Aedes albopictus": 0.255, "Aedes japonicus": 0.21 },
       { "Aedes aegypti": 0.36, "Aedes albopictus": 0.245, "Aedes japonicus": 0.22 },
     ]);
     const top = Math.max(...spP);
+    // The pooled posterior still crosses the species floor, and still would if
+    // the gate were left to read it - which is the bug, and it is why the gate
+    // is on the photos rather than on this number.
     expect(top).toBeGreaterThan(DEFAULT_FLOORS.species);
-    // This is the shipped behaviour, and it is the bug. Asserted explicitly so
-    // the failure is legible if a fix lands: the expectation below flips to
-    // `not.toBe("species")` when the pool stops reading the species floor.
-    expect(verdict!.state).toBe("species");
-    expect(verdict!.species).toBe("Aedes aegypti");
+    expect(verdict!.state).not.toBe("species");
+    expect(verdict!.species).toBeNull();
+    expect(verdict!.state).toBe("genus");
+    expect(verdict!.genus).toBe("Aedes");
   });
 
   it("the sharpening is the pooling, not the gate: pooling raises the winner monotonically", () => {
@@ -402,14 +406,17 @@ describe("the pooled gate reads the wrong floor for a sharpened pool", () => {
   });
 });
 
-describe("PINNED, currently failing: the pool gates on a distribution it was not fitted on", () => {
+describe("the pool gates on a distribution it was not fitted on", () => {
   /**
-   * The regression test for the pooled-card defect, written to FAIL today.
+   * The regression tests for the pooled-card defect.
    *
-   * It is `it.fails` rather than `it` on purpose: the suite stays green, and the
-   * moment someone fixes the gate this test inverts and says so. Converting it
-   * to a plain `it` at that point is the last step of the fix, and the failure
-   * is what makes sure it is not forgotten.
+   * The species claim is fixed: pooledVerdict now gates on the contributing
+   * photos rather than on the sharpened pool, so the tests that assert that are
+   * plain `it`. The last test in this block stays `it.fails` because it asserts
+   * something the fix deliberately does NOT do - that the pooled posterior
+   * itself stays under the floor. It does not, and should not: the pool really
+   * is sharper than its parts, and the correction is to stop reading a
+   * single-photo threshold off it rather than to flatten the pooling.
    *
    * The arithmetic, with the real head and the real floors:
    *
@@ -463,7 +470,7 @@ describe("PINNED, currently failing: the pool gates on a distribution it was not
     return { photos, specs };
   }
 
-  it.fails("a pool of genus-only photos must not reach a species claim", () => {
+  it("a pool of genus-only photos must not reach a species claim", () => {
     const { photos } = blankPhotos();
     // Precondition: every photo abstained of a species on its own.
     for (const p of photos) {
@@ -474,13 +481,77 @@ describe("PINNED, currently failing: the pool gates on a distribution it was not
     const w = poolingWeights(included, "Dependent evidence", 0.5);
     const agg = aggregateLogits(head, included, w);
     const pooled = pooledPosterior(head, agg)!;
-    // The arithmetic, stated so a failure prints the real numbers.
+    // The arithmetic, stated so a failure prints the real numbers. The pool
+    // still crosses the species floor; the gate no longer reads this number.
     expect(Math.max(...pooled)).toBeCloseTo(0.4625, 3);
-    // THIS is the assertion that fails: the pool names a species no photo named.
-    expect(pooledVerdict(head, agg)!.state).not.toBe("species");
+    expect(pooledVerdict(head, agg, included)!.state).not.toBe("species");
   });
 
-  it.fails("photos below the floor pool to a posterior still below it", () => {
+  it("a pool whose photos all named a species still reaches one", () => {
+    // The gate the fix introduces must not swallow genuine multi-photo species
+    // claims, which is the case the genus-only rule costs real signal on. Three
+    // photos each above SPECIES_CONFIDENCE_FLOOR pool to a species.
+    const head2 = head;
+    const specs: Record<string, number>[] = [
+      { "Aedes aegypti": 0.55, "Aedes albopictus": 0.30, "Aedes japonicus": 0.10 },
+      { "Aedes aegypti": 0.52, "Aedes albopictus": 0.33, "Aedes japonicus": 0.10 },
+      { "Aedes aegypti": 0.58, "Aedes albopictus": 0.28, "Aedes japonicus": 0.09 },
+    ];
+    const photos = specs.map((over, i) => {
+      const rest =
+        (1 - Object.values(over).reduce((a, b) => a + b, 0)) /
+        (head2.species.length - Object.keys(over).length);
+      const p = head2.species.map((s, j) => (s in over ? over[s]! : rest));
+      return {
+        name: `clear-${i}`,
+        fingerprint: `fp-${i}`,
+        scores: Object.fromEntries(head2.species.map((s, j) => [s, p[j]!])),
+        logits: Object.fromEntries(head2.species.map((s, j) => [s, Math.log(p[j]!) + 5])),
+        verdict: verdictFrom(head2, p, null, []),
+      };
+    });
+    // Precondition: every photo named the species on its own.
+    for (const ph of photos) {
+      expect(ph.verdict.state).toBe("species");
+      expect(ph.verdict.species).toBe("Aedes aegypti");
+    }
+    const { included } = splitPoolable(photos);
+    const w = poolingWeights(included, "Dependent evidence", 0.5);
+    const agg = aggregateLogits(head2, included, w);
+    const v = pooledVerdict(head2, agg, included)!;
+    expect(v.state).toBe("species");
+    expect(v.species).toBe("Aedes aegypti");
+  });
+
+  it("one genus-only photo in the pool blocks the species claim for all of them", () => {
+    // The gate is on every contributing photo, not on a majority: a pool whose
+    // evidence never supported a species cannot report one on the strength of
+    // the photos that did.
+    const specs: Record<string, number>[] = [
+      { "Aedes aegypti": 0.55, "Aedes albopictus": 0.30, "Aedes japonicus": 0.10 },
+      { "Aedes aegypti": 0.52, "Aedes albopictus": 0.33, "Aedes japonicus": 0.10 },
+      { "Aedes aegypti": 0.355, "Aedes albopictus": 0.25, "Aedes japonicus": 0.215 },
+    ];
+    const photos = specs.map((over, i) => {
+      const rest =
+        (1 - Object.values(over).reduce((a, b) => a + b, 0)) /
+        (head.species.length - Object.keys(over).length);
+      const p = head.species.map((s, j) => (s in over ? over[s]! : rest));
+      return {
+        name: `mixed-${i}`,
+        fingerprint: `fp-${i}`,
+        scores: Object.fromEntries(head.species.map((s, j) => [s, p[j]!])),
+        logits: Object.fromEntries(head.species.map((s, j) => [s, Math.log(p[j]!) + 5])),
+        verdict: verdictFrom(head, p, null, []),
+      };
+    });
+    const { included } = splitPoolable(photos);
+    const w = poolingWeights(included, "Dependent evidence", 0.5);
+    const agg = aggregateLogits(head, included, w);
+    expect(pooledVerdict(head, agg, included)!.state).not.toBe("species");
+  });
+
+  it("photos below the floor pool to a posterior above it, and nothing reads that", () => {
     const { photos, specs } = blankPhotos();
     // The top posterior of each photo: the largest VALUE in its map, which is
     // not what taking max over the keys would silently give.
@@ -494,51 +565,137 @@ describe("PINNED, currently failing: the pool gates on a distribution it was not
     const agg = aggregateLogits(head, included, w);
     const pooledTop = Math.max(...pooledPosterior(head, agg)!);
 
-    // Today this is 0.4625 against a floor of 0.373, which is the whole defect:
-    // pooling moved a set of below-floor photos to above-floor. The assertion is
-    // the post-fix world - a pool of below-floor photos stays below the floor -
-    // so it fails now and inverts when the gate is corrected.
-    expect(pooledTop).toBeLessThan(DEFAULT_FLOORS.species);
+    // This is 0.4625 against a floor of 0.373, and it stays that way: pooling
+    // moved a set of below-floor photos above the floor, and no change to the
+    // pooling arithmetic should hide that. What changed is that nothing reads
+    // this number to decide a species claim. This test exists to say so.
+    expect(pooledTop).toBeGreaterThan(DEFAULT_FLOORS.species);
+    expect(pooledTop).toBeCloseTo(0.4625, 3);
   });
 });
 
-describe("PINNED, currently failing: the pooled card can never say 'not a mosquito'", () => {
+describe("the pooled card's non-mosquito evidence", () => {
   /**
-   * The structural half of the same defect, and independent of any threshold.
+   * The structural half of the same defect as the species floor, and
+   * independent of any threshold.
    *
-   * `updatePooling` calls verdictFrom(pooledSpP) with no adjacent posteriors, and
-   * pooledPosterior softmaxes over the 16 SPECIES alone. So the adjacent mass is
-   * absent from the numerator AND from the denominator: the species posteriors
-   * are inflated to sum to 1, and the non-mosquito branch never runs at all.
+   * `updatePooling` used to call verdictFrom(pooledSpP) with no adjacent
+   * posteriors, and pooledPosterior softmaxes over the 16 SPECIES alone. So the
+   * adjacent mass was absent from the numerator AND from the denominator: the
+   * species posteriors were inflated to sum to 1 as if no other class existed,
+   * and the non-mosquito branch could never run.
    *
-   * The consequence, with the real head: three photos each reading 97% biting
-   * midge - which the PER-PHOTO gate correctly calls non-mosquito - are pooled
-   * into a species claim. This is not a threshold problem; no floor value would
-   * change it. Carrying the adjacent classes through the pool is a prerequisite
-   * for the pool being able to say "not a mosquito" at all.
+   * The fix is aggregateAdjacent and pooledAdjacentPosterior: the pool now
+   * carries its adjacent evidence on the same denominator as its species
+   * evidence, so the two share 1 between them and verdictFrom reads the pooled
+   * adjacent mass with the same NON_MOSQUITO_FLOOR the per-photo gate uses.
+   *
+   * Note which case this is NOT. Three photos each reading 97% biting midge
+   * never reach the pool at all, because splitPoolable excludes a non-mosquito
+   * photo - correctly, since its evidence is about a different subject. The
+   * reachable case is photos that individually sit below the floor, are each
+   * accepted, and pool to above it. That is the same sharpening the species
+   * floor had, and the test below is built on it.
    *
    * Making `adP` a required parameter of verdictFrom is what stops the second
-   * half of this recurring: the omission above became an `undefined` that
+   * half of this recurring: the omission above arrived as an `undefined` that
    * TypeScript was willing to accept. It is required now, so a caller that
    * forgets cannot compile.
    */
-  it.fails("a pool of overwhelmingly non-mosquito photos is called non-mosquito", () => {
-    const adP = new Array<number>((head.adjacent ?? []).length).fill(0);
-    adP[0] = 0.97;
-    const spP = post(head, { "Aedes aegypti": 0.02, "Culex pipiens": 0.01 });
-    spP.forEach((_, i) => {
-      if (spP[i] === 0) spP[i] = 0.001;
-    });
-    // Per-photo the gate fires correctly, on this same array.
-    expect(verdictFrom(head, spP, null, adP).state).toBe("non-mosquito");
+  // The pooled species share on the joint denominator, recomputed here from the
+  // public parts so the renormalisation is asserted rather than assumed.
+  function renormalizedSpecies(
+    head: Head,
+    agg: Record<string, number>,
+    adjP: number[],
+  ): number[] | null {
+    const spP = pooledPosterior(head, agg);
+    if (!spP || !adjP.length) return spP;
+    const spMass = 1 - adjP.reduce((a, b) => a + b, 0);
+    return spP.map((p) => p * spMass);
+  }
 
+  it("a pool whose photos sit below the non-mosquito floor can still cross it", () => {
+    // The reachable shape of this defect, and the same one the species floor
+    // had: pooling sharpens. Photos that individually carry less adjacent mass
+    // than NON_MOSQUITO_FLOOR each read as a mosquito and are each INCLUDED in
+    // the pool, and the pool's summed adjacent evidence crosses the floor.
+    //
+    // The pinned version of this test used photos at 0.97 adjacent, which never
+    // reach the pool at all - splitPoolable excludes a non-mosquito photo, as it
+    // should. So it could only ever have been fixed by the pool reading an
+    // argument it was never given, and the fix has to work on this case instead.
+    const A = (head.adjacent ?? []).length;
+    // The species share of a photo that is MOSTLY a biting midge: a clear top
+    // species above SPECIES_CONFIDENCE_FLOOR, so the per-photo gate names it and
+    // the pool accepts it, with the rest of the species mass spread thinly.
+    const named: Record<string, number> = { "Aedes aegypti": 0.40, "Culex pipiens": 0.09 };
+    const rest =
+      (1 - Object.values(named).reduce((a, b) => a + b, 0)) /
+      (head.species.length - Object.keys(named).length);
+    const spec = head.species.map((s, i) => (s in named ? named[s]! : rest));
+    expect(spec[head.species.indexOf("Aedes aegypti")!]).toBeGreaterThan(DEFAULT_FLOORS.species);
+    const adP = new Array<number>(A).fill(0);
+    // 0.55 of the mass on the winning adjacent class and the rest spread thinly
+    // over the others: below NON_MOSQUITO_FLOOR = 0.60, so the per-photo gate
+    // leaves each a species claim and the pool accepts it. Pooled three deep the
+    // same evidence reads 0.628, which is above the floor.
+    adP[0] = 0.48;
+    for (let i = 1; i < A; i++) adP[i] = 0.07 / (A - 1);
+    expect(adP.reduce((a, b) => a + b, 0)).toBeLessThan(DEFAULT_FLOORS.nonMosquito);
+    expect(verdictFrom(head, spec, null, adP).state).not.toBe("non-mosquito");
+
+    const logits = Object.fromEntries(head.species.map((s, i) => [s, Math.log(spec[i]!) + 5]));
+    const photos: PoolablePhoto[] = [0, 1, 2].map((i) => ({
+      name: `maybe-midge-${i}`,
+      fingerprint: `fp-${i}`,
+      scores: Object.fromEntries(head.species.map((s, j) => [s, spec[j]!])),
+      logits,
+      adP,
+      verdict: verdictFrom(head, spec, null, adP),
+    }));
+    const { included } = splitPoolable(photos);
+    expect(included).toHaveLength(photos.length);
+
+    const w = poolingWeights(included, "Accumulate evidence", 0.5);
+    const agg = aggregateLogits(head, included, w);
+    const aggAdj = aggregateAdjacent(head, included, w);
+    expect(aggAdj).toHaveLength(A);
+
+    const adjP = pooledAdjacentPosterior(head, agg, aggAdj);
+    // The structural property, asserted directly: the pooled species and
+    // adjacent posteriors share ONE denominator and sum to 1 between them,
+    // rather than the species softmax summing to 1 as if nothing else existed.
+    expect(adjP.reduce((a, b) => a + b, 0)).toBeGreaterThan(DEFAULT_FLOORS.nonMosquito);
+    const spShare = 1 - adjP.reduce((a, b) => a + b, 0);
+    expect(spShare).toBeGreaterThan(0);
+    const renormalized = renormalizedSpecies(head, agg, adjP)!;
+    expect(renormalized.reduce((a, b) => a + b, 0)).toBeCloseTo(spShare, 9);
+
+    const v = pooledVerdict(head, agg, included, aggAdj)!;
+    expect(v.state).toBe("non-mosquito");
+    expect(v.adjacent).toBe(head.adjacent![0]);
+  });
+
+  it("a pool with no adjacent evidence still reports a genus, not a non-mosquito", () => {
+    // The empty array is the honest answer for a head with no adjacent classes
+    // and for a server-path photo, which never reports any. It must leave the
+    // species-only behaviour exactly as it was rather than divide by a
+    // denominator that does not exist.
+    const spP = post(head, { "Aedes aegypti": 0.55, "Aedes albopictus": 0.30 });
     const logits = Object.fromEntries(head.species.map((s, i) => [s, Math.log(spP[i]!) + 5]));
-    const pooled = pooledPosterior(head, logits)!;
-    // The species posteriors sum to 1 because the adjacent mass is in neither
-    // the numerator nor the denominator - this is the structural defect, visible
-    // without any threshold being involved.
-    expect(pooled.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 9);
-    expect(pooledVerdict(head, logits)!.state).toBe("non-mosquito");
+    const photos: PoolablePhoto[] = [0, 1].map((i) => ({
+      name: `mosq-${i}`,
+      fingerprint: `fp-${i}`,
+      scores: Object.fromEntries(head.species.map((s, j) => [s, spP[j]!])),
+      logits,
+    }));
+    const { included } = splitPoolable(photos);
+    const w = poolingWeights(included, "Accumulate evidence", 0.5);
+    const agg = aggregateLogits(head, included, w);
+    expect(aggregateAdjacent(head, included, w)).toEqual([]);
+    expect(pooledAdjacentPosterior(head, agg, [])).toEqual([]);
+    expect(pooledVerdict(head, agg, included, [])!.state).not.toBe("non-mosquito");
   });
 
   it("each photo is individually excluded from the pool for being non-mosquito", () => {

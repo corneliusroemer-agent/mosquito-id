@@ -6,19 +6,16 @@ import { verdictFrom } from "./verdict";
 import { viewAgreement } from "./viewAgreement";
 
 export interface FusedResult {
-  /** Genus -> summed posterior, possibly with a "- low confidence" demotion. */
+  /** Genus -> summed posterior. */
   labels: Record<string, number>;
   /** Species -> fused posterior. */
   detail: Record<string, number>;
   /** Species -> logit on the single-view scale, so a fused photo is comparable. */
   logits: Record<string, number>;
-  demoted: boolean;
   spP: number[];
   /** Pooled nuisance posteriors, as a one-element array (mass only). */
   nuP: number[];
   adP: number[];
-  /** Fused cosines, recovered from the posterior and shifted so the best is 0. */
-  spCos: number[];
   nViews: number;
   /** Plain-language adjacent name -> posterior. */
   adjacentDetail: Record<string, number>;
@@ -126,17 +123,13 @@ export function fuseViews(
     adP = exAd.map((e) => e / sumAd);
   }
 
-  // genusScores needs cosine similarities to apply GENUS_MARGIN, and the pooling
-  // card needs logits. Recovering both from the fused posterior is not an
-  // approximation: log p_i = scale * cos_i - logZ, so (log p_i - log p_best) /
-  // scale is exactly cos_i - cos_best, and every consumer of these two
-  // quantities takes differences. The recovered cosines are therefore shifted by
-  // a constant - best species at 0 - which no consumer can see, and are otherwise
-  // the fused view's real ones.
-  //
-  // The logits below are built from spCos, not from lp: lp is a log-probability
-  // and multiplying one by the logit scale gives numbers ~100x the axis they are
-  // plotted on.
+  // The pooling card needs logits on the scale the score panel plots them on.
+  // Recovering them from the fused posterior is not an approximation: log p_i =
+  // scale * cos_i - logZ, so (log p_i - log p_best) / scale is exactly cos_i -
+  // cos_best, and every consumer of the logits takes differences against the
+  // best species. They are built from the recovered cosine rather than from lp
+  // directly, because lp is a log-probability and multiplying one by the logit
+  // scale gives numbers ~100x the axis they are plotted on.
   const lp = spP.map((p) => Math.log(Math.max(p, 1e-12)));
   const best = Math.max(...lp);
   const spCos = lp.map((l) => (l - best) / scale);
@@ -148,7 +141,7 @@ export function fuseViews(
     logits[n] = scale * spCos[i]!;
   });
 
-  const c = genusScores(head, spP, spCos, floors);
+  const c = genusScores(head, spP);
   // The gate reads the FUSED posterior, which is the whole point of fusing
   // before deciding: one view alone is an opinion, the pool of the two is the
   // photo's score.
@@ -177,11 +170,9 @@ export function fuseViews(
     labels: c.labels,
     detail,
     logits,
-    demoted: c.demoted,
     spP,
     nuP,
     adP,
-    spCos,
     nViews: V,
     adjacentDetail,
     agreement,

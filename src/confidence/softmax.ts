@@ -18,8 +18,6 @@ export interface JointResult {
   nuP: number[];
   /** Adjacent posteriors, index-aligned with `adjacentNames(head)`. */
   adP: number[];
-  /** Species cosines, before scaling. Used for GENUS_MARGIN and the score panel. */
-  spCos: number[];
   /** Species name -> its scaled logit. */
   logits: Record<string, number>;
 }
@@ -56,6 +54,8 @@ export function softmaxJoint(
     return d;
   };
 
+  // Internal only: the species cosines build the joint softmax below and the
+  // per-species logits. Nothing outside this function reads them.
   const spCos: number[] = [];
   for (let i = 0; i < S; i++) spCos.push(dotAt(head.species_emb, i));
   const nuCos: number[] = [];
@@ -77,7 +77,6 @@ export function softmaxJoint(
     spP: p.slice(0, S),
     nuP: p.slice(S, S + N),
     adP: p.slice(S + N),
-    spCos,
     logits,
   };
 }
