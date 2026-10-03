@@ -20,13 +20,15 @@ import type { Box, BoxPercent, CanvasLike, ContextCrop, Mapping, Preview } from 
 // Two guards that must agree is the defect; a third caller would reintroduce it.
 //
 // A crop is real when the photo was classified on a sub-region of itself. A
-// fallback, or a photo the user reverted to whole, was classified on the whole
-// frame, so drawing an outline over it would claim a crop that was never made.
+// photo the user reverted to whole was classified on the whole frame, so
+// drawing an outline over it would claim a crop that was never made - and a
+// rejected crop carries no box either, which is why this needs no gate of its
+// own for that case.
 // `pending` is deliberately not a gate: a recompute in flight still has the
 // previous crop on screen, and both panels should keep showing it, dimmed on
 // the scores, rather than one panel blanking while the other holds.
 export function hasCropBox(p?: Preview): boolean {
-  return Boolean(p && p.cropBox && !p.fallback && !p.manual_full_photo);
+  return Boolean(p && p.cropBox && !p.manual_full_photo);
 }
 
 // The same p.cropBox expressed as fractions of each panel's surface. Both take

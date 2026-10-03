@@ -114,7 +114,7 @@ async function run(label, viewport) {
         pending: false, error: null, rev: 0, status: "", detail, adjacentDetail: null,
         fullCanvas: cv, contextCanvas: null, cropCanvas: null,
         cropBox: null, contextBox: null, is_cropped: false,
-        manual_full_photo: false, fallback: false, selected: true,
+        manual_full_photo: false, crop_rejected: false, selected: true,
       });
     }
     void post;
@@ -200,7 +200,7 @@ async function run(label, viewport) {
     await page.evaluate((idx) => {
       const p = window.__mosqAsync.previews[idx];
       p.cropBox = [0, 0, p.fullCanvas.width, p.fullCanvas.height];
-      p.fallback = false; p.manual_full_photo = false;
+      p.crop_rejected = false; p.manual_full_photo = false;
       window.__mosqAsync.selectPhoto(idx);
     }, i);
     await page.waitForFunction(() => {

@@ -77,7 +77,7 @@ if (BASE_URL && !/^https?:\/\//.test(BASE_URL)) {
 }
 
 // Headless chromium on this box has a SwiftShader WebGPU adapter with no
-// `shader-f16`. All three registered engines ship FP16 or INT8 weights, so every
+// `shader-f16`. Every remaining registered engine ships FP16 weights, so every
 // BioCLIP compute pipeline fails to compile:
 //
 //   Error while parsing WGSL: 'f16' type used without 'f16' extension enabled

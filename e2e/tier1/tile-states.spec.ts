@@ -5,10 +5,9 @@ import { test, expect, boot, populate, settle, errors } from "../helpers/app";
  *
  * Two symptoms were reported from the same photo: the thumbnail "does not select",
  * and its include checkbox "does not respond". The checkbox half is confirmed -
- * `p.fallback` is set for any photo the detector found no mosquito in, and
- * `isSelectable` returns false for it, so `renderThumbnails` writes
- * `node.chk.disabled = true`. A disabled checkbox silently ignores clicks, which
- * is indistinguishable from a broken one.
+ * `renderThumbnails` writes `node.chk.disabled = true` for any photo the strip
+ * will not pool, and a disabled checkbox silently ignores clicks, which is
+ * indistinguishable from a broken one.
  *
  * The selection half is NOT what it looks like. `selectPhoto` runs, `selectedIndex`
  * moves, the tile takes `active`, the photo name changes and both panels redraw -
@@ -24,7 +23,8 @@ import { test, expect, boot, populate, settle, errors } from "../helpers/app";
  * restructure, so the table is exercised through the rendering that consumes it.
  */
 type State = {
-  fallback?: boolean;
+  /** The nuisance gate rejected the crop; the whole frame was classified. */
+  crop_rejected?: boolean;
   pending?: boolean;
   error?: string | null;
   is_cropped?: boolean;
@@ -37,13 +37,13 @@ const CASES: { name: string; state: State; poolable: boolean }[] = [
   { name: "cropped, classified to a genus", state: { is_cropped: true, verdict: { state: "genus" } }, poolable: true },
   { name: "cropped, not confident enough to name a genus", state: { is_cropped: true, verdict: { state: "unsure" } }, poolable: true },
   { name: "cropped, classified not-a-mosquito", state: { is_cropped: true, verdict: { state: "non-mosquito" } }, poolable: false },
-  { name: "uncropped, no fallback flag", state: { is_cropped: false, verdict: { state: "species" } }, poolable: true },
-  { name: "uncropped, detector found nothing (fallback)", state: { is_cropped: false, fallback: true, verdict: null }, poolable: false },
+  { name: "uncropped, whole frame named", state: { is_cropped: false, verdict: { state: "species" } }, poolable: true },
+  { name: "crop rejected, whole frame named", state: { is_cropped: false, crop_rejected: true, verdict: { state: "species" } }, poolable: true },
   { name: "still classifying", state: { is_cropped: false, pending: true, verdict: null }, poolable: false },
   { name: "classification failed", state: { is_cropped: false, error: "Classification failed: boom", verdict: null }, poolable: false },
-  { name: "fallback AND pending", state: { is_cropped: false, fallback: true, pending: true, verdict: null }, poolable: false },
-  { name: "fallback AND failed", state: { is_cropped: false, fallback: true, error: "boom", verdict: null }, poolable: false },
-  { name: "fallback AND classified not-a-mosquito", state: { is_cropped: false, fallback: true, verdict: { state: "non-mosquito" } }, poolable: false },
+  { name: "crop rejected AND pending", state: { is_cropped: false, crop_rejected: true, pending: true, verdict: null }, poolable: false },
+  { name: "crop rejected AND failed", state: { is_cropped: false, crop_rejected: true, error: "boom", verdict: null }, poolable: false },
+  { name: "crop rejected AND classified not-a-mosquito", state: { is_cropped: false, crop_rejected: true, verdict: { state: "non-mosquito" } }, poolable: false },
   { name: "no verdict at all", state: { is_cropped: true, verdict: null }, poolable: true },
 ];
 
@@ -59,7 +59,7 @@ test.describe("tile states", () => {
       canvas.getContext("2d")!.fillRect(0, 0, 300, 300);
       const base: any = {
         fullCanvas: canvas, contextCanvas: null, detail: {}, scores: {}, logits: null, adP: null,
-        adjacentDetail: null, pending: false, error: null, is_cropped: true, fallback: false,
+        adjacentDetail: null, pending: false, error: null, is_cropped: true, crop_rejected: false,
         status: "ok", rev: 0, agreement: null, viewsLanded: 0, viewsTotal: 0,
         verdict: { state: "species", genus: "Aedes", species: "Aedes aegypti", topGenusP: 0.9, topSpeciesP: 0.8, runnersUp: [] },
       };
@@ -119,7 +119,7 @@ test.describe("tile states", () => {
       canvas.width = canvas.height = 300;
       const base: any = {
         fullCanvas: canvas, contextCanvas: null, detail: {}, scores: {}, logits: null, adP: null,
-        adjacentDetail: null, pending: false, error: null, is_cropped: true, fallback: false,
+        adjacentDetail: null, pending: false, error: null, is_cropped: true, crop_rejected: false,
         status: "ok", rev: 0, agreement: null, viewsLanded: 0, viewsTotal: 0,
         verdict: { state: "species", genus: "Aedes", species: "Aedes aegypti", topGenusP: 0.9, topSpeciesP: 0.8, runnersUp: [] },
       };
@@ -182,9 +182,8 @@ test.describe("tile states", () => {
     await boot(page);
     await populate(page, [
       { name: "cropped.jpg", state: "species", is_cropped: true },
-      // No detection: what the app calls a fallback photo. Uncropped, so the
-      // zoomed panel has no crop to show.
-      { name: "no_mosquito.jpg", state: "species", is_cropped: false },
+      // No box to crop. Uncropped, so the zoomed panel has no crop to show.
+      { name: "whole_frame.jpg", state: "species", is_cropped: false },
     ]);
     await settle(page);
 
@@ -200,7 +199,7 @@ test.describe("tile states", () => {
     // passing would be enough; all three is what "the click was honoured" means.
     await expect(strip.nth(1)).toHaveClass(/active/);
     await expect(strip.nth(0)).not.toHaveClass(/active/);
-    await expect(page.locator("#photo-name")).toContainText("no_mosquito.jpg");
+    await expect(page.locator("#photo-name")).toContainText("whole_frame.jpg");
     expect(await page.locator("#photo-name").innerText()).not.toBe(nameBefore);
     expect(await page.evaluate(() => window.__mosqAsync!.selectedIndex)).toBe(1);
 
@@ -234,9 +233,9 @@ test.describe("tile states", () => {
       const canvas = document.createElement("canvas");
       canvas.width = canvas.height = 300;
       A.previews.push({
-        name: "no_mosquito.jpg", fullCanvas: canvas, cropCanvas: null, contextCanvas: null,
+        name: "nothing_here.jpg", fullCanvas: canvas, cropCanvas: null, contextCanvas: null,
         detail: {}, scores: {}, logits: null, adP: null, adjacentDetail: null, verdict: null,
-        pending: false, error: null, is_cropped: false, fallback: true, status: "no detection",
+        pending: false, error: null, is_cropped: false, crop_rejected: true, status: "whole photo analysed (the detector found no box)",
         rev: 0, agreement: null, viewsLanded: 0, viewsTotal: 0, fingerprint: "fp_nm",
       });
       A.includedIndices.add(3);

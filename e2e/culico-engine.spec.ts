@@ -47,7 +47,7 @@ const CULICO = "culico-net-cls-v1-17-embed.onnx";
 const H14_FP16 = "bioclip_2_5_fp16.onnx";
 
 /** Every classifier ONNX the app knows how to ask for, by filename. */
-const CLASSIFIERS = [CULICO, "bioclip_visual_b16_fp16.onnx", H14_FP16, "bioclip_2_5_int8.onnx"];
+const CLASSIFIERS = [CULICO, "bioclip_visual_b16_fp16.onnx", H14_FP16];
 
 /**
  * A minimal but genuine ONNX graph: one Identity node, input -> output. 125

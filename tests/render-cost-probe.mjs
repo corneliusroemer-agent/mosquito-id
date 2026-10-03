@@ -75,7 +75,7 @@ const result = await page.evaluate(async () => {
     const full = canvas(4000, 3000, `hsl(${i * 60}, 50%, 60%)`);
     return {
       name: `photo_${i}.jpg`, fullCanvas: full, cropCanvas: canvas(1200, 1200, `hsl(${i * 60}, 60%, 40%)`),
-      contextCanvas: full, is_cropped: true, fallback: false, pending: false, error: null,
+      contextCanvas: full, is_cropped: true, crop_rejected: false, pending: false, error: null,
       rev: 0, status: "ok",
       detail: { "Aedes aegypti": 0.4, "Aedes albopictus": 0.3, "Culex pipiens": 0.1,
                 "Culex quinquefasciatus": 0.1, "Aedes communis": 0.1 },

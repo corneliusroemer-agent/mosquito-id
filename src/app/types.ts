@@ -73,8 +73,16 @@ export interface Preview {
   contextCanvas?: HTMLCanvasElement | null;
   cropBox: Box | null;
   contextBox: Box | null;
-  /** The detector found nothing and the whole frame was classified. */
-  fallback?: boolean;
+  /**
+   * The detector found a box, the crop was made, and the nuisance gate rejected
+   * that crop - so the whole frame was classified instead.
+   *
+   * A statement about the crop, never about the photo: the frame that was
+   * classified is the frame the verdict was read off, and it pools on that
+   * verdict. It is recorded because the two ways of ending up uncropped are
+   * genuinely different, and because the app used to carry one flag for both.
+   */
+  crop_rejected?: boolean;
   /** The user asked for the whole photo after cropping it. */
   manual_full_photo?: boolean;
 }

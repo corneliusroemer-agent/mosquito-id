@@ -435,20 +435,19 @@ async function initEngine() {
     serverAvailable = false;
   }
 
-  // Preference: URL query param > localStorage > default. fp16 is skipped while
-// it is unavailable, so a stale saved choice falls through instead of 404ing.
-//
-// H/14 is the default, and it is the default because culico's head cannot yet be
-// made to serve this app: its species argmax sits at 22% because the ten species
-// the corpus never labels carry the GENUS weight row, so on a correctly-identified
-// Aedes photo those three rows outscore the species probe. Pinning them instead
-// lifts species to 71% but drops genus from 83% to 57%, and the app's default
-// read is a genus, so the honest position is that the head needs fitting that
-// treats a genus-only label as evidence about the genus rather than copying it
-// into every species column. That is analysis, not a UI default.
-//
-// INT8 is never the default: onnxruntime-web has no int8 WebGPU kernels, so the
-// session silently falls back to WASM CPU and runs an order of magnitude slower.
+  // Preference: URL query param > localStorage > default. An engine the map does
+  // not carry is not selectable either, so a saved choice left behind by a removed
+  // engine falls through instead of selecting itself on the next visit. fp16 is
+  // skipped while it is unavailable, for the same reason.
+
+  // H/14 is the default, and it is the default because culico's head cannot yet be
+  // made to serve this app: its species argmax sits at 22% because the ten species
+  // the corpus never labels carry the GENUS weight row, so on a correctly-identified
+  // Aedes photo those three rows outscore the species probe. Pinning them instead
+  // lifts species to 71% but drops genus from 83% to 57%, and the app's default
+  // read is a genus, so the honest position is that the head needs fitting that
+  // treats a genus-only label as evidence about the genus rather than copying it
+  // into every species column. That is analysis, not a UI default.
   const defaultEngine = "webgpu-fp16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
@@ -792,8 +791,13 @@ async function classifyImage(imgBitmap, filename) {
   // is not a mosquito worth a second opinion, and the photo falls back to the
   // whole frame exactly as before. Only a crop that passes the gate is pooled
   // with the whole-frame view.
+  //
+  // What the gate says is about the crop alone. The whole frame is classified
+  // either way, and its verdict is the photo's verdict, so a rejected crop
+  // leaves a photo that pools on what the frame said rather than one that is
+  // struck off the list.
   let cropView = null;
-  let fallback = false;
+  let cropRejected = false;
   if (best) {
     const emb = await clipEmbed(cropCv);
     const j = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(currentEngine) });
@@ -804,7 +808,7 @@ async function classifyImage(imgBitmap, filename) {
       cropCv = fullCv;
       cropBox = null;
       best = null;
-      fallback = true;
+      cropRejected = true;
     }
   }
 
@@ -820,11 +824,16 @@ async function classifyImage(imgBitmap, filename) {
   const clipTime = Math.round(performance.now() - tClip0);
   const totalTime = Math.round(performance.now() - t0);
 
+  // What happened, not what is missing from the photo: a detector that found no
+  // box and a gate that rejected the crop are different events, and neither of
+  // them establishes that the photo holds no mosquito.
   const status = best
     ? `detector: ${dets.length} box(es), best ${best.conf.toFixed(2)}`
-    : `full photo fallback${fallback ? " (nuisance gate triggered)" : ""}`;
+    : cropRejected
+      ? "whole photo analysed (the crop was rejected as a nuisance)"
+      : "whole photo analysed (the detector found no box)";
 
-  const is_cropped = Boolean(best && !fallback);
+  const is_cropped = Boolean(best);
   const { contextCanvas, contextBox } = extractContextCrop(fullCv, cropBox);
 
   const base = {
@@ -835,7 +844,7 @@ async function classifyImage(imgBitmap, filename) {
     cropBox,
     contextBox,
     status,
-    fallback,
+    crop_rejected: cropRejected,
     is_cropped,
     rev: 0,
     error: null,
@@ -976,7 +985,7 @@ async function processFiles(fileList) {
     fullCanvas: null, cropCanvas: null, contextCanvas: null,
     cropBox: null, contextBox: null,
     scores: {}, detail: {}, logits: null, adP: null,
-    status: "queued…", fallback: false, is_cropped: false, verdict: null,
+    status: "queued…", crop_rejected: false, is_cropped: false, verdict: null,
     manual_full_photo: false, fingerprint: null,
     rev: 0, pending: true, error: null,
     agreement: null, viewsLanded: 0, viewsTotal: 0,
@@ -1072,7 +1081,11 @@ async function processFiles(fileList) {
         commitBatchSlot(slots[i], {
           name: data.filename, fullCanvas: fullCv, cropCanvas: cropCv, contextCanvas: contextCv,
           cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
-          detail: fused.detail, logits: fused.logits, status: data.status, fallback: data.fallback,
+          detail: fused.detail, logits: fused.logits, status: data.status,
+          // The server reports one `fallback` bit for both ways of ending up
+          // uncropped, which is exactly the conflation `crop_rejected` exists to
+          // undo, and nothing pools off it any more. Only its own field is read.
+          crop_rejected: data.crop_rejected === true,
           is_cropped: data.is_cropped,
           adP: fused.adP,
           verdict: fused.verdict,
@@ -2057,7 +2070,7 @@ async function executeCrop(p, idx, cropBox, t0) {
   p.status = `manual crop: ${cw}x${ch}px`;
   p.is_cropped = true;
   p.manual_full_photo = false;
-  p.fallback = false;
+  p.crop_rejected = false;
 
   renderThumbnails();
   renderActivePhoto();
@@ -2142,7 +2155,7 @@ async function revertToFullPhoto(idx) {
   p.status = "manual full photo";
   p.is_cropped = false;
   p.manual_full_photo = true;
-  p.fallback = false;
+  p.crop_rejected = false;
 
   renderThumbnails();
   renderActivePhoto();

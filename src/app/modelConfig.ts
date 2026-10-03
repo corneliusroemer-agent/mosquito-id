@@ -60,7 +60,7 @@ export const TEMPERATURE = 2.5;
 /** The offsets to pass for an engine the calibration was not fitted for. */
 const EMPTY_OFFSETS: Readonly<Record<string, number>> = Object.freeze({});
 
-export const CALIBRATED_ENGINES: ReadonlySet<string> = new Set(["webgpu-fp16", "webgpu-int8"]);
+export const CALIBRATED_ENGINES: ReadonlySet<string> = new Set(["webgpu-fp16"]);
 
 /**
  * The cosine offsets to apply for an engine, or an empty map for an engine the
@@ -148,14 +148,6 @@ export const WEBGPU_MODELS: Record<string, ModelConfig> = {
     label: "BioCLIP 2.5 H/14 (FP16 · 1.2 GB)",
     name: "BioCLIP 2.5 H/14 FP16",
     size: 1259593728,
-    reports: "species"
-  },
-  "webgpu-int8": {
-    path: "bioclip_2_5_int8.onnx",
-    embedsPath: "text_embeds.json",
-    label: "BioCLIP 2.5 H/14 (INT8 · 609 MB)",
-    name: "BioCLIP 2.5 H/14 INT8",
-    size: 638205897,
     reports: "species"
   }
 };

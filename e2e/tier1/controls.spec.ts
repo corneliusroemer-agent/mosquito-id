@@ -377,8 +377,8 @@ test.describe("controls in the populated state", () => {
     // Switching engine with the model stubbed out leaves the footer naming the
     // requested engine. If the change handler threw or bailed, the footer would
     // keep naming the previous one and this fails.
-    await select.selectOption("webgpu-int8");
-    await expect(page.locator("#footer-device")).toContainText("BioCLIP 2.5 H/14 INT8");
+    await select.selectOption("webgpu-culico");
+    await expect(page.locator("#footer-device")).toContainText("culico-net-cls-v1");
 
     await select.selectOption("webgpu-b16");
     await expect(page.locator("#footer-device")).toContainText("BioCLIP B/16");
@@ -395,9 +395,18 @@ test.describe("controls in the populated state", () => {
 
   test("the engine selector honours a ?engine= query param over the saved choice", async ({ page }) => {
     await boot(page);
-    await selectAndPersist(page, "webgpu-int8");
-    await boot(page, "/?engine=webgpu-b16");
-    await expect(page.locator("#engine-select")).toHaveValue("webgpu-b16");
+    await selectAndPersist(page, "webgpu-b16");
+    await boot(page, "/?engine=webgpu-culico");
+    await expect(page.locator("#engine-select")).toHaveValue("webgpu-culico");
+  });
+
+  test("a saved engine the app no longer carries falls through to the default", async ({ page }) => {
+    // A removal leaves the old key in every browser that ever picked it. Left
+    // selectable it would ask for a model file that is no longer registered; the
+    // selector must resolve it to the default instead of to a broken load.
+    await page.addInitScript(() => localStorage.setItem("mosquito_engine", "webgpu-int8"));
+    await boot(page);
+    await expect(page.locator("#engine-select")).toHaveValue("webgpu-fp16");
   });
 
   test("the camera button opens a capture input, and the drop zone opens a file input", async ({ page }) => {
@@ -464,5 +473,5 @@ test.describe("controls in the populated state", () => {
 /** Put the engine selector on `value` and wait for the change handler to run. */
 async function selectAndPersist(page: import("@playwright/test").Page, value: string): Promise<void> {
   await page.locator("#engine-select").selectOption(value);
-  await page.locator(`#footer-device:has-text("${value === "webgpu-int8" ? "INT8" : "B/16"}")`).waitFor();
+  await page.locator(`#footer-device:has-text("B/16")`).waitFor();
 }

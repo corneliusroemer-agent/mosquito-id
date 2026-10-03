@@ -46,8 +46,8 @@ export function photoState(p: ClassifiedPhoto): PhotoState {
  * May the user LOOK at this photo? Spec §1.1.
  *
  * This was `isSelectable` doing this job and the pooling job at once, and the
- * conflation shipped as two bugs from one cause: a photo the detector found no
- * mosquito in has `fallback` set, so the checkbox was disabled - and a disabled
+ * conflation shipped as two bugs from one cause: a photo the classifier had
+ * something to say nothing about had its checkbox disabled - and a disabled
  * checkbox silently ignores clicks, indistinguishable from a broken one - while
  * nothing on the tile said why. A photo whose classifier failed is still worth
  * looking at; the photo is fine and the classifier is what failed.
@@ -62,15 +62,21 @@ export function canView(p: ClassifiedPhoto): boolean {
 /**
  * May this photo be checked into the pooled result? Spec §1.1.
  *
- * The `fallback` clause is the one that carries weight `splitPoolable` does not:
- * a photo whose crop the nuisance gate rejected must not reach the fusion step,
- * so the checkbox is closed here even though a whole-frame view of it exists.
+ * Three things close the checkbox, and each is a statement about the photo's
+ * pixels: nothing is readable yet (`pending`), nothing was readable (`error`), or
+ * the classifier looked at this photo and it is not a mosquito.
+ *
+ * A crop the nuisance gate rejected is deliberately not one of them. The gate
+ * judges the crop; the whole frame was classified anyway and the verdict was
+ * read off that frame, so the photo carries exactly the evidence a pool wants.
+ * Striking it off here is what made feeding images to the classifier whole
+ * achieve nothing.
  *
  * It is a permission, not a promise - `unsure` may be checked and IS pooled, at
  * a weight below a named photo's.
  */
 export function contributesToPool(p: ClassifiedPhoto): boolean {
-  if (!p || p.fallback || p.pending || p.error) return false;
+  if (!p || p.pending || p.error) return false;
   return p.verdict?.state !== "non-mosquito";
 }
 
@@ -116,7 +122,6 @@ export function checkLabel(p: ClassifiedPhoto, idx: number): string {
   if (p.error) return `This photo failed: ${p.error}`;
   // Plain language, not the mechanism's name. "Nuisance gate" is what the crop
   // engine calls it; what the user needs to know is that no mosquito was found.
-  if (p.fallback) return "No mosquito was detected in this photo, so it cannot be pooled";
   if (p.verdict?.state === "non-mosquito") return "The classifier found no mosquito in this photo";
   if (p.verdict?.state === "unsure") return `${base} — it will be listed as not confident enough to name a genus`;
   return base;
@@ -133,7 +138,6 @@ export function poolExclusionReason(p: ClassifiedPhoto): string {
   if (!p) return "";
   if (p.error) return "Excluded from the combined result - analysis failed for this photo.";
   if (p.pending) return "Excluded from the combined result - still classifying.";
-  if (p.fallback) return "Excluded from the combined result - no mosquito was detected in this photo.";
   if (p.verdict?.state === "non-mosquito") return "Excluded from the combined result - this does not look like a mosquito.";
   if (p.verdict?.state === "unsure") return "Not confident enough to name a genus - excluded from the pooled result";
   return "";
@@ -169,7 +173,11 @@ export function badge(p: ClassifiedPhoto): { glyph: string; className: string; t
     case "cropped":
       return { glyph: "✓", className: "crop-badge cropped", title: "Mosquito detected and cropped" };
     case "uncropped":
-      return { glyph: "✕", className: "crop-badge uncropped", title: "No crop was made — the whole photo is used" };
+      // Neither the cross nor a sentence about a missing mosquito: failure to
+      // crop can mean no mosquito, or a photo that was already cropped to one,
+      // and the app cannot tell those apart. What it knows is that the whole
+      // frame was the view it classified.
+      return { glyph: "–", className: "crop-badge uncropped", title: "Whole photo analysed - no crop was used" };
   }
 }
 
