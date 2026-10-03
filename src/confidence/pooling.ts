@@ -192,13 +192,29 @@ export function pooledCandidates(
  * `agreement` is null by construction: the pool is a claim about several photos,
  * not about the two views of one, so the view-disagreement veto has nothing to
  * read here and the per-photo gate has already done that work.
+ *
+ * The pooled posterior is SHARPER than its parts, and the species floor is not
+ * valid on it. Every floor was fitted on single- or two-view posteriors, where
+ * SPECIES_CONFIDENCE_FLOOR = 0.373 is the 90%-coverage point on individual
+ * classifications; pooling sums the per-photo log-probabilities, which for
+ * near-identical posteriors is a power mean and raises the winner with depth
+ * alone. Three photos at 0.355 / 0.350 / 0.360 - none of which would have named
+ * a species - pool to 0.4625 and did.
+ *
+ * So the pool is gated on the PHOTOS, not on its own posterior: it may reach a
+ * species claim only when every photo contributing to it reached one. Pooling
+ * exists to gather more evidence for a claim, never to manufacture resolution
+ * the individual classifications did not have. The pooled posterior still
+ * decides the genus, and a pool of genus-only photos reports a genus.
  */
 export function pooledVerdict(
   head: Head,
   aggLogits: Record<string, number>,
+  included: PoolablePhoto[] = [],
   floors: Floors = DEFAULT_FLOORS,
 ): Verdict | null {
   const spP = pooledPosterior(head, aggLogits);
+  if (!spP) return null;
   // The `[]` here is the pooled card's structural gap, stated in full rather
   // than left as an omitted argument: pooledPosterior softmaxes over the 16
   // species alone, so no adjacent mass exists to pass and the non-mosquito
@@ -210,5 +226,14 @@ export function pooledVerdict(
   // `[]` is deliberate and greppable. That is the point of making `adP` a
   // required parameter of verdictFrom: this omission can no longer happen by
   // forgetting an argument, only by writing this line.
-  return spP ? verdictFrom(head, spP, null, [], floors) : null;
+  const v = verdictFrom(head, spP, null, [], floors);
+  if (v.state !== "species") return v;
+  // A photo with no verdict at all is not evidence that the pool may sharpen
+  // past the species floor, so it blocks the claim rather than being ignored.
+  const everyPhotoClaimed = included.length > 0 && included.every((p) => p.verdict?.state === "species");
+  if (everyPhotoClaimed) return v;
+  // Demote into the genus branch rather than past it: the pooled posterior
+  // genuinely does carry genus-level mass, so the genus floor is still the
+  // thing that decides whether the pool names one at all.
+  return { ...v, state: "genus", species: null };
 }

@@ -41,7 +41,7 @@ const genusScores = (spP, spCos) => _genusScores(EMB, spP, spCos);
 const fuseViews = (viewResults) => _fuseViews(EMB, viewResults);
 const verdictFrom = (spP, agreement, adP) => _verdictFrom(EMB, spP, agreement, adP);
 const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
-const pooledVerdictOf = (aggLogits) => _pooledVerdictOf(EMB, aggLogits);
+const pooledVerdictOf = (aggLogits, included) => _pooledVerdictOf(EMB, aggLogits, included);
 
 const DET_SIZE = 640;
 const CLIP_SIZE = 224;
@@ -2535,7 +2535,10 @@ function updatePooling() {
   // A per-photo `unsure` photo is already excluded from `included` above, so it
   // is absent from this aggregate as well - the pooled headline cannot name a
   // genus the pool itself refused to name.
-  const pooledVerdict = pooledVerdictOf(aggLogits);
+  //
+  // `included` is passed so the pool can also gate its SPECIES claim on the
+  // photos rather than on its own sharpened posterior: see pooledVerdict().
+  const pooledVerdict = pooledVerdictOf(aggLogits, included);
   const pooledLine = pooledVerdict ? verdictSentence(pooledVerdict) : "";
 
   poolScores.innerHTML = "";

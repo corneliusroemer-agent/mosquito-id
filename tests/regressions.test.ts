@@ -354,22 +354,24 @@ describe("the pooled gate reads the wrong floor for a sharpened pool", () => {
     expect(included).toHaveLength(photos.length);
     const w = poolingWeights(included, "Dependent evidence", 0.5);
     const agg = aggregateLogits(head, included, w);
-    return { spP: pooledPosterior(head, agg)!, verdict: pooledVerdict(head, agg)! };
+    return { spP: pooledPosterior(head, agg)!, verdict: pooledVerdict(head, agg, included)! };
   }
 
-  it("three genus-only blank photos pool into a species claim none of them made", () => {
+  it("three genus-only blank photos cannot pool into a species claim none of them made", () => {
     const { spP, verdict } = poolOf([
       { "Aedes aegypti": 0.355, "Aedes albopictus": 0.25, "Aedes japonicus": 0.215 },
       { "Aedes aegypti": 0.35, "Aedes albopictus": 0.255, "Aedes japonicus": 0.21 },
       { "Aedes aegypti": 0.36, "Aedes albopictus": 0.245, "Aedes japonicus": 0.22 },
     ]);
     const top = Math.max(...spP);
+    // The pooled posterior still crosses the species floor, and still would if
+    // the gate were left to read it - which is the bug, and it is why the gate
+    // is on the photos rather than on this number.
     expect(top).toBeGreaterThan(DEFAULT_FLOORS.species);
-    // This is the shipped behaviour, and it is the bug. Asserted explicitly so
-    // the failure is legible if a fix lands: the expectation below flips to
-    // `not.toBe("species")` when the pool stops reading the species floor.
-    expect(verdict!.state).toBe("species");
-    expect(verdict!.species).toBe("Aedes aegypti");
+    expect(verdict!.state).not.toBe("species");
+    expect(verdict!.species).toBeNull();
+    expect(verdict!.state).toBe("genus");
+    expect(verdict!.genus).toBe("Aedes");
   });
 
   it("the sharpening is the pooling, not the gate: pooling raises the winner monotonically", () => {
@@ -463,7 +465,7 @@ describe("PINNED, currently failing: the pool gates on a distribution it was not
     return { photos, specs };
   }
 
-  it.fails("a pool of genus-only photos must not reach a species claim", () => {
+  it("a pool of genus-only photos must not reach a species claim", () => {
     const { photos } = blankPhotos();
     // Precondition: every photo abstained of a species on its own.
     for (const p of photos) {
@@ -474,10 +476,74 @@ describe("PINNED, currently failing: the pool gates on a distribution it was not
     const w = poolingWeights(included, "Dependent evidence", 0.5);
     const agg = aggregateLogits(head, included, w);
     const pooled = pooledPosterior(head, agg)!;
-    // The arithmetic, stated so a failure prints the real numbers.
+    // The arithmetic, stated so a failure prints the real numbers. The pool
+    // still crosses the species floor; the gate no longer reads this number.
     expect(Math.max(...pooled)).toBeCloseTo(0.4625, 3);
-    // THIS is the assertion that fails: the pool names a species no photo named.
-    expect(pooledVerdict(head, agg)!.state).not.toBe("species");
+    expect(pooledVerdict(head, agg, included)!.state).not.toBe("species");
+  });
+
+  it("a pool whose photos all named a species still reaches one", () => {
+    // The gate the fix introduces must not swallow genuine multi-photo species
+    // claims, which is the case the genus-only rule costs real signal on. Three
+    // photos each above SPECIES_CONFIDENCE_FLOOR pool to a species.
+    const head2 = head;
+    const specs: Record<string, number>[] = [
+      { "Aedes aegypti": 0.55, "Aedes albopictus": 0.30, "Aedes japonicus": 0.10 },
+      { "Aedes aegypti": 0.52, "Aedes albopictus": 0.33, "Aedes japonicus": 0.10 },
+      { "Aedes aegypti": 0.58, "Aedes albopictus": 0.28, "Aedes japonicus": 0.09 },
+    ];
+    const photos = specs.map((over, i) => {
+      const rest =
+        (1 - Object.values(over).reduce((a, b) => a + b, 0)) /
+        (head2.species.length - Object.keys(over).length);
+      const p = head2.species.map((s, j) => (s in over ? over[s]! : rest));
+      return {
+        name: `clear-${i}`,
+        fingerprint: `fp-${i}`,
+        scores: Object.fromEntries(head2.species.map((s, j) => [s, p[j]!])),
+        logits: Object.fromEntries(head2.species.map((s, j) => [s, Math.log(p[j]!) + 5])),
+        verdict: verdictFrom(head2, p, null, []),
+      };
+    });
+    // Precondition: every photo named the species on its own.
+    for (const ph of photos) {
+      expect(ph.verdict.state).toBe("species");
+      expect(ph.verdict.species).toBe("Aedes aegypti");
+    }
+    const { included } = splitPoolable(photos);
+    const w = poolingWeights(included, "Dependent evidence", 0.5);
+    const agg = aggregateLogits(head2, included, w);
+    const v = pooledVerdict(head2, agg, included)!;
+    expect(v.state).toBe("species");
+    expect(v.species).toBe("Aedes aegypti");
+  });
+
+  it("one genus-only photo in the pool blocks the species claim for all of them", () => {
+    // The gate is on every contributing photo, not on a majority: a pool whose
+    // evidence never supported a species cannot report one on the strength of
+    // the photos that did.
+    const specs: Record<string, number>[] = [
+      { "Aedes aegypti": 0.55, "Aedes albopictus": 0.30, "Aedes japonicus": 0.10 },
+      { "Aedes aegypti": 0.52, "Aedes albopictus": 0.33, "Aedes japonicus": 0.10 },
+      { "Aedes aegypti": 0.355, "Aedes albopictus": 0.25, "Aedes japonicus": 0.215 },
+    ];
+    const photos = specs.map((over, i) => {
+      const rest =
+        (1 - Object.values(over).reduce((a, b) => a + b, 0)) /
+        (head.species.length - Object.keys(over).length);
+      const p = head.species.map((s, j) => (s in over ? over[s]! : rest));
+      return {
+        name: `mixed-${i}`,
+        fingerprint: `fp-${i}`,
+        scores: Object.fromEntries(head.species.map((s, j) => [s, p[j]!])),
+        logits: Object.fromEntries(head.species.map((s, j) => [s, Math.log(p[j]!) + 5])),
+        verdict: verdictFrom(head, p, null, []),
+      };
+    });
+    const { included } = splitPoolable(photos);
+    const w = poolingWeights(included, "Dependent evidence", 0.5);
+    const agg = aggregateLogits(head, included, w);
+    expect(pooledVerdict(head, agg, included)!.state).not.toBe("species");
   });
 
   it.fails("photos below the floor pool to a posterior still below it", () => {
