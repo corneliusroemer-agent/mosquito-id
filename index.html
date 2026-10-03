@@ -31,6 +31,14 @@
   }
 
   * { box-sizing: border-box; }
+
+  /* The scrollbar takes ~15px of width when it appears and disappears again as
+     the page grows past the viewport, so every element below shifted sideways
+     at once. The gutter is reserved either way, so the content box is constant
+     from first paint. Browsers without scrollbar-gutter simply keep the old
+     behaviour rather than losing the rule. */
+  html { scrollbar-gutter: stable; }
+
   body {
     margin: 0;
     /* Column flex + margin-top:auto on the footer pins it to the bottom of the
@@ -80,24 +88,43 @@
     margin-bottom: 16px;
   }
 
-  .load-card {
-    background: #ecfdf5;
-    border-color: #a7f3d0;
-    color: #065f46;
-    margin-top: 8px;
-    padding: 12px 16px;
+  /* One progress slot for the whole app. Model loading and photo processing are
+     two states of this element, never two boxes that each had to reserve their
+     own space - it is present from first paint at a fixed height and only its
+     visibility changes, so nothing in the page can move when work starts or
+     stops. Thin by design: a bar and one line, in a single row. */
+  .progress-slot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+    min-height: 14px;
+    visibility: hidden;
   }
-  @media (prefers-color-scheme: dark) {
-    .load-card {
-      background: #064e3b33;
-      border-color: #065f46;
-      color: #6ee7b7;
-    }
-  }
-  .load-msg {
-    font-size: 13px;
+  .progress-slot .progress-bar-track { flex: 0 0 160px; }
+  .progress-msg {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 12px;
     font-weight: 500;
-    margin-bottom: 6px;
+    color: var(--body-text-color-subdued);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #btn-cancel-batch { flex: 0 0 auto; }
+
+  /* No percentage available (session creation, ONNX parse): sweep instead of
+     showing a bar that sits at a number nobody can interpret. */
+  @keyframes progress-slide {
+    0%   { margin-left: 0; }
+    50%  { margin-left: calc(160px - 35%); }
+    100% { margin-left: 160px; }
+  }
+  .progress-slot.indeterminate .progress-bar-fill {
+    width: 35%;
+    transition: none;
+    animation: progress-slide 1.4s ease-in-out infinite;
   }
 
   .progress-bar-track {
@@ -116,13 +143,10 @@
     border-radius: 4px;
     transition: width 0.2s ease;
   }
-  .load-card .progress-bar-fill {
-    background: #10b981;
-  }
-
   .top-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
+    align-items: start;
     gap: 16px;
     margin-bottom: 16px;
   }
@@ -177,17 +201,8 @@
   .btn-primary:hover { background: var(--color-accent-hover); }
   .btn-sm { padding: 4px 12px; font-size: 12px; }
 
-  .batch-progress {
-    margin-top: 10px;
-    font-size: 12px;
-    color: var(--body-text-color-subdued);
-  }
-  .batch-progress .progress-bar-track { margin-top: 4px; }
-
   /* Combined result panel */
   .combined-card {
-    min-height: 280px;
-    max-height: 480px;
     overflow-y: auto;
   }
   .combined-header h2 {
@@ -203,7 +218,11 @@
     margin-bottom: 6px;
   }
   .combined-scores {
-    max-height: 240px;
+    /* A stable scroll area rather than a box that grows with the result: the
+       pooled row count changes with the selection, and a card that grew and
+       shrank with it resized the whole row above the gallery. Content varies,
+       the region does not. */
+    height: 240px;
     overflow-y: auto;
     scrollbar-gutter: stable;
     padding-right: 4px;
@@ -637,12 +656,19 @@
     .species-common { order: 2; flex: 0 0 100%; font-size: 11px; }
 
     /* One page scroll beats a scroller inside a scroller on touch. */
-    .score-list, .combined-scores {
+    .score-list {
       height: auto;
       max-height: none;
       overflow-y: visible;
       padding-right: 0;
       scrollbar-gutter: auto;
+    }
+    /* The pooled score list keeps its fixed height here too, so the card does
+       not resize as photos are checked. */
+    .combined-scores {
+      height: 240px;
+      overflow-y: auto;
+      padding-right: 0;
     }
     .combined-card { max-height: none; overflow: visible; }
 
@@ -820,9 +846,13 @@
         </select>
       </div>
     </div>
-    <div id="load-card" class="card load-card" style="display:none;">
-      <div id="load-msg" class="load-msg">Initializing engine...</div>
-      <div class="progress-bar-track"><div id="load-fill" class="progress-bar-fill"></div></div>
+    <!-- Present from first paint at a constant height. Idle it is invisible but
+         still occupies its space; model loading and photo processing both draw
+         into this one slot, so starting or finishing work moves nothing. -->
+    <div id="progress-slot" class="progress-slot">
+      <div class="progress-bar-track"><div id="progress-fill" class="progress-bar-fill"></div></div>
+      <span id="progress-msg" class="progress-msg"></span>
+      <button id="btn-cancel-batch" class="btn btn-sm" type="button" style="background:#fee2e2;color:#ef4444;border-color:#fca5a5;padding:2px 8px;font-size:11px;" disabled>Abort</button>
     </div>
   </header>
 
@@ -837,16 +867,12 @@
       </div>
       <button id="btn-camera" class="btn btn-primary" style="margin-top:8px;width:100%;">📸 Take a photo</button>
       <button id="btn-samples" class="btn btn-primary" style="margin-top:12px;width:100%;">Try 10 sample photos</button>
-      <div id="batch-progress" class="batch-progress" style="display:none;margin-top:12px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <span id="batch-progress-text" style="font-size:12px;font-weight:500;">Processing photos…</span>
-          <button id="btn-cancel-batch" class="btn btn-sm" style="background:#fee2e2;color:#ef4444;border-color:#fca5a5;padding:2px 8px;font-size:11px;">Abort</button>
-        </div>
-        <div class="progress-bar-track"><div id="batch-progress-fill" class="progress-bar-fill"></div></div>
-      </div>
     </div>
 
-    <div class="card combined-card" id="combined-card" style="display:none;">
+    <!-- Always present. Its height comes from a fixed-height scroll region for
+         the scores, not from how many photos happen to be pooled, so checking
+         or unchecking a photo cannot resize the row. -->
+    <div class="card combined-card" id="combined-card">
       <div class="combined-header">
         <h2>Combined result · checked photos</h2>
         <div class="combined-axis"><span>−20</span><span>−10</span><span>0 (best)</span></div>

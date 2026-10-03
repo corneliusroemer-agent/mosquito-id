@@ -320,6 +320,70 @@ function resolveModelUrl(path) {
   return MODEL_BASE_URL + path;
 }
 
+// ---- Shared progress slot ----
+// #progress-slot is in the DOM from first paint at a constant height, so these
+// are the only things that change: its visibility, the message, the bar. Model
+// loading and photo processing both draw here rather than each owning a box
+// that had to be hidden and shown - a box appearing or disappearing is what
+// pushed the rest of the page around. Ownership keeps a late model-load
+// completion from clearing a batch that is still running.
+let progressOwner = null;
+
+function setProgress(owner, text, pct) {
+  const slot = document.getElementById("progress-slot");
+  if (!slot) return;
+  progressOwner = owner;
+  const msg = document.getElementById("progress-msg");
+  const fill = document.getElementById("progress-fill");
+  if (msg) msg.textContent = text || "";
+  if (fill) {
+    slot.classList.toggle("indeterminate", pct === null || pct === undefined);
+    fill.style.width = `${Math.max(0, Math.min(100, pct || 0))}%`;
+  }
+  slot.style.visibility = "visible";
+  const cancel = document.getElementById("btn-cancel-batch");
+  if (cancel) cancel.disabled = owner !== "batch";
+}
+
+function clearProgress(owner) {
+  if (owner !== undefined && owner !== progressOwner) return;
+  const slot = document.getElementById("progress-slot");
+  if (!slot) return;
+  progressOwner = null;
+  slot.style.visibility = "hidden";
+  slot.classList.remove("indeterminate");
+  const fill = document.getElementById("progress-fill");
+  if (fill) fill.style.width = "0%";
+  const cancel = document.getElementById("btn-cancel-batch");
+  if (cancel) { cancel.disabled = true; cancel.onclick = null; }
+}
+
+// Bytes moved so far, the total when the server sent one, and the time the
+// transfer started - enough for a rate, and from a rate an ETA.
+function makeTransferProgress(label) {
+  const start = performance.now();
+  let lastAt = start;
+  let lastGot = 0;
+  return (got, total) => {
+    const now = performance.now();
+    if (now - lastAt < 500) return;   // rate needs a window, not a sample
+    const rate = ((got - lastGot) / (now - lastAt)) * 1000;
+    lastAt = now;
+    lastGot = got;
+    const known = total > 0;
+    const mb = (x) => (x / 1048576).toFixed(0);
+    let text = known ? `${label}: ${mb(got)} / ${mb(total)} MB` : label;
+    if (rate > 0) {
+      text += ` · ${mb(rate)} MB/s`;
+      if (known) {
+        const secs = Math.round((total - got) / rate);
+        text += secs > 0 ? ` · ${secs}s left` : " · done";
+      }
+    }
+    setProgress("model", text, known ? (100 * got) / total : null);
+  };
+}
+
 // ---- Model Loading with Persistent CacheStorage ----
 async function fetchWithProgress(url, onBytes) {
   const resp = await fetch(url);
@@ -397,12 +461,8 @@ const WEBGPU_MODELS = {
 };
 
 async function loadWebGPUModels(engineKey = "webgpu-fp16") {
-  const loadCard = document.getElementById("load-card");
-  const msg = document.getElementById("load-msg");
-  const fill = document.getElementById("load-fill");
-
-  loadCard.style.display = "block";
   window.modelsReady = false;
+  setProgress("model", "Initializing engine…", null);
 
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.simd = true;
@@ -426,12 +486,9 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
 
   // 1. Load detector if not loaded
   if (!sessDet) {
-    msg.textContent = "Loading detector (YOLO11n)…";
-    fill.style.width = "10%";
+    setProgress("model", "Loading detector (YOLO11n)…", 0);
     const detPath = resolveModelUrl("yolo11n-mosquito-det-640.onnx");
-    const detBuf = await fetchWithCache(detPath, (got, total) => {
-      fill.style.width = `${Math.min(20, (20 * got) / (total || 10607017))}%`;
-    });
+    const detBuf = await fetchWithCache(detPath, makeTransferProgress("Detector (YOLO11n)"));
     try {
       sessDet = await ort.InferenceSession.create(detBuf, { executionProviders: ["webgpu"] });
       detEP = "webgpu";
@@ -448,17 +505,12 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     sessClip = clipSessions[engineKey].sess;
     clipEP = clipSessions[engineKey].ep;
   } else {
-    msg.textContent = `Loading ${clipCfg.name}…`;
-    fill.style.width = "25%";
-    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), (got, total) => {
-      const mb = (x) => (x / 1048576).toFixed(0);
-      msg.textContent = `Loading ${clipCfg.name}: ${mb(got)} MB / ${mb(total || clipCfg.size)} MB`;
-      const pct = 25 + Math.min(70, (70 * got) / (total || clipCfg.size));
-      fill.style.width = `${pct}%`;
-    });
+    setProgress("model", `Loading ${clipCfg.name}…`, 0);
+    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), makeTransferProgress(clipCfg.name));
 
     let sess = null;
     let ep = "wasm";
+    setProgress("model", `Preparing ${clipCfg.name}…`, null);
     try {
       sess = await ort.InferenceSession.create(buf, { executionProviders: ["webgpu"] });
       ep = "webgpu";
@@ -476,8 +528,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   // 3. Load text embeddings for this model
   const targetEmbedsPath = clipCfg.embedsPath || "text_embeds.json";
   if (!embedsCache[targetEmbedsPath]) {
-    msg.textContent = `Loading species embeddings (${targetEmbedsPath})…`;
-    fill.style.width = "95%";
+    setProgress("model", "Loading species embeddings…", null);
     const r = await fetch(targetEmbedsPath);
     const data = await r.json();
     for (const k of ["species_emb", "nuisance_emb"]) {
@@ -487,10 +538,9 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   }
   EMB = embedsCache[targetEmbedsPath];
 
-  fill.style.width = "100%";
   const deviceLabel = `inference: ${clipCfg.name} (${clipEP.toUpperCase()}) · YOLO11n (${detEP.toUpperCase()})`;
   document.getElementById("footer-device").textContent = deviceLabel;
-  loadCard.style.display = "none";
+  clearProgress("model");
   window.modelsReady = true;
   sendLog("webgpu_models_ready", { engine: engineKey, clipEP, detEP });
 }
@@ -540,7 +590,7 @@ async function initEngine() {
       sendLog("engine_switched", { from: currentEngine, to: chosen });
       if (chosen === "server-gpu") {
         currentEngine = "server-gpu";
-        document.getElementById("load-card").style.display = "none";
+        clearProgress("model");
         if (footerDevice) {
           footerDevice.textContent = `inference: ${serverEngineLabel} · YOLO11n & BioCLIP 2.5 H/14 (Instant)`;
         }
@@ -556,7 +606,7 @@ async function initEngine() {
   }
 
   if (chosenEngine === "server-gpu" && serverAvailable) {
-    document.getElementById("load-card").style.display = "none";
+    clearProgress("model");
     if (footerDevice) {
       footerDevice.textContent = `inference: ${serverEngineLabel} · YOLO11n & BioCLIP 2.5 H/14 (Instant)`;
     }
@@ -1281,10 +1331,8 @@ async function processFiles(fileList) {
   isProcessingBatch = true;
   sendLog("process_files_started", { count: fileList.length });
 
-  const progressWrap = document.getElementById("batch-progress");
-  const progressText = document.getElementById("batch-progress-text");
-  const progressFill = document.getElementById("batch-progress-fill");
-  progressWrap.style.display = "block";
+  // The shared slot: a batch is just another thing that draws progress into it.
+  setProgress("batch", "Processing photos…", 0);
 
   const imageFiles = [];
   for (const f of fileList) {
@@ -1305,7 +1353,7 @@ async function processFiles(fileList) {
   }
 
   if (!imageFiles.length) {
-    progressWrap.style.display = "none";
+    clearProgress("batch");
     isProcessingBatch = false;
     return;
   }
@@ -1315,7 +1363,7 @@ async function processFiles(fileList) {
   if (btnCancelBatch) {
     btnCancelBatch.onclick = () => {
       isBatchAborted = true;
-      progressText.textContent = "Aborting…";
+      setProgress("batch", "Aborting…", null);
     };
   }
 
@@ -1385,7 +1433,7 @@ async function processFiles(fileList) {
           console.error("Error decoding", slot.name, err);
         }
         decoded++;
-        progressText.textContent = `Decoded ${decoded} of ${imageFiles.length} photos…`;
+        setProgress("batch", `Decoded ${decoded} of ${imageFiles.length} photos…`, null);
         renderThumbnails();
       }
     }));
@@ -1403,7 +1451,7 @@ async function processFiles(fileList) {
       }
       return;
     }
-    progressText.textContent = `Analyzing ${processed + 1} of ${imageFiles.length} photos on ${engineLabel} (${slot.name})…`;
+    setProgress("batch", `Analyzing ${processed + 1} of ${imageFiles.length} photos on ${engineLabel} (${slot.name})…`, (100 * processed) / imageFiles.length);
     try {
       if (currentEngine === "server-gpu") {
         const formData = new FormData();
@@ -1458,7 +1506,7 @@ async function processFiles(fileList) {
       console.error("Error processing", slot.name, err);
     }
     processed++;
-    progressFill.style.width = `${(processed / imageFiles.length) * 100}%`;
+    setProgress("batch", `Analyzed ${processed} of ${imageFiles.length} photos…`, (100 * processed) / imageFiles.length);
     renderThumbnails();
     renderActivePhoto();
     updatePooling();
@@ -1477,7 +1525,7 @@ async function processFiles(fileList) {
     await inferSlot(slots[i], i);
   }
 
-  progressWrap.style.display = "none";
+  clearProgress("batch");
   isProcessingBatch = false;
 
   renderThumbnails();
@@ -1530,7 +1578,7 @@ function deletePhoto(idx) {
   if (previews.length === 0) {
     document.getElementById("gallery-section").style.display = "none";
     document.getElementById("results-table-section").style.display = "none";
-    document.getElementById("combined-card").style.display = "none";
+    updatePooling();
   } else {
     renderThumbnails();
     renderActivePhoto();
@@ -2236,7 +2284,6 @@ async function revertToFullPhoto(idx) {
 
 // ---- Pooling / Evidence Aggregation ----
 function updatePooling() {
-  const poolCard = document.getElementById("combined-card");
   const poolScores = document.getElementById("combined-scores");
   const contribTable = document.getElementById("contribution-table").querySelector("tbody");
 
@@ -2248,10 +2295,14 @@ function updatePooling() {
   // card's header count and the table agree with each other.
   const included = checked.filter(p => !p.pending && !p.error);
   if (included.length <= 1) {
-    poolCard.style.display = "none";
+    // The card is permanent, so the empty case is drawn rather than hidden:
+    // hiding it resized the whole row above the gallery, and zooming re-pools,
+    // so it flickered out whenever the transient selection changed.
+    poolScores.innerHTML =
+      '<p class="hint" style="margin:0;">Check two or more photos of the same mosquito to combine their results.</p>';
+    contribTable.innerHTML = "";
     return;
   }
-  poolCard.style.display = "block";
 
   const selectedMethod = document.querySelector('input[name="pooling-method"]:checked')?.value || "Dependent evidence";
   const r = parseFloat(document.getElementById("corr-slider").value) || 0.5;
@@ -2625,6 +2676,6 @@ window.addEventListener("DOMContentLoaded", () => {
   // Init Engine
   initEngine().catch(err => {
     console.error("Engine initialization error:", err);
-    document.getElementById("load-msg").textContent = `Error: ${err.message}`;
+    setProgress("model", `Error: ${err.message}`, null);
   });
 });
