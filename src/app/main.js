@@ -509,39 +509,6 @@ function applyEngineNotices(engineKey) {
 }
 
 
-/**
- * Which ONNX output is the embedding.
- *
- * By NAME, checked against the head's dimension - never by position. culico is
- * the first model here with two graph outputs: the released file has `1747`
- * (its own 18-way probe logits, `[1,18]`) and the re-export adds
- * `culico_embedding` (`[1,1153]`). `Object.keys()` puts the numeric key first
- * regardless of graph order, so the positional read returned the 18 probe
- * logits, every dot product past index 17 was `undefined * number` = NaN, the
- * whole posterior was NaN, and the non-finite guard in `verdictFrom` returned
- * `{state: "unsure", topGenusP: 0, topSpeciesP: 0}` on every photograph. H/14
- * and B/16 have a single output, which is why this was invisible until culico.
- */
-function pickEmbedding(res) {
-  const want = EMB ? EMB.dim : null;
-  const keys = Object.keys(res);
-  // Preferred: an output whose width matches the head.
-  if (want) {
-    for (const k of keys) {
-      const t = res[k];
-      if (t && t.dims && t.dims.length === 2 && t.dims[1] === want) return t;
-    }
-  }
-  // Otherwise a named embedding output, in case the head has not loaded yet.
-  for (const k of keys) {
-    if (/embedding|embed/i.test(k) && res[k]?.data) return res[k];
-  }
-  throw new Error(
-    `No embedding among the model's outputs (${keys.join(", ")}); ` +
-    `none has width ${want}. The app reads features, not classifier logits.`
-  );
-}
-
 async function clipEmbed(sourceCanvas) {
   const cw = sourceCanvas.width;
   const ch = sourceCanvas.height;
