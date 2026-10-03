@@ -39,6 +39,7 @@ import { downloadCSV, renderResultsTable } from "./resultsTable";
 import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
+import { stampBuildSha } from "./buildSha";
 import { updatePooling } from "./poolingPanel";
 import { badge, canView, checkLabel, contributesToPool,
          removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
@@ -2200,6 +2201,10 @@ async function revertToFullPhoto(idx) {
 
 // ---- Initialization & Event Listeners ----
 window.addEventListener("DOMContentLoaded", () => {
+  // First, so the address bar names the build before anything else runs: the
+  // whole point is reading the SHA off the URL when the page misbehaves.
+  stampBuildSha();
+
   setupCropSurfaces();
   wireStripActions();
 
