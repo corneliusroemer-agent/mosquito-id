@@ -961,16 +961,15 @@ function hasCropBox(p) {
 function cropBoxInFullSurface(p) {
   if (!hasCropBox(p) || !p.fullCanvas) return null;
   const surfaceFull = document.getElementById("crop-surface-full");
-  const { k, off } = coverMapping(surfaceFull, p.fullCanvas);
-  const toSurface = (f) => (f - off) / k;
+  const { kx, ox, ky, oy } = coverMapping(surfaceFull, p.fullCanvas);
   const [bx1, by1, bx2, by2] = p.cropBox;
-  const l = toSurface(bx1 / p.fullCanvas.width);
-  const t = toSurface(by1 / p.fullCanvas.height);
+  const l = (bx1 / p.fullCanvas.width - ox) / kx;
+  const t = (by1 / p.fullCanvas.height - oy) / ky;
   return {
     left: l * 100,
     top: t * 100,
-    width: (toSurface(bx2 / p.fullCanvas.width) - l) * 100,
-    height: (toSurface(by2 / p.fullCanvas.height) - t) * 100,
+    width: ((bx2 / p.fullCanvas.width - ox) / kx - l) * 100,
+    height: ((by2 / p.fullCanvas.height - oy) / ky - t) * 100,
   };
 }
 
@@ -990,15 +989,14 @@ function cropBoxInZoomSurface(p) {
   const ctx_w = ctx_x2 - ctx_x1;
   const ctx_h = ctx_y2 - ctx_y1;
   if (!(ctx_w > 0) || !(ctx_h > 0)) return null;
-  const { k, off } = coverMapping(surfaceZoomed, p.contextCanvas || p.fullCanvas);
-  const toSurface = (f) => (f - off) / k;
-  const l = toSurface((cx1 - ctx_x1) / ctx_w);
-  const t = toSurface((cy1 - ctx_y1) / ctx_h);
+  const { kx, ox, ky, oy } = coverMapping(surfaceZoomed, p.contextCanvas || p.fullCanvas);
+  const l = ((cx1 - ctx_x1) / ctx_w - ox) / kx;
+  const t = ((cy1 - ctx_y1) / ctx_h - oy) / ky;
   return {
     left: l * 100,
     top: t * 100,
-    width: (toSurface((cx2 - ctx_x1) / ctx_w) - l) * 100,
-    height: (toSurface((cy2 - ctx_y1) / ctx_h) - t) * 100,
+    width: (((cx2 - ctx_x1) / ctx_w - ox) / kx - l) * 100,
+    height: (((cy2 - ctx_y1) / ctx_h - oy) / ky - t) * 100,
   };
 }
 
@@ -1023,17 +1021,23 @@ function applyBox(el, box) {
 // what is on screen (and are the identity in the normal, matching-aspect case).
 // object-fit:cover shows only a window of the image, and centres it. Returns the
 // affine map from image fraction to surface fraction: surface = (image - off) / k.
-// Identity when the aspects already match, which is the normal case.
+//
+// The scale is per-axis, because cover crops on exactly one axis: the other is
+// shown whole and is the identity. A single scalar k for both axes stretched
+// that whole axis by 1/k, so a crop outline drawn on the photo came out a
+// different shape from the same crop drawn in the zoom panel - the reported
+// "one panel's shape is more square, the other's more rectangular".
 function coverMapping(surface, img) {
-  const identity = { k: 1, off: 0 };
+  const identity = { kx: 1, ox: 0, ky: 1, oy: 0 };
   if (!surface || !img) return identity;
   const b = surface.getBoundingClientRect();
   if (b.width <= 0 || b.height <= 0) return identity;
   const boxAspect = b.width / b.height;
   const imgAspect = img.width / img.height;
   if (!imgAspect) return identity;
-  const k = Math.min(boxAspect / imgAspect, imgAspect / boxAspect);
-  return { k, off: (1 - k) / 2 };
+  const kx = Math.min(1, boxAspect / imgAspect);
+  const ky = Math.min(1, imgAspect / boxAspect);
+  return { kx, ox: (1 - kx) / 2, ky, oy: (1 - ky) / 2 };
 }
 
 function zoomedSurfaceMapping() {
@@ -1049,6 +1053,13 @@ function zoomedSurfaceMapping() {
 // layout for one synchronous read, then restore it. Both style writes land in
 // the same frame, so the hidden gallery is never painted.
 let cachedViewerAspect = null;
+
+// The cache is only read while #gallery-section is display:none, i.e. before the
+// first photo is classified. A rotate or a window resize changes the panel's
+// shape, and a context region cut for the old shape is wider or taller than the
+// panel it is shown in, so drop it and let the next photo measure afresh.
+window.addEventListener("resize", () => { cachedViewerAspect = null; });
+window.addEventListener("orientationchange", () => { cachedViewerAspect = null; });
 
 function measureViewerAspect() {
   const container = document.getElementById("crop-surface-zoomed")?.parentElement;
@@ -1955,10 +1966,17 @@ function setupCropSurfaces() {
 async function applyCropFromFullSurface(idx, rect, t0) {
   const p = previews[idx];
   const fullCv = p.fullCanvas;
-  const x1 = Math.max(0, Math.min(fullCv.width, Math.round(rect[0] * fullCv.width)));
-  const y1 = Math.max(0, Math.min(fullCv.height, Math.round(rect[1] * fullCv.height)));
-  const x2 = Math.max(0, Math.min(fullCv.width, Math.round(rect[2] * fullCv.width)));
-  const y2 = Math.max(0, Math.min(fullCv.height, Math.round(rect[3] * fullCv.height)));
+  // Surface fractions -> image fractions through the same cover window
+  // cropBoxInFullSurface() draws through, so a drag lands on the pixels the
+  // user pointed at rather than on the same fraction of a wider photo.
+  const { kx, ox, ky, oy } = coverMapping(
+    document.getElementById("crop-surface-full"), fullCv
+  );
+  const r = [kx * rect[0] + ox, ky * rect[1] + oy, kx * rect[2] + ox, ky * rect[3] + oy];
+  const x1 = Math.max(0, Math.min(fullCv.width, Math.round(r[0] * fullCv.width)));
+  const y1 = Math.max(0, Math.min(fullCv.height, Math.round(r[1] * fullCv.height)));
+  const x2 = Math.max(0, Math.min(fullCv.width, Math.round(r[2] * fullCv.width)));
+  const y2 = Math.max(0, Math.min(fullCv.height, Math.round(r[3] * fullCv.height)));
 
   if (x2 - x1 < 10 || y2 - y1 < 10) return;
 
@@ -1977,8 +1995,8 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
   // Surface fractions -> image fractions, through the object-fit:cover window,
   // so a fine-tune drag lands where the user pointed even if the context canvas
   // and the surface no longer share an aspect (e.g. after a window resize).
-  const { k, off } = zoomedSurfaceMapping();
-  const r = rect.map((f, i) => k * f + off);
+  const { kx, ox, ky, oy } = zoomedSurfaceMapping();
+  const r = [kx * rect[0] + ox, ky * rect[1] + oy, kx * rect[2] + ox, ky * rect[3] + oy];
 
   const x1 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + r[0] * ctx_w)));
   const y1 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + r[1] * ctx_h)));
