@@ -24,6 +24,9 @@ export interface LogContext {
 /** Anything serialisable a caller wants to attach to an event. */
 export type LogData = Record<string, unknown>;
 
+/** The bound logger, as a module that only needs to call one accepts it. */
+export type LogFn = (action: string, data?: LogData) => void;
+
 /**
  * Build the log function bound to one context.
  *

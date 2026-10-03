@@ -109,3 +109,28 @@ export interface ContextCrop {
   contextCanvas: HTMLCanvasElement;
   contextBox: Box;
 }
+
+/** One photo with a classification attached: the geometry fields plus what the classifier said. */
+export interface ClassifiedPhoto extends Preview {
+  scores: Record<string, number>;
+  detail: Record<string, number>;
+  verdict: Verdictish | null;
+  status?: string;
+  is_cropped?: boolean;
+  pending?: boolean;
+  error?: string | null;
+}
+
+/**
+ * The app's own claim about a photo.
+ *
+ * A structural restatement of confidence/types.ts's Verdict rather than an import
+ * of it, because this file is the leaf those types are described in terms of.
+ * The three states are the whole set: naming a species, naming only a genus, and
+ * declining.
+ */
+export interface Verdictish {
+  state: "species" | "genus" | "unsure" | "non-mosquito";
+  genus: string | null;
+  species?: string | null;
+}
