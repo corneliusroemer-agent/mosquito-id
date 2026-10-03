@@ -254,7 +254,7 @@ test.describe("tile states", () => {
     expect(shares.filter((s) => s.includes("33.3%"))).toHaveLength(3);
     // The excluded row's first cell carries its reason as well as its name, so
     // the row is matched on the name and read for the dash.
-    const excluded = shares.find((s) => s.startsWith("no_mosquito.jpg"));
+    const excluded = shares.find((s) => s.startsWith("nothing_here.jpg"));
     expect(excluded, "the unclassified photo must be listed").toMatch(/=-$/);
   });
 

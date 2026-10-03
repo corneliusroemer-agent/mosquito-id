@@ -370,6 +370,11 @@ test.describe("controls in the populated state", () => {
     await boot(page);
 
     const select = page.locator("#engine-select");
+    // The selector's change handler is attached in the same synchronous block
+    // that sets its initial value, so a select already carrying the default is
+    // a select that is listening. Selecting earlier than that is a no-op that
+    // reads exactly like a change handler that ignored the choice.
+    await expect(select).toHaveValue("webgpu-fp16");
     // The server option is not offered on the static site, so it must say so
     // rather than sit there as an option that would fail if picked.
     await expect(page.locator("#opt-server")).toBeDisabled();
