@@ -15,12 +15,18 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = path.resolve(import.meta.dirname, "..");
+// The BUILT site, not the checkout. index.html loads the bundle Vite produces,
+// and that bundle names other modules the naive static server below cannot
+// transpile, so serving the repo root 404s the entry script and every assertion
+// after the boot wait fails on a page that never ran. Build first
+// (npm run build); this probe needs the build to be current.
+const ROOT = path.resolve(import.meta.dirname, "..", "dist");
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".json": "application/json",
                 ".jpeg": "image/jpeg", ".jpg": "image/jpeg", ".png": "image/png" };
 
 const server = http.createServer((req, res) => {
-  const f = path.join(ROOT, req.url.split("?")[0].replace(/^\//, "") || "index.html");
+  const rel = decodeURIComponent(req.url.split("?")[0]);
+  const f = path.join(ROOT, rel === "/" ? "index.html" : rel.replace(/^\//, ""));
   if (!fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { "content-type": TYPES[path.extname(f)] || "text/plain" });
   res.end(fs.readFileSync(f));
