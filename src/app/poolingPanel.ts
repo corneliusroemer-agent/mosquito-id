@@ -7,10 +7,10 @@
  * is in src/confidence/pooling.ts, and this module supplies it with the head and
  * the photos and renders what comes back.
  *
- * A photo whose verdict is not a species or a genus is left out of the sum
- * entirely. That rule belongs to the confidence module, not here; what belongs
- * here is the reason it is visible: an excluded photo is listed with its reason
- * rather than silently contributing nothing.
+ * The rule that decides which photos are in the sum, and at what weight, belongs
+ * to the confidence module, not here. What belongs here is the reason it is
+ * visible: a photo that is counted below full weight says so, and one that is
+ * excluded is listed with the reason rather than silently contributing nothing.
  */
 
 // pooledVerdict is imported under a distinct name: updatePooling has a local
@@ -44,20 +44,17 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   // crop's evidence into the combined result, so it is left out. Its own row in
   // the results table stays empty until it has a verdict, which is where the
   // card's header count and the table agree with each other.
-  // A photo the classifier is not confident about at all - neither a species
-  // nor a genus - is LEFT OUT of the pooled combination entirely. Its fused
-  // logits are still a real posterior, and summing them in is what made the
-  // earlier parked abstention work a regression: the pooled card would fold in
-  // a species the app had just declined to name, which is worse than not
-  // gating at all. A photo that reached only the genus state does still
-  // contribute, because its evidence is sound and only its resolution is
-  // coarser; it is marked as such below rather than dropped.
-  // A photo the gate called NOT a mosquito is left out on the same grounds as one
-  // it could not name: its evidence is about a different subject, so pooling it
-  // would fold a midge's logits into a mosquito's posterior. Anything other than a
-  // species or genus verdict is therefore excluded, which is what makes the
-  // non-mosquito state safe to introduce without a second filter here.
-  const { included, abstained } = splitPoolable(checked);
+  // A photo the classifier is not confident about - neither a species nor a
+  // genus - IS pooled, at a fraction of a named photo's weight: see
+  // unsurePoolWeight. It used to be dropped, which meant a user could tick a box
+  // beside a photo and watch it contribute nothing. It can now corroborate a
+  // pool that already agrees and cannot overrule one, and because
+  // pooledVerdict() requires every pooled photo to have claimed a species, its
+  // presence in the pool caps the pooled claim at a genus.
+  // A photo the gate called NOT a mosquito is excluded outright: its evidence is
+  // about a different subject, and it is evidence against every species rather
+  // than weakly for one, so there is no small enough weight to fold it in at.
+  const { included, excluded } = splitPoolable(checked);
 
   // Both counts, always. A checked photo that does not enter the sum is
   // legitimate - it is listed in the contribution table with its reason - but
@@ -114,9 +111,9 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   // per-photo verdicts instead would let two confident photos averaging to a
   // confident mean outvote a third that pooled with them says nobody knows.
   //
-  // A per-photo `unsure` photo is already excluded from `included` above, so it
-  // is absent from this aggregate as well - the pooled headline cannot name a
-  // genus the pool itself refused to name.
+  // An `unsure` photo is in `included` and so in this aggregate, down-weighted.
+  // The pooled headline still cannot name a species while one is present: the
+  // gate below reads the photos, not just the sharpened posterior.
   //
   // `included` is passed so the pool can also gate its SPECIES claim on the
   // photos rather than on its own sharpened posterior: see pooledVerdict().
@@ -160,19 +157,27 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   included.forEach((p, idx) => {
     const tr = document.createElement("tr");
     const share = (((weights[idx] ?? 0) / sumW) * 100).toFixed(1);
-    // A genus-state photo is in the sum, so it says which claim it brought.
+    // A photo in the sum says what it brought and, if it was counted below full
+    // weight, by how much - so the share column is never a bare number whose
+    // meaning the reader has to guess.
     const note = p.verdict?.state === "genus"
-      ? `<br><span class="contrib-note">genus only: ${escapeHtml(p.verdict.genus)}</span>` : "";
+      ? `<br><span class="contrib-note">genus only: ${escapeHtml(p.verdict.genus)}</span>`
+      : p.verdict?.state === "unsure"
+        ? `<br><span class="contrib-note">not confident enough to name a genus: counted at ${(p.poolWeight * 100).toFixed(0)}% of a named photo</span>`
+        : "";
     tr.innerHTML = `<td>${escapeHtml(p.name)}${note}</td><td style="text-align:right">${share}%</td>`;
     contribTable.appendChild(tr);
   });
   // Photos left out of the sum are listed too, with the reason. A checked photo
   // that silently contributes nothing reads as a bug in the app; one that is
   // listed as excluded reads as what it is.
-  abstained.forEach((p) => {
+  excluded.forEach((p) => {
     const tr = document.createElement("tr");
     tr.className = "row-excluded";
-    tr.innerHTML = `<td>${escapeHtml(p.name)}<br><span class="contrib-note">excluded - not confident enough to name a genus</span></td><td style="text-align:right">-</td>`;
+    const why = p.excludedBecause === "non-mosquito"
+      ? "excluded - the classifier says this is not a mosquito, which is evidence against every species rather than weak evidence for one"
+      : "excluded - no verdict matches these pixels yet";
+    tr.innerHTML = `<td>${escapeHtml(p.name)}<br><span class="contrib-note">${why}</span></td><td style="text-align:right">-</td>`;
     contribTable.appendChild(tr);
   });
 }
