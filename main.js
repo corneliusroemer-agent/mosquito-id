@@ -1882,9 +1882,9 @@ function setAllSelected(on) {
 function deleteAllPhotos() {
   if (!previews.length) return;
   const n = previews.length;
-  // Destructive and not undoable, so it asks. The gallery is the user's work:
-  // photos may not be re-obtained if the originals are not on the device.
-  if (!window.confirm(`Delete all ${n} photo${n > 1 ? "s" : ""}? This cannot be undone.`)) return;
+  // No confirmation, matching deletePhoto: one press removes one photo without
+  // asking, so asking only for the batch made the strip inconsistent rather than
+  // cautious.
   // Mark first, exactly as deletePhoto does, so every in-flight inference for any
   // photo drops its result rather than writing into a slot that no longer exists.
   previews.forEach((p) => { p.removed = true; });
