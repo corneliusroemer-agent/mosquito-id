@@ -227,6 +227,11 @@ const ASYNC = (window.__mosqAsync = {
   get sessClip() { return sessClip; },
   get sessDet() { return sessDet; },
   get selectedIndex() { return selectedIndex; },
+  // Test seam. EMB is otherwise only assigned once a classifier session has been
+  // built, so a layout test cannot reach the pooled card without downloading the
+  // 1.26 GB model. Production never writes it.
+  get embeds() { return EMB; },
+  set embeds(v) { EMB = v; },
   selectPhoto,
   processFiles,
   deletePhoto

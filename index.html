@@ -253,11 +253,14 @@
     margin-bottom: 6px;
   }
   .combined-scores {
-    /* A stable scroll area rather than a box that grows with the result: the
-       pooled row count changes with the selection, and a card that grew and
-       shrank with it resized the whole row above the gallery. Content varies,
-       the region does not. */
-    height: 240px;
+    /* Sized by its content, and that content is fixed in size: the pooled list
+       is always the same ten candidates, so every populated state of this card
+       is exactly as tall as every other and re-pooling never resizes it. The
+       previous fixed 240px scroll area was the opposite of both - it clipped the
+       ten rows into a scroller and reserved two and a third of its height in a
+       card that had nothing pooled to show. 320px is the cap that only a very
+       long species name reaches, and it is where the scrollbar appears. */
+    max-height: 320px;
     overflow-y: auto;
     scrollbar-gutter: stable;
     padding-right: 4px;
@@ -725,11 +728,9 @@
       padding-right: 0;
       scrollbar-gutter: auto;
     }
-    /* The pooled score list keeps its fixed height here too, so the card does
-       not resize as photos are checked. */
+    /* Same as on the phone's wider sibling: the pooled list is always ten rows,
+       so its content is its settled height and the box needs no reservation. */
     .combined-scores {
-      height: 240px;
-      overflow-y: auto;
       padding-right: 0;
     }
     .combined-card { max-height: none; overflow: visible; }
@@ -817,35 +818,27 @@
     background: var(--background-fill-tertiary);
     border: 1px solid var(--border-color-primary);
   }
-  /* The score notice sits directly above the score list, so showing or hiding
-     it moved every score already on screen. Its height is reserved whether or
-     not there is anything to say, and the reservation is two lines - the
-     longest a status or error runs to before it ellipsizes - so a one-line
-     message and a two-line one occupy the same box. main.js toggles
-     visibility rather than display; the box is always there. */
-  #score-pending {
-    visibility: hidden;
+  /* The score notice sits directly above the score list, so its box is pinned
+     to two lines - the longest a status or error runs to before it ellipsizes -
+     and a one-line message and a two-line one occupy the same height. The
+     reservation is conditional, though. It used to be unconditional
+     (visibility:hidden, height always reserved), which held the same 50px open
+     in every ordinary state - a classified photo with no error has nothing to
+     put there - so the panel carried 100px of empty box above its first score.
+     An error arrives with no score list to displace, so there is nothing for a
+     permanent reservation to protect. */
+  #score-pending, #view-agreement {
+    display: none;
     min-height: 50px;
     max-height: 50px;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
   }
-  #score-pending.shown { visibility: visible; }
-  /* Where the photo's two views agree or disagree. Same reserved box as the
-     notice above it, and for the same reason: it appears once the second view
-     has landed, which for a large photo is seconds after the first, and a box
-     that grew then would push every score below it down the panel. Two lines
-     reserved, ellipsis beyond that, full sentence in the tooltip. */
-  #view-agreement {
-    visibility: hidden;
-    min-height: 50px;
-    max-height: 50px;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-  #view-agreement.shown { visibility: visible; }
+  #score-pending.shown, #view-agreement.shown { display: block; }
+  /* #view-agreement is the second box of the pair and is never written to - the
+     two-view agreement is no longer reported as a sentence (see main.js), so the
+     element is kept only so that id stays stable for anything that looks it up. */
   /* Disagreement is the case worth noticing: two views of one photo naming
      different species is right about half the time, against 94% when they
      agree. Amber, not red - the photo is undecided, not wrong. */
