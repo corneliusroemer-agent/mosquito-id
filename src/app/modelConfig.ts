@@ -9,6 +9,7 @@
  * each constant at its use.
  */
 import { PER_GENUS_COSINE_OFFSET } from "../confidence/calibration";
+import type { Capability } from "./granularity";
 
 /** Detector input is a square of this side, in pixels. */
 export const DET_SIZE = 640;
@@ -84,6 +85,28 @@ export interface ModelConfig {
   label: string;
   name: string;
   size: number;
+  /**
+   * What this engine's head can name, stated so the dropdown can say so BEFORE
+   * the user has chosen it - the head behind an unchosen engine is not loaded,
+   * so the words in the selector are the only place this can be said.
+   *
+   * Reporting does not read it. What the app prints comes from the grouping
+   * derived from the head that is actually loaded (see `capabilityOf`), because
+   * a refit can change this and cannot change the head. The two are asserted
+   * equal in `tests/report-granularity.test.ts`, so a refit that moves an engine
+   * from genus to species fails a test rather than leaving a stale label.
+   */
+  reports: Capability;
+}
+
+/**
+ * The trailing note on an engine's dropdown option, from its declared
+ * capability. Appended to the option's own text rather than replacing it, so the
+ * size and the "experimental" marker keep one source each and this only owns the
+ * granularity.
+ */
+export function capabilityNote(reports: Capability): string {
+  return reports === "genus" ? " \u00b7 genus only" : "";
 }
 
 /**
@@ -103,28 +126,37 @@ export const WEBGPU_MODELS: Record<string, ModelConfig> = {
     embedsPath: "text_embeds_culico.json",
     label: "culico-net (experimental · 81 MB)",
     name: "culico-net-cls-v1",
-    size: 85378550
+    size: 85378550,
+    // Its head gives three of the sixteen species one weight row each - Aedes
+    // vexans/geniculatus/cinereus, the whole of Culex, three Culiseta, three
+    // Anopheles - so within each set the two posteriors are the same number and
+    // the app cannot name one of them. Measured on the shipped head: 22.6%
+    // species accuracy against 94.9% genus.
+    reports: "genus"
   },
   "webgpu-b16": {
     path: "bioclip_visual_b16_fp16.onnx",
     embedsPath: "text_embeds_b16.json",
     label: "BioCLIP B/16 (FP16 · 172 MB)",
     name: "BioCLIP B/16 FP16",
-    size: 172725427
+    size: 172725427,
+    reports: "species"
   },
   "webgpu-fp16": {
     path: "bioclip_2_5_fp16.onnx",
     embedsPath: "text_embeds.json",
     label: "BioCLIP 2.5 H/14 (FP16 · 1.2 GB)",
     name: "BioCLIP 2.5 H/14 FP16",
-    size: 1259593728
+    size: 1259593728,
+    reports: "species"
   },
   "webgpu-int8": {
     path: "bioclip_2_5_int8.onnx",
     embedsPath: "text_embeds.json",
     label: "BioCLIP 2.5 H/14 (INT8 · 609 MB)",
     name: "BioCLIP 2.5 H/14 INT8",
-    size: 638205897
+    size: 638205897,
+    reports: "species"
   }
 };
 

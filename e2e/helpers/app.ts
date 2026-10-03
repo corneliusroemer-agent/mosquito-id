@@ -30,6 +30,7 @@ export interface MosqAsync {
   renderActivePhoto: () => void;
   updatePooling: () => void;
   renderResultsTable: () => void;
+  downloadCSV: () => void;
 }
 
 declare global {
@@ -170,13 +171,26 @@ function makeCanvas(w, h, hue, label) {
  * Run this only on a booted page: it assumes `__mosqAsync` exists and that
  * `text_embeds.json` is reachable (it is NOT aborted - see `stubModel`).
  */
-export async function populate(page: Page, specs: PhotoSpec[]): Promise<void> {
+export interface PopulateOptions {
+  /**
+   * Which head to load, by filename. Defaults to the H/14 head, which is what
+   * the page loads on its own.
+   *
+   * Set it to `text_embeds_culico.json` to exercise a head whose rows are
+   * byte-identical in places - what the app may and may not name differs per
+   * head, so a test that only ever loads H/14 cannot see that difference at all.
+   */
+  embeds?: string;
+}
+
+export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOptions = {}): Promise<void> {
   const body = `
     const specs = ${JSON.stringify(specs)};
+    const EMBEDS_FILE = ${JSON.stringify(opts.embeds ?? "text_embeds.json")};
     ${MAKE_CANVAS_SRC}
     (async () => {
     const A = window.__mosqAsync;
-    const emb = await fetch("text_embeds.json").then((r) => r.json());
+    const emb = await fetch(EMBEDS_FILE).then((r) => r.json());
     for (const k of ["species_emb", "nuisance_emb"]) emb[k] = Float32Array.from(emb[k]);
     A.embeds = emb;
 

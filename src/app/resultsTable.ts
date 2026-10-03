@@ -7,6 +7,7 @@
  * from app state, which is the only thing these need.
  */
 
+import { activeName } from "./granularity";
 import { escapeHtml } from "./speciesLabels";
 import type { LogFn } from "./telemetry";
 import type { ClassifiedPhoto } from "./types";
@@ -62,7 +63,11 @@ export function renderResultsTable(previews: ClassifiedPhoto[]): void {
     // ranking when the species gate abstains, never a fabricated one: a photo
     // the classifier cannot place shows the genus it did place, or nothing.
     const v = p.verdict || { state: "species" };
-    const topCell = v.state === "species" ? String(topSpec[0])
+    // `activeName` is what keeps the table honest: a species the loaded head
+    // cannot separate from its group-mates is written as the group here, so the
+    // column never shows a name the model did not earn. A head that separates
+    // every row returns the name unchanged.
+    const topCell = v.state === "species" ? (activeName(String(topSpec[0])) ?? String(topSpec[0]))
       : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
     const specPct = (topSpec[1] || 0) * 100;
     tr.innerHTML = `
@@ -94,7 +99,7 @@ export function downloadCSV(previews: ClassifiedPhoto[], sendLog: LogFn): void {
     // Same rule as the results table: the export carries the claim the app made,
     // so a photo the app would not name cannot leave the machine looking named.
     const v = p.verdict || { state: "species" };
-    const claim = v.state === "species" ? String(topSpec[0])
+    const claim = v.state === "species" ? (activeName(String(topSpec[0])) ?? String(topSpec[0]))
       : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
     const specPct = ((topSpec[1] || 0) * 100).toFixed(1);
     csv += `"${p.name}","${p.status}",${p.is_cropped},"${topGenus[0]}",${(topGenus[1] * 100).toFixed(1)},"${claim}",${specPct}\n`;
