@@ -90,13 +90,19 @@
     h.push('<span class="kb-credit">');
     var bits = [];
     if (im.author) bits.push(esc(im.author));
+    // species-data.json spells these keys snake_case, like every other field in
+    // it. Reading them camelCase silently dropped the licence and source links
+    // from all 40 photo captions, which for CC BY work means shipping the
+    // photographs with their attribution requirement unmet.
+    var licenceUrl = im.licence_url || im.licenceUrl;
+    var sourceUrl = im.source_url || im.sourceUrl;
     if (im.licence) {
-      bits.push(im.licenceUrl
-        ? '<a href="' + esc(im.licenceUrl) + '" target="_blank" rel="noopener nofollow">' + esc(im.licence) + "</a>"
+      bits.push(licenceUrl
+        ? '<a href="' + esc(licenceUrl) + '" target="_blank" rel="noopener nofollow">' + esc(im.licence) + "</a>"
         : esc(im.licence));
     }
-    if (im.sourceUrl) {
-      bits.push('<a href="' + esc(im.sourceUrl) + '" target="_blank" rel="noopener nofollow">source</a>');
+    if (sourceUrl) {
+      bits.push('<a href="' + esc(sourceUrl) + '" target="_blank" rel="noopener nofollow">source</a>');
     }
     if (bits.length) h.push("&middot; " + bits.join(" &middot; "));
     h.push("</span></figcaption></figure>");
