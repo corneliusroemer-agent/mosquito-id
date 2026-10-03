@@ -19,6 +19,13 @@ import { defineConfig, devices, type Project } from "@playwright/test";
  */
 const tier2 = process.env.MOSQ_E2E_TIER2 === "1";
 
+// Several agents run this suite on one box, and `vite preview` binds a fixed
+// port. Two of them picking 4173 collide and the loser's tests run against the
+// WINNER's dist - a false pass on someone else's build, which is the exact trap
+// BUILD-VERIFICATION.md warns about. The port is therefore per-worktree and
+// derived from the directory name.
+const PORT = Number(process.env.MOSQ_E2E_PORT ?? 4173 + (process.cwd().length % 200));
+
 const projects: Project[] = [
   {
     name: "tier1",
@@ -52,14 +59,14 @@ export default defineConfig({
   timeout: 45_000,
   expect: { timeout: 10_000 },
   use: {
-    baseURL: "http://localhost:4173",
+    baseURL: `http://localhost:${PORT}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   projects,
   webServer: {
-    command: "npm run build && npx vite preview --port 4173 --strictPort",
-    url: "http://localhost:4173",
+    command: `npm run build && npx vite preview --port ${PORT} --strictPort`,
+    url: `http://localhost:${PORT}`,
     reuseExistingServer: false,
     timeout: 180_000,
   },
