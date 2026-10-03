@@ -188,8 +188,10 @@ describe("entersPooledSum agrees with splitPoolable (spec §1.1)", () => {
       const p = photo(c);
       if (entersPooledSum(p)) expect(contributesToPool(p), JSON.stringify(c)).toBe(true);
     }
+    // An unsure photo pools, down-weighted; what it does not do is get a name
+    // out of the gate on its own.
     expect(contributesToPool(photo({ verdict: verdict("unsure") }))).toBe(true);
-    expect(entersPooledSum(photo({ verdict: verdict("unsure") }))).toBe(false);
+    expect(entersPooledSum(photo({ verdict: verdict("unsure") }))).toBe(true);
   });
 
   it("never lets a photo into the sum that the strip has closed the checkbox for", () => {
