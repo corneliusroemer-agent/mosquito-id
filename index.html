@@ -61,7 +61,18 @@
      the block is content-sized, and three sections (gallery, combined card,
      results table) are display:none until results exist - so the container
      started narrow and widened as photos arrived. Fill the width; never grow. */
+  /* flex column at every width, not just on phones: `margin-top: auto` on the
+     footer only resolves against a flex parent, and below 768px the only
+     flex parent it had was created by the phone media query - which is why the
+     footer stuck on a phone and floated mid-page on a desktop. flex: 1 grows
+     this to fill body's min-height so there is free space for `auto` to push
+     the footer into; below 768px .top-grid is dissolved with display:contents,
+     so the cards become flex items here, which is exactly what the phone
+     ordering needs. */
   .app-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
     width: 100%;
     max-width: 1180px;
     margin: 0 auto;
@@ -734,10 +745,6 @@
      margin-bottom, so the spacing between sections is unchanged. This block has
      to stay below the .upload-card/.dropzone rules it overrides. */
   @media (max-width: 768px) {
-    .app-container {
-      display: flex;
-      flex-direction: column;
-    }
     .top-grid { display: contents; }
     .app-header { order: 0; }
     .upload-card { order: 1; }
