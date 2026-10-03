@@ -220,3 +220,45 @@ The e2e tier1 suite passes against this build. `reactivity.spec.ts:81` is the on
 exception and is not this change: it fails identically on a pristine `origin/main`
 build served from the same box (145-166 ms on both against a 110 ms budget), so it
 is the load from several agents sharing one machine.
+
+## The pooled card never saw the nuisance block
+
+Found by the scoring agent while this branch was up. `pooledVerdict` called
+`verdictFrom` with `adP` only. `verdictFrom` reads **two** non-mosquito blocks
+with separate floors: `adP` (a specific other insect — a biting midge) and
+`nuP` (nothing mosquito-like is here; the nuisance rows are literally
+photographs of walls, hands and empty background). The pooled card saw only the
+first, so it could not answer "not a mosquito" from the evidence that most often
+carries it.
+
+The fix is the shape of every other block in this file: `PoolablePhoto` gains
+`nuP`, `aggregateNuisance` sums it on the same logZ-recovered axis as
+`aggregateAdjacent` (the two now share one helper rather than restating it), the
+panel forwards it, and `renormalizedPooledPosterior` subtracts it from the
+species mass alongside `adP`. Photos must actually carry `nuP`, so the three
+`fuseViews`-to-photo sites in `main.js` pass it alongside `adP`.
+
+### What it is worth, measured
+
+`aggregateNuisance` and the forwarding work, and two tests pin them: the same
+aggregate with and without the block decides `non-mosquito` against `species`.
+But the block does not change any *realistic* pool's answer, and the reason is
+worth writing down before someone assumes otherwise.
+
+The per-photo gate already excludes any photo whose nuisance mass reaches
+`floors.nuisance` (0.05), so every photo that **reaches the pool** carries less
+than that. Measured on three photos at 0.03 each: the pooled nuisance mass is
+**0.014** — *further* from the floor than any single photo was, not closer.
+Pooling sums log-probabilities, and on a 0.72-peaked photo the species side is
+two orders of magnitude larger, so three sub-threshold nuisance masses do not
+accumulate into a claim.
+
+So the forwarding makes the pooled claim *able* to read nuisance evidence and
+correctly takes it off the species mass; it does not make pools of walls get
+rejected. What would do that is raising `floors.nuisance` above the mass a pool
+can actually reach — and that floor was fitted deliberately by the scoring agent
+(0.05 catches nuisance mass peaked at 0.498 over 700 true negatives). Not this
+branch's call, and the swept knee is in their report.
+
+The measurement is pinned as a test so nobody re-derives it, and so the two
+forwarding tests above it are read for what they are.

@@ -21,6 +21,9 @@ import {
   unsurePoolWeight,
   poolingWeights,
   aggregateLogits,
+  aggregateAdjacent,
+  aggregateNuisance,
+  pooledNonMosquitoPosterior,
   pooledPosterior,
   pooledVerdict,
   UNSURE_POOL_WEIGHT_CAP,
@@ -269,5 +272,143 @@ describe("an unsure photo corroborates but cannot overrule", () => {
     const agg = aggregateLogits(head, included, poolingWeights(included, "Dependent evidence", 0.5));
     const spP = pooledPosterior(head, agg)!;
     expect(head.species[spP.indexOf(Math.max(...spP))]).toBe("Aedes aegypti");
+  });
+});
+
+describe("the pool reads the nuisance block, not only the adjacent one", () => {
+  /**
+   * A pool of photos each carrying a little nuisance evidence.
+   *
+   * `verdictFrom` reads two non-mosquito blocks with separate floors: `adP`
+   * (a specific other insect - a biting midge) and `nuP` (nothing
+   * mosquito-like is here; the nuisance rows are literally photographs of
+   * walls, hands and empty background). The pooled card forwarded only the
+   * first, so a pool whose evidence sat in the nuisance block could never say
+   * "not a mosquito" however much of it there was.
+   *
+   * The mass here is deliberately per-photo SUB-threshold: 0.03 clears nothing
+   * on its own against the 0.05 nuisance floor, so every photo pools normally
+   * and the evidence only becomes a claim once it is summed.
+   */
+  const wallish = (lead: number, nu: number, name: string): PoolablePhoto => {
+    const spP = post(head, peaked("Aedes japonicus", lead));
+    const nuP = new Array<number>((head.nuisance ?? []).length).fill(0);
+    nuP[0] = nu;
+    return {
+      name,
+      fingerprint: name,
+      scores: Object.fromEntries(head.species.map((s, i) => [s, spP[i]!])),
+      logits: logitsFor(spP),
+      nuP,
+      verdict: verdictFrom(head, spP, null, [], undefined, nuP),
+    };
+  };
+
+  function poolOf(photos: PoolablePhoto[]) {
+    const { included } = splitPoolable(photos);
+    const w = poolingWeights(included, "Dependent evidence", 0.5);
+    const agg = aggregateLogits(head, included, w);
+    return { included, w, agg, aggAdj: aggregateAdjacent(head, included, w), aggNu: aggregateNuisance(head, included, w) };
+  }
+
+  const pool = () =>
+    poolOf([
+      wallish(0.72, 0.03, "w1.png"),
+      wallish(0.73, 0.03, "w2.png"),
+      wallish(0.71, 0.03, "w3.png"),
+    ]);
+
+  it("each photo pools normally: 0.03 nuisance mass is under the 0.05 floor alone", () => {
+    // Precondition. A wall photo must clear the gate on its own to reach the
+    // pool, so the pool only ever sees sub-threshold nuisance mass - and that
+    // mass is exactly what the pooled card was discarding.
+    const { included } = splitPoolable([wallish(0.72, 0.03, "w1.png")]);
+    expect(included).toHaveLength(1);
+    expect(included[0]!.poolWeight).toBe(1);
+  });
+
+  it("aggregateNuisance puts the pool's nuisance evidence on the aggregate", () => {
+    const { aggNu } = pool();
+    expect(aggNu.length).toBe((head.nuisance ?? []).length);
+    expect(aggNu[0]).toBeGreaterThan(0);
+    // And the adjacent block is untouched by it: no midge in this pool.
+    expect(pool().aggAdj).toEqual([]);
+  });
+
+  it("pooledVerdict reads it: nuisance mass in the pool clears the nuisance floor", () => {
+    // The aggregate is built by hand here because no pool of photos that REACH
+    // the pool can carry this much nuisance mass - see the note below. What is
+    // under test is the forwarding, which is what was missing.
+    const agg: Record<string, number> = {};
+    head.species.forEach((sp) => (agg[sp] = Math.log(0.6)));
+    const aggNu = new Array<number>((head.nuisance ?? []).length).fill(0);
+    aggNu[0] = Math.log(0.4);
+    const v = pooledVerdict(head, agg, [], [], aggNu)!;
+    expect(v.state).toBe("non-mosquito");
+    expect(v.nonMosquitoKind).toBe("nuisance");
+    // The claim is about nothing mosquito-like, not about a named insect.
+    expect(v.adjacent).toBeUndefined();
+  });
+
+  it("the same aggregate with the nuisance block omitted names a species - the forwarding is what decides", () => {
+    const agg: Record<string, number> = {};
+    head.species.forEach((sp) => (agg[sp] = Math.log(0.6)));
+    const aggNu = new Array<number>((head.nuisance ?? []).length).fill(0);
+    aggNu[0] = Math.log(0.4);
+    expect(pooledVerdict(head, agg, [], [])!.state).not.toBe("non-mosquito");
+    expect(pooledVerdict(head, agg, [], [], aggNu)!.state).toBe("non-mosquito");
+  });
+
+  it("MEASURED: pooled nuisance mass does not accumulate past the floor from photos that reach the pool", () => {
+    // Worth recording, because it bounds what the forwarding is worth in
+    // practice and stops the test above being read as "pools of walls are now
+    // rejected".
+    //
+    // The per-photo gate already excludes any photo whose nuisance mass reaches
+    // 0.05, so every photo that REACHES the pool carries less than that. Summed
+    // over three photos at 0.03 each the pooled nuisance mass is 0.014 - further
+    // from the floor than one photo was, because pooling sums log-probabilities
+    // and the species side of a 0.72-peaked photo is far larger. The nuisance
+    // block cannot trip the pooled gate on its own at the shipped floors.
+    //
+    // What the forwarding does buy, and what these two tests pin: the block is
+    // aggregated on the correct axis, it is subtracted from the species mass in
+    // `renormalizedPooledPosterior`, and the gate reads it. That is the
+    // difference between the two calls above, and it is what makes the pooled
+    // claim able to say "not a mosquito" about nuisance evidence at all.
+    //
+    // Raising `floors.nuisance` above the pooled mass a pool can actually reach
+    // is the change that would make this bite end-to-end, and it is a floor the
+    // scoring agent fitted deliberately. Not this branch's call.
+    const { included, agg, aggNu } = pool();
+    const mass = pooledNonMosquitoPosterior(head, agg, [], aggNu).nuP.reduce((a, b) => a + b, 0);
+    expect(included).toHaveLength(3);
+    expect(aggNu[0]).toBeGreaterThan(0);
+    expect(mass).toBeGreaterThan(0);
+    expect(mass).toBeLessThan(DEFAULT_FLOORS.nuisance);
+  });
+
+  it("a pool of real mosquitoes is not dragged into a non-mosquito claim", () => {
+    // The forward direction matters as much: forwarding `nuP` must not make the
+    // pool reject a pool it would otherwise name.
+    const clean = (name: string, species: string): PoolablePhoto => {
+      const spP = post(head, peaked(species, 0.72));
+      const nuP = new Array<number>((head.nuisance ?? []).length).fill(0);
+      nuP[0] = 0.005;
+      return {
+        name,
+        fingerprint: name,
+        scores: Object.fromEntries(head.species.map((s, i) => [s, spP[i]!])),
+        logits: logitsFor(spP),
+        nuP,
+        verdict: verdictFrom(head, spP, null, [], undefined, nuP),
+      };
+    };
+    const { included, agg, aggAdj, aggNu } = poolOf([
+      clean("a.jpg", "Aedes aegypti"),
+      clean("b.jpg", "Aedes aegypti"),
+      clean("c.jpg", "Aedes aegypti"),
+    ]);
+    expect(pooledVerdict(head, agg, included, aggAdj, aggNu)!.state).toBe("species");
   });
 });

@@ -21,6 +21,13 @@ export interface PoolablePhoto {
    * and a photo without them contributes no non-mosquito mass to the pool.
    */
   adP?: number[];
+  /**
+   * Per-class nuisance posteriors, index-aligned with `head.nuisance` - walls,
+   * hands, empty background. The block that says nothing mosquito-like is here,
+   * as opposed to `adP`, which says a specific other insect. Absent on a head
+   * with no nuisance classes.
+   */
+  nuP?: number[];
   verdict?: Verdict | null;
 }
 
@@ -331,13 +338,43 @@ export function aggregateAdjacent(
   included: PoolablePhoto[],
   weights: number[],
 ): number[] {
-  const names = adjacentNames(head);
-  if (!names.length) return [];
+  return aggregateNonMosquitoBlock(head, included, weights, adjacentNames(head), (p) => p.adP);
+}
+
+/**
+ * The nuisance block summed exactly as `aggregateAdjacent` sums the adjacent
+ * one, so the pooled card can read it.
+ *
+ * The nuisance rows are the photographs of walls, hands and empty background -
+ * the evidence that says *nothing mosquito-like is here*, where the adjacent
+ * rows say a specific other insect. They are separate blocks with separate
+ * floors because they are separate claims, and the gate picks whichever one the
+ * photo is actually making. The pooled card must see both, or a pool of blank
+ * backgrounds is announced as a genus: which is exactly the regression
+ * `tests/regressions.test.ts` pins.
+ */
+export function aggregateNuisance(
+  head: Head,
+  included: PoolablePhoto[],
+  weights: number[],
+): number[] {
+  return aggregateNonMosquitoBlock(head, included, weights, head.nuisance ?? [], (p) => p.nuP);
+}
+
+function aggregateNonMosquitoBlock(
+  head: Head,
+  included: PoolablePhoto[],
+  weights: number[],
+  names: string[],
+  of: (p: PoolablePhoto) => number[] | undefined,
+): number[] {
+  if (!names.length || !head.species.length) return [];
   const agg = new Array<number>(names.length).fill(0);
   let any = false;
   included.forEach((p, i) => {
     const w = weights[i]!;
-    if (!(w > 0) || !p.adP || p.adP.length !== names.length || !p.logits || !p.scores) return;
+    const block = of(p);
+    if (!(w > 0) || !block || block.length !== names.length || !p.logits || !p.scores) return;
     // The per-photo constant shared by every class, read off the species side.
     let bestLogit = -Infinity;
     let bestP = 0;
@@ -353,7 +390,7 @@ export function aggregateAdjacent(
     if (!Number.isFinite(bestLogit) || !(bestP > 0) || bestP > 1) return;
     const logZ = bestLogit - Math.log(bestP);
     names.forEach((_, j) => {
-      const v = p.adP![j]!;
+      const v = block[j]!;
       if (!Number.isFinite(v) || v <= 0) return;
       agg[j]! += (Math.log(v) + logZ) * w;
       any = true;
@@ -381,16 +418,50 @@ export function pooledAdjacentPosterior(
   aggLogits: Record<string, number>,
   aggAdjLogits: number[],
 ): number[] {
-  if (!aggAdjLogits.length) return [];
+  return pooledBlockPosterior(head, aggLogits, aggAdjLogits, []).adjP;
+}
+
+/**
+ * Both non-mosquito blocks of the pool, on ONE denominator shared with the
+ * species - so that the species mass and the "nothing here" mass compete rather
+ * than each being inflated to 1 on its own.
+ */
+export interface PooledNonMosquito {
+  adjP: number[];
+  nuP: number[];
+}
+
+export function pooledNonMosquitoPosterior(
+  head: Head,
+  aggLogits: Record<string, number>,
+  aggAdjLogits: number[],
+  aggNuLogits: number[],
+): PooledNonMosquito {
+  return pooledBlockPosterior(head, aggLogits, aggAdjLogits, aggNuLogits);
+}
+
+function pooledBlockPosterior(
+  head: Head,
+  aggLogits: Record<string, number>,
+  aggAdjLogits: number[],
+  aggNuLogits: number[],
+): PooledNonMosquito {
+  const empty: PooledNonMosquito = { adjP: [], nuP: [] };
+  if (!aggAdjLogits.length && !aggNuLogits.length) return empty;
   const sp = head.species.map((s) => aggLogits[s] ?? NaN);
-  if (sp.some((v) => !Number.isFinite(v))) return [];
-  const all = sp.concat(aggAdjLogits);
+  if (sp.some((v) => !Number.isFinite(v))) return empty;
+  const all = sp.concat(aggAdjLogits, aggNuLogits);
   const mx = Math.max(...all);
   const ex = all.map((l) => Math.exp(l - mx));
   const total = ex.reduce((a, b) => a + b, 0);
-  if (!(total > 0) || !Number.isFinite(total)) return [];
-  const adj = ex.slice(sp.length).map((e) => e / total);
-  return adj.some((p) => p > 0) ? adj : [];
+  if (!(total > 0) || !Number.isFinite(total)) return empty;
+  const adjEnd = sp.length + aggAdjLogits.length;
+  const adjP = ex.slice(sp.length, adjEnd).map((e) => e / total);
+  const nuP = ex.slice(adjEnd).map((e) => e / total);
+  return {
+    adjP: adjP.some((p) => p > 0) ? adjP : [],
+    nuP: nuP.some((p) => p > 0) ? nuP : [],
+  };
 }
 
 export interface PooledCandidate {
@@ -440,11 +511,18 @@ function renormalizedPooledPosterior(
   head: Head,
   aggLogits: Record<string, number>,
   adjP: number[],
+  nuP: number[] = [],
 ): number[] | null {
   const spP = pooledPosterior(head, aggLogits);
   if (!spP) return null;
-  if (!adjP.length) return spP;
-  const spMass = 1 - adjP.reduce((a, b) => a + b, 0);
+  const other = adjP.length + nuP.length;
+  if (!other) return spP;
+  // BOTH non-mosquito blocks are evidence against the species, so the species
+  // share is what is left of the joint denominator after both are removed.
+  // Reading only the adjacent block is what let a pool of photographs of walls
+  // come back as a genus: those photos carry their mass in the nuisance rows,
+  // which are literally photographs of walls.
+  const spMass = 1 - adjP.reduce((a, b) => a + b, 0) - nuP.reduce((a, b) => a + b, 0);
   // Adjacent mass above 1 is not reachable from a softmax, but a caller that
   // passes one anyway gets the species-only posterior rather than negatives.
   if (!(spMass > 0) || !Number.isFinite(spMass)) return spP;
@@ -496,10 +574,11 @@ export function pooledVerdict(
   aggLogits: Record<string, number>,
   included: PoolablePhoto[] = [],
   aggAdjLogits: number[] = [],
+  aggNuLogits: number[] = [],
   floors: Floors = DEFAULT_FLOORS,
 ): Verdict | null {
-  const adjP = pooledAdjacentPosterior(head, aggLogits, aggAdjLogits);
-  const spP = renormalizedPooledPosterior(head, aggLogits, adjP);
+  const { adjP, nuP } = pooledNonMosquitoPosterior(head, aggLogits, aggAdjLogits, aggNuLogits);
+  const spP = renormalizedPooledPosterior(head, aggLogits, adjP, nuP);
   if (!spP) return null;
   // The adjacent mass the pool carries, on the same denominator as the species
   // mass, so the non-mosquito branch reads the pool the way the per-photo gate
@@ -508,7 +587,7 @@ export function pooledVerdict(
   // reports any - and is the deliberate value that verdictFrom's required `adP`
   // is there to make visible: the branch cannot fire, rather than firing on a
   // default.
-  const v = verdictFrom(head, spP, null, adjP, floors);
+  const v = verdictFrom(head, spP, null, adjP, floors, nuP);
   // "Not a mosquito" is a claim about every photo in the pool at once, and it
   // outranks a species claim rather than competing with one, so the photo gate
   // below does not apply to it. Neither does `unsure`: there is nothing to

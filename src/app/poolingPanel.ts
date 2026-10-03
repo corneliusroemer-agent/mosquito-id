@@ -15,8 +15,8 @@
 
 // pooledVerdict is imported under a distinct name: updatePooling has a local
 // variable of the same name holding its RESULT.
-import { aggregateAdjacent, aggregateLogits, pooledCandidates, pooledVerdict as pooledVerdictOf,
-         poolingWeights, splitPoolable } from "../confidence/pooling";
+import { aggregateAdjacent, aggregateLogits, aggregateNuisance, pooledCandidates,
+         pooledVerdict as pooledVerdictOf, poolingWeights, splitPoolable } from "../confidence/pooling";
 import type { PoolablePhoto, PoolingMethod } from "../confidence/pooling";
 import type { Head } from "../confidence/types";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
@@ -96,6 +96,10 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   // The same sum for the adjacent (non-mosquito) classes, so the pooled card can
   // say "this is not a mosquito" instead of being structurally unable to ask.
   const aggAdjLogits = aggregateAdjacent(head, included, weights);
+  // The nuisance block too - walls, hands, empty background. The adjacent rows
+  // say a specific other insect; these say nothing mosquito-like is here, which
+  // is the claim a pool of blank backgrounds needs to be able to make.
+  const aggNuLogits = aggregateNuisance(head, included, weights);
 
   // Relative Log Scores (Axis: -20 to 0)
   const candidates = pooledCandidates(head, aggLogits);
@@ -117,7 +121,7 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   //
   // `included` is passed so the pool can also gate its SPECIES claim on the
   // photos rather than on its own sharpened posterior: see pooledVerdict().
-  const pooledVerdict = pooledVerdictOf(head, aggLogits, included, aggAdjLogits);
+  const pooledVerdict = pooledVerdictOf(head, aggLogits, included, aggAdjLogits, aggNuLogits);
   // claimSentence, not verdictSentence: the rows below already go through
   // speciesLabelHtml and so already refuse to name a species the head cannot
   // separate, and the headline must agree with them rather than print a binomial

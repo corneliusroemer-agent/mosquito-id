@@ -86,7 +86,15 @@ test.describe("a photo with no mosquito in it", () => {
     await settle(page);
 
     await expect(page.locator("#thumbnail-strip .tile").nth(2).locator(".thumb-optin")).toBeDisabled();
-    await expect(page.locator("#contribution-table tbody tr")).toHaveCount(2);
+    // Three rows: the two mosquitoes with shares, and the wall with a dash. It
+    // contributes nothing either way, but a checked photo is listed rather than
+    // silently absent - the shares are the assertion that it was not counted.
+    const rows = page.locator("#contribution-table tbody tr");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(2)).toHaveClass(/row-excluded/);
+    await expect(rows.nth(2).locator("td").nth(1)).toHaveText("-");
+    await expect(rows.nth(0).locator("td").nth(1)).toHaveText("50.0%");
+    await expect(rows.nth(1).locator("td").nth(1)).toHaveText("50.0%");
     expect(errors(page)).toHaveLength(0);
   });
 
