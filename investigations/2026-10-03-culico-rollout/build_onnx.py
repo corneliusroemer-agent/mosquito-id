@@ -35,7 +35,15 @@ names = [o.name for o in m.graph.output]
 m.graph.node.append(helper.make_node("Concat", [FEAT, "culico_const_one"],
                                      ["culico_embedding"],
                                      axis=1, name="culico_embed_concat"))
-m.graph.output.append(helper.make_tensor_value_info(
+# ORDER IS LOAD-BEARING. clipEmbed reads `res[Object.keys(res)[0]]` -- the FIRST
+# output -- so the embedding must be output 0, not appended after the 18-way head.
+# Appending it put the 18-vector first, the app fed that into a 1153-dim head, every
+# cosine came back NaN, and every photo read "not confident".
+#
+# So the embedding is INSERTED at position 0 and culico's own 18-way head becomes
+# the second output, which nothing reads.
+out0 = m.graph.output.pop()
+m.graph.output.insert(0, helper.make_tensor_value_info(
     "culico_embedding", TensorProto.FLOAT, ["N", w + 1]))
 onnx.checker.check_model(m)
 onnx.save(m, DST)

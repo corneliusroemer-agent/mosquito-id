@@ -43,12 +43,38 @@ shipped filename differs from the original by 188 bytes.
 appended `1.0` coordinate carries it: the last column of each weight row *is* the
 intercept. Both sides agree without a change to scoring code.
 
-## The bug: species readout is broken
+## THE BUG: the app read the wrong ONNX output (fixed, live)
+
+`clipEmbed` reads **`res[Object.keys(res)[0]]`** - the FIRST output. My export
+*appended* the embedding after culico's own 18-way head, so output 0 was the
+18-vector. The app fed an 18-element array into a 1153-dim head, every cosine came
+back `NaN`, `NaN >= NaN` is false, so every photo took the nuisance-gate fallback
+and `verdictFrom` returned `unsure` on all of them. **Measured in the browser:
+400/400 `unsure`, zero cropped, fusion never ran.**
+
+The export now *inserts* the embedding at position 0 and drops culico's own
+18-way head entirely (unused - the probe is the head that ships). `build_onnx.py`
+carries the reason at the point of the change, because "append" is what reads as
+harmless here.
+
+Verified: output order is `['culico_embedding']`, `verify.py` still shows features
+reproducing the cache bit-exactly (max abs diff 0.0). Re-uploaded, CORS-checked.
+
+With only the output selection corrected, all downstream code being the app's
+own, over 400 uuid-grouped test rows: **coverage 59.0%, genus 94.9% on answered
+(CI 91.3-97.1), 56.0% over all photos, false positives 0/400.** Coverage is the
+remaining weakness: the head ships `logit_scale: 2.5`, so `localViewScale` is 1.0
+against H/14's 39.5, posteriors land at 0.15-0.31, and the 0.373 species floor is
+nearly unreachable.
+
+## The second bug: species readout is broken
 
 **Symptom.** Every photo reads "Not confident enough to name a genus". A CSV of
 the ten sample photos showed `Aedes  0.0%  Not confident  0.0%` on all ten.
 
-**The 0.0% is not a posterior.** Ten of the sixteen species in the app's label set
+This was **not** the cause of that CSV - the bug above was. This is what remains
+once the app reads the right tensor, and it is what stops culico from being usable
+even then. Ten of the sixteen species in the app's label set
 have **zero** species-rank training rows — every Culex and Anopheles row is
 genus-rank only (2,034 rows), plus three Aedes and one Culiseta. Because there is
 no within-genus evidence for those, the head gives each of them the **genus**
@@ -95,7 +121,14 @@ app's default read is a genus.
 
 ## Next steps, in order
 
-1. **Refit the head hierarchically.** A genus-only label should be evidence about
+0. **Re-run the browser accuracy read** now that the output selection is fixed.
+   The figure above came from a runtime monkeypatch; it should now reproduce with
+   no intervention. `webgpu-int8` is the way to get an H/14 number on this box -
+   FP16 throws `std::bad_alloc` under software WebGPU and hangs on a real adapter.
+1. **Fix coverage before anything else.** At 59% coverage culico answers fewer
+   than half the photos it is shown even with a correct readout. `logit_scale` is
+   worth more than further probe work.
+2. **Refit the head hierarchically.** A genus-only label should be evidence about
    the genus, not a reason to copy the genus row into every species column. The
    design already exists: `run_culico.py`
    (`investigations/2026-10-03-rewrite/40-precision/99-calibration-ship/`) builds
@@ -105,20 +138,20 @@ app's default read is a genus.
    express a shared genus term plus a within-genus term in a per-species weight
    row — a rank-1 constraint — is the actual problem, and the honest options are a
    small app change or accepting the genus/species trade above.
-2. **Do not ship until species argmax is measured**, not just genus. Target is
+3. **Do not ship until species argmax is measured**, not just genus. Target is
    both above ~70% on their own task.
-3. **Fine-tune checkpoints on test.** Per the frontier handoff, partial
+4. **Fine-tune checkpoints on test.** Per the frontier handoff, partial
    fine-tuning of culico's last 25% is the only arm still climbing (val macro-F1
    0.7626 → 0.8005 → **0.8141** vs frozen probe 0.7932, epoch 3 of 4). Per-epoch
    checkpoints are on disk, so this costs no training. **Score on test with a CI
    before believing it** — val has been the generous split in every arm. Do this
    after (1), because a broken readout would corrupt any measurement on top of it.
-4. **The `device` pre-init throw**, cosmetic, last. `ort.env.webgpu.device = …`
+5. **The `device` pre-init throw**, cosmetic, last. `ort.env.webgpu.device = …`
    throws `Cannot assign to read only property 'device'` on a real GPU adapter
    (it succeeds on SwiftShader, which is why headless runs pass). It is inside a
    try/catch and is non-fatal — the session is already created. Fix by not
    assigning, or by checking `Object.isFrozen` first.
-5. **Browser-harness traps**, if you run one. Port **4173 only** is on the R2
+6. **Browser-harness traps**, if you run one. Port **4173 only** is on the R2
    CORS allowlist. Playwright here gives the **last** registered matching route
    precedence, not the first. The detector must be served a *loadable* ONNX stub,
    not aborted: the app awaits it before requesting the classifier, so a failed
