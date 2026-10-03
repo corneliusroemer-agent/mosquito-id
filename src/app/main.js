@@ -537,12 +537,47 @@ async function clipEmbed(sourceCanvas) {
 
   const inName = sessClip.inputNames[0];
   const res = await sessClip.run({ [inName]: new ort.Tensor("float32", out, [1, 3, CLIP_SIZE, CLIP_SIZE]) });
-  const e = res[Object.keys(res)[0]].data;
+  const e = pickEmbedding(res).data;
+  // L2-normalise the feature coordinates only. The last one is a constant `1.0`
+  // appended to the model's output to carry the probe's bias term, and dividing
+  // it by the feature norm shrinks it by that same factor (~40x here), which
+  // throws away most of the bias.
+  const feats = EMB ? EMB.dim : e.length;
   let norm = 0;
-  for (let i = 0; i < e.length; i++) norm += e[i] * e[i];
-  norm = Math.sqrt(norm);
-  for (let i = 0; i < e.length; i++) e[i] /= norm;
+  for (let i = 0; i < feats && i < e.length; i++) norm += e[i] * e[i];
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < feats && i < e.length; i++) e[i] /= norm;
   return e;
+}
+
+/**
+ * Which of a model's outputs is the embedding.
+ *
+ * Selected by width, checked against the head's dimension, then by name - never
+ * by position. `Object.keys()` sorts integer-like keys ahead of string keys, so
+ * a graph whose outputs are `1747` and `culico_embedding` yields `1747` first
+ * regardless of the order the graph declares them in. Reading positionally would
+ * hand an 18-element probe-logit vector to a softmax whose rows are 1153 wide,
+ * every product past index 17 becomes `undefined * number` = NaN, and the
+ * non-finite guard in `verdictFrom` returns "not confident" for every photo.
+ * H/14 and B/16 have a single output, which is why this only ever bit culico.
+ */
+function pickEmbedding(res) {
+  const want = EMB ? EMB.dim : null;
+  const keys = Object.keys(res);
+  if (want) {
+    for (const k of keys) {
+      const t = res[k];
+      if (t && t.dims && t.dims.length === 2 && t.dims[1] === want) return t;
+    }
+  }
+  for (const k of keys) {
+    if (/embedding|embed/i.test(k) && res[k]?.data) return res[k];
+  }
+  throw new Error(
+    `No embedding among the model's outputs (${keys.join(", ")}); none is ${want} wide. ` +
+    `The app reads features, not classifier logits.`
+  );
 }
 
 // Temperature 2.5, applied by dividing the logit scale. Measured on the 112-image
