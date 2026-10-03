@@ -26,7 +26,8 @@ import { pooledPosterior as _pooledPosterior,
          pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
-         FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, resolveModelUrl } from "./modelConfig";
+         FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, cosineOffsetsFor,
+         resolveModelUrl } from "./modelConfig";
 import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
@@ -410,10 +411,14 @@ async function initEngine() {
 
   // Preference: URL query param > localStorage > default. fp16 is skipped while
   // it is unavailable, so a stale saved choice falls through instead of 404ing.
-  // fp16 is the default: it stays on the GPU and is the most accurate. INT8 is
-  // never the default - onnxruntime-web has no int8 WebGPU kernels, so the session
-  // silently falls back to WASM CPU and runs an order of magnitude slower.
-  const defaultEngine = "webgpu-fp16";
+  // culico is the default because it is the only engine a phone can fetch
+  // without caring about its data plan: 81 MB against H/14's 1.2 GB. It is
+  // experimental - its head is a linear probe and it cannot reject a photo with
+  // no mosquito in it as reliably as H/14 - so H/14 stays one click away and is
+  // the better answer on a connection that can afford it. INT8 is never the
+  // default: onnxruntime-web has no int8 WebGPU kernels, so the session silently
+  // falls back to WASM CPU and runs an order of magnitude slower.
+  const defaultEngine = "webgpu-culico";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
   const savedEngine = localStorage.getItem("mosquito_engine");
@@ -427,12 +432,14 @@ async function initEngine() {
       : defaultEngine;
 
   currentEngine = chosenEngine;
+  applyEngineNotices(chosenEngine);
   if (engineSelect) {
     engineSelect.value = chosenEngine;
     engineSelect.addEventListener("change", async (e) => {
       const chosen = e.target.value;
       localStorage.setItem("mosquito_engine", chosen);
       sendLog("engine_switched", { from: currentEngine, to: chosen });
+      applyEngineNotices(chosen);
       if (chosen === "server-gpu") {
         currentEngine = "server-gpu";
         clearProgress("model");
@@ -470,6 +477,33 @@ async function initEngine() {
 }
 
 const loadModels = () => initEngine();
+
+/**
+ * State what the selected model can and cannot do, in the header, and keep the
+ * pipeline line naming the classifier that is actually running.
+ *
+ * The caveat text is not decoration. culico's head is a linear probe whose
+ * non-mosquito gate is measurably weaker than H/14's text head, so on a photo
+ * of a wall it will sometimes name a species. That is only acceptable while the
+ * page says so rather than leaving a user to find out by being wrong in public.
+ *
+ * The caveat line keeps its box whether or not the model has a caveat: showing
+ * and hiding it moved everything below it, which is a layout shift (CLS 0.27 on
+ * desktop when it was toggled). A model with nothing to declare renders as an
+ * empty reserved line.
+ */
+function applyEngineNotices(engineKey) {
+  const cfg = WEBGPU_MODELS[engineKey];
+  const caveat = document.getElementById("engine-caveat");
+  if (caveat) caveat.textContent = cfg?.caveat || "";
+  const sub = document.getElementById("pipeline-sub");
+  if (sub) {
+    sub.textContent =
+      engineKey === "server-gpu"
+        ? "Cascade: YOLO11n crop → BioCLIP 2.5 H/14 analysis (server)"
+        : `Cascade: YOLO11n crop → ${cfg?.name || "classifier"} analysis`;
+  }
+}
 
 
 async function clipEmbed(sourceCanvas) {
@@ -675,7 +709,7 @@ async function classifyImage(imgBitmap, filename) {
   let fallback = false;
   if (best) {
     const emb = await clipEmbed(cropCv);
-    const j = softmaxJoint(EMB, emb);
+    const j = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(currentEngine) });
     if (Math.max(...j.spP) >= Math.max(...j.nuP)) {
       cropView = { spP: j.spP, nuTotal: j.nuP.reduce((a, b) => a + b, 0), adP: j.adP,
                    scale: localViewScale() };
@@ -692,7 +726,7 @@ async function classifyImage(imgBitmap, filename) {
   // The whole frame is always a view: either the second opinion on a crop that
   // passed the gate, or the only view there is.
   const wholeEmb = await clipEmbed(fullCv);
-  const wholeJ = softmaxJoint(EMB, wholeEmb);
+  const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(currentEngine) });
   views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
                adP: wholeJ.adP, scale: localViewScale() });
 
@@ -1636,7 +1670,7 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
 // finished verdict, because the verdict is the fused one.
 async function classifyViewLocal(canvas) {
   const emb = await clipEmbed(canvas);
-  const { spP, nuP, adP } = softmaxJoint(EMB, emb);
+  const { spP, nuP, adP } = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(currentEngine) });
   return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), adP, scale: localViewScale() };
 }
 
