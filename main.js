@@ -767,18 +767,24 @@ function complexScores(spP, spCos) {
 // match. Return the affine map surfaceFraction -> imageFraction for the photo
 // currently shown, so the crop-box overlay and the fine-tune drag agree with
 // what is on screen (and are the identity in the normal, matching-aspect case).
-function zoomedSurfaceMapping() {
+// object-fit:cover shows only a window of the image, and centres it. Returns the
+// affine map from image fraction to surface fraction: surface = (image - off) / k.
+// Identity when the aspects already match, which is the normal case.
+function coverMapping(surface, img) {
   const identity = { k: 1, off: 0 };
-  const p = previews[selectedIndex];
-  const surface = document.getElementById("crop-surface-zoomed");
-  if (!p?.contextCanvas || !surface) return identity;
+  if (!surface || !img) return identity;
   const b = surface.getBoundingClientRect();
   if (b.width <= 0 || b.height <= 0) return identity;
   const boxAspect = b.width / b.height;
-  const imgAspect = p.contextCanvas.width / p.contextCanvas.height;
+  const imgAspect = img.width / img.height;
   if (!imgAspect) return identity;
   const k = Math.min(boxAspect / imgAspect, imgAspect / boxAspect);
   return { k, off: (1 - k) / 2 };
+}
+
+function zoomedSurfaceMapping() {
+  const p = previews[selectedIndex];
+  return coverMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas);
 }
 
 // Aspect ratio (w/h) of the zoomed panel's container, i.e. the box the context
@@ -1359,10 +1365,15 @@ function renderActivePhoto() {
   if (fullActiveBox) {
     if (p.cropBox && p.fullCanvas && !p.fallback && !p.manual_full_photo) {
       const [bx1, by1, bx2, by2] = p.cropBox;
-      const l = (bx1 / p.fullCanvas.width) * 100;
-      const t = (by1 / p.fullCanvas.height) * 100;
-      const w = ((bx2 - bx1) / p.fullCanvas.width) * 100;
-      const h = ((by2 - by1) / p.fullCanvas.height) * 100;
+      // The panel shows a centred object-fit:cover window of the photo, so image
+      // fractions have to go through the same map the panel uses or the box drifts
+      // off the mosquito - worst exactly where the panel is needed most.
+      const { k, off } = coverMapping(surfaceFull, p.fullCanvas);
+      const toSurface = (f) => (f - off) / k;
+      const l = toSurface(bx1 / p.fullCanvas.width) * 100;
+      const t = toSurface(by1 / p.fullCanvas.height) * 100;
+      const w = (toSurface(bx2 / p.fullCanvas.width) - l / 100) * 100;
+      const h = (toSurface(by2 / p.fullCanvas.height) - t / 100) * 100;
       fullActiveBox.style.left = `${l}%`;
       fullActiveBox.style.top = `${t}%`;
       fullActiveBox.style.width = `${w}%`;
@@ -1379,10 +1390,14 @@ function renderActivePhoto() {
   const cropEmpty = document.getElementById("crop-empty");
   const zoomedActiveBox = document.getElementById("zoomed-active-crop-box");
 
-  if (p.cropBox && !p.fallback && !p.manual_full_photo && p.contextCanvas) {
+  // Show the photo whenever there is one to show. Reverting to the full photo sets
+  // manual_full_photo and clears cropBox while still having a canvas, so gating on
+  // cropBox showed the "Using full photo" placeholder over an available image.
+  const zoomSource = p.contextCanvas || p.fullCanvas;
+  if (zoomSource && !p.fallback && !p.pending && !p.error) {
     surfaceZoomed.style.width = "100%";
     surfaceZoomed.style.height = "100%";
-    contextImg.src = p.contextCanvas.toDataURL("image/jpeg", 0.9);
+    contextImg.src = zoomSource.toDataURL("image/jpeg", 0.9);
     contextImg.style.display = "block";
     contextImg.style.width = "100%";
     contextImg.style.height = "100%";
@@ -1390,7 +1405,7 @@ function renderActivePhoto() {
     cropEmpty.style.display = "none";
 
     // Draw where the crop sits within the context region
-    if (zoomedActiveBox && p.contextBox) {
+    if (zoomedActiveBox && p.contextBox && p.cropBox) {
       const [cx1, cy1, cx2, cy2] = p.cropBox;
       const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
       const ctx_w = ctx_x2 - ctx_x1;
@@ -1407,6 +1422,8 @@ function renderActivePhoto() {
       zoomedActiveBox.style.width = `${w}%`;
       zoomedActiveBox.style.height = `${h}%`;
       zoomedActiveBox.style.display = "block";
+    } else if (zoomedActiveBox) {
+      zoomedActiveBox.style.display = "none";
     }
   } else {
     contextImg.style.display = "none";

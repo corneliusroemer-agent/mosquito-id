@@ -427,11 +427,14 @@
     max-height: 320px;
     max-width: 100%;
   }
+  /* cover, not contain: contain letterboxes the photo and leaves black bars where
+     there is image to show. With cover the surface shows a centred window of the
+     photo, so anything drawn over it must map through coverMapping(). */
   .crop-surface img {
     display: block;
     width: 100%;
     height: 100%;
-    object-fit: contain;
+    object-fit: cover;
     pointer-events: none;
     user-select: none;
   }
