@@ -169,9 +169,12 @@
     gap: 16px;
     margin-bottom: 16px;
   }
-  @media (max-width: 768px) {
-    .top-grid { grid-template-columns: 1fr; }
-  }
+  /* On a phone the page is one column, so the two top cards stack: dropper,
+     then a tall blank pooled-score box, then the photos. That reads backwards,
+     because the pooled result is an OUTPUT - it belongs after the photos it
+     summarises. .top-grid is dissolved (display:contents) below, in the phones
+     media query, so its two cards are laid out by .app-container and can be
+     ordered around #gallery-section. */
 
   .upload-card {
     display: flex;
@@ -698,8 +701,37 @@
   }
 
   /* Phones: single column, so reclaim the width the gutters were using and
-     let the long panels use the full column. */
+     let the long panels use the full column.
+
+     This is also where .top-grid is dissolved (display:contents), so its two
+     cards become items of .app-container and can be ordered around
+     #gallery-section: dropper, photos, then the pooled result. The grid gap and
+     the wrapper's margin go with it, but every card carries its own 16px
+     margin-bottom, so the spacing between sections is unchanged. This block has
+     to stay below the .upload-card/.dropzone rules it overrides. */
   @media (max-width: 768px) {
+    .app-container {
+      display: flex;
+      flex-direction: column;
+    }
+    .top-grid { display: contents; }
+    .app-header { order: 0; }
+    .upload-card { order: 1; }
+    #gallery-section { order: 2; }
+    #combined-card { order: 3; }
+    #results-table-section { order: 4; }
+    .app-footer { order: 5; }
+
+    /* A phone gives the dropper its own screen. The icon moves beside the text
+       instead of above it and the hint is allowed to wrap to two lines rather
+       than being cut, which takes the card from 280px to about 210 without
+       touching a word of it; the two full-width buttons below are the rest of
+       the tap target. */
+    .upload-card { min-height: 0; }
+    .dropzone { flex-direction: row; align-items: center; gap: 12px;
+                padding: 16px 14px; text-align: left; }
+    .dropzone-icon { font-size: 26px; margin-bottom: 0; flex: 0 0 auto; }
+    .dropzone-copy { flex: 1 1 auto; min-width: 0; }
     body { padding: 16px 12px; }
     .card { padding: 12px; }
     .app-header { margin-bottom: 16px; }
@@ -920,8 +952,10 @@
     <div class="card upload-card">
       <div id="dropzone" class="dropzone" tabindex="0">
         <div class="dropzone-icon">📷</div>
-        <div class="dropzone-text">Drop photos or ZIP · paste images with ⌘V / Ctrl+V</div>
-        <div class="dropzone-sub">or click to browse files</div>
+        <div class="dropzone-copy">
+          <div class="dropzone-text">Drop photos or ZIP · paste images with ⌘V / Ctrl+V</div>
+          <div class="dropzone-sub">or click to browse files</div>
+        </div>
         <input id="file-input" type="file" multiple accept="image/*,.zip" style="display:none">
         <input id="camera-input" type="file" accept="image/*" capture="environment" style="display:none">
       </div>
