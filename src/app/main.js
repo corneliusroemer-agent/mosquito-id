@@ -1870,6 +1870,10 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
   const views = viewsFor(p, cropCv, cropBox);
   const landed = [];
   let dropped = false;
+  // The fused result for the views that have landed, kept for the log line below.
+  // The loop recomputes it once per view as each lands; the last one is the pool
+  // of every view, which is what a reader of `views_fused` wants to see.
+  let fused = null;
 
   for (const view of views) {
     await afterNextPaint();
@@ -1882,7 +1886,7 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
     // Paint what is known so far. The fused verdict is recomputed from the views
     // that have landed, so the first view's paint is that view's own softmax
     // unchanged, and the second replaces it with the pool of the two.
-    applyViews(p, landed, views.length);
+    fused = applyViews(p, landed, views.length);
     renderThumbnails();
     renderActivePhoto();
     updatePooling(EMB, previews, includedIndices);
@@ -1900,7 +1904,7 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
     name: p.name,
     rev,
     views: landed.length,
-    ...posteriorSummary(fused),
+    ...posteriorSummary(fused || {}),
     ...verdictSummary(p),
   });
   return { dropped: false };
