@@ -34,6 +34,7 @@ import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
 import { downloadCSV, renderResultsTable } from "./resultsTable";
+import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
 import { updatePooling } from "./poolingPanel";
@@ -299,57 +300,6 @@ class Superseded extends Error {}
 
 
 
-// ---- Model Loading with Persistent CacheStorage ----
-async function fetchWithProgress(url, onBytes) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
-  const total = Number(resp.headers.get("content-length")) || 0;
-  const reader = resp.body.getReader();
-  const chunks = [];
-  let got = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    got += value.length;
-    if (onBytes) onBytes(got, total);
-  }
-  const out = new Uint8Array(got);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  if (onBytes) onBytes(got, total || got, true);   // final sample: the bar reaches 100%
-  return out.buffer;
-}
-
-async function fetchWithCache(url, onBytes) {
-  if ("caches" in window) {
-    try {
-      const cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(url);
-      if (cached) {
-        console.log(`[CacheStorage] HIT for ${url}`);
-        sendLog("cache_hit", { url });
-        const size = Number(cached.headers.get("content-length")) || 0;
-        if (onBytes) onBytes(size || 1, size || 1, true);
-        return await cached.arrayBuffer();
-      }
-      console.log(`[CacheStorage] MISS for ${url}, fetching from network...`);
-      sendLog("cache_miss", { url });
-      const buf = await fetchWithProgress(url, onBytes);
-      const toStore = new Response(buf.slice(0), {
-        headers: { "Content-Type": "application/octet-stream", "Content-Length": String(buf.byteLength) }
-      });
-      await cache.put(url, toStore);
-      return buf;
-    } catch (err) {
-      console.warn("CacheStorage read/write warning:", err);
-    }
-  }
-  return await fetchWithProgress(url, onBytes);
-}
 
 const embedsCache = {};
 
@@ -381,7 +331,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   if (!sessDet) {
     setProgress("model", "Loading detector (YOLO11n)…", 0);
     const detPath = resolveModelUrl("yolo11n-mosquito-det-640.onnx");
-    const detBuf = await fetchWithCache(detPath, makeTransferProgress("Detector (YOLO11n)"));
+    const detBuf = await fetchWithCache(detPath, makeTransferProgress("Detector (YOLO11n)"), sendLog);
     try {
       sessDet = await ort.InferenceSession.create(detBuf, { executionProviders: ["webgpu"] });
       detEP = "webgpu";
@@ -399,7 +349,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     clipEP = clipSessions[engineKey].ep;
   } else {
     setProgress("model", `Loading ${clipCfg.name}…`, 0);
-    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), makeTransferProgress(clipCfg.name));
+    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), makeTransferProgress(clipCfg.name), sendLog);
 
     let sess = null;
     let ep = "wasm";
