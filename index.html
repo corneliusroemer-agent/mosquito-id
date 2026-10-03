@@ -162,7 +162,10 @@
   .top-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    align-items: start;
+    /* Equal-height row: both cards take the taller of the two. The left card is
+       a flex column whose dropzone has flex:1, so the extra height goes into the
+       dropzone rather than into a gap under the buttons. */
+    align-items: stretch;
     gap: 16px;
     margin-bottom: 16px;
   }
