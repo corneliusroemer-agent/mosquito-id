@@ -85,6 +85,39 @@ const GENUS_CONFIDENCE_FLOOR = 0.80;
 // uniform hesitation, because photos whose views agree answer exactly as before.
 const VIEW_DISAGREEMENT_VETOES_SPECIES = true;
 
+// ---- "This is not a mosquito" ----
+//
+// The adjacent classes (biting midges, blackflies, hoverflies and the rest of
+// the confusable Diptera) plus the eight nuisance classes are scored in the SAME
+// softmax as the sixteen species, so the total posterior on everything that is
+// not a mosquito is already on the same axis as a species posterior. That total
+// is what this gate reads; it is not a second score derived from the first.
+//
+// CHOSEN FOR BEHAVIOUR, NOT FITTED. This is the honest description of the number
+// and it matters more than the number. The evidence available when it was set:
+//
+//   - On the 6,264-row in-domain mosquito cache, the adjacent classes take more
+//     mass than the best mosquito in 0.67% of rows, at ANY floor - a mosquito
+//     photo misreads as a biting midge that often enough to be a real cost, and
+//     this floor is what keeps most of those photos on the species side.
+//   - The false-positive side could NOT be measured from that cache, because the
+//     cache contains no non-mosquito images at all. The benchmark that would fit
+//     this number is
+//     investigations/2026-10-02-mosquito-id/36-adjacent-taxa.md (in-domain
+//     background crops, detector-verified); it measures the FLY class only, and
+//     it is not part of the shipped text embeddings, so it cannot be run by a
+//     user.
+//
+// So this constant is a starting point chosen to make the reported defect go
+// away without costing mosquitoes, and the two numbers above are the only things
+// actually measured. What would fit it: a labelled set of real non-mosquito
+// phone photos (plain paper, skin, fabric, a table, a wall, a hand, plus the
+// ones with a small mosquito present) scored through this same path, which would
+// give the missing half - the false-positive rate - and turn this into a
+// measured threshold. Until then, treat a "not a mosquito" result as a
+// well-founded guess and the FLOOR as a guess inside it.
+const NON_MOSQUITO_FLOOR = 0.60;
+
 // Models live on Cloudflare R2, reached through the bucket's public development
 // URL. Objects sit at the root of that host - the dev URL serves the one bucket
 // directly, with no bucket-name path segment.
@@ -322,6 +355,9 @@ function commitScores(p, r) {
   p.demoted = r.demoted;
   // A verdict that claims nothing must not keep the one it had: pooling reads it.
   p.verdict = r.verdict || null;
+  // The per-class non-mosquito posteriors, for the score panel to name the winner
+  // from. Cleared with the verdict so a stale one cannot outlive the claim.
+  p.adjacentDetail = r.adjacentDetail || null;
   p.pending = false;
   p.error = null;
 }
@@ -1055,13 +1091,24 @@ function fuseViews(viewResults) {
   const adjNames = adjacentNames();
   const A = adjNames.length;
   let adP = [];
-  if (A) {
-    const logAd = new Array(A).fill(0);
+  // Only pool the adjacent classes if some view actually scored them. A caller
+  // that passes views without `adP` (a server path, or an embeddings file from
+  // before the classes existed) gets none, and the non-mosquito gate then cannot
+  // fire at all - which is right: it has no evidence to fire on.
+  if (A && viewResults.some((v) => v.adP)) {
+    const logAd = new Array(A).fill(-Infinity);
     for (const v of viewResults) {
-      for (let i = 0; i < A; i++) logAd[i] += Math.log(Math.max(v.adP[i], 1e-12));
+      for (let i = 0; i < A; i++) {
+        // A view that carries no adjacent posteriors contributes NO mass rather
+        // than a flat share. A flat share would invent an even split of evidence
+        // nobody supplied and could carry the gate on its own.
+        if (!v.adP || !Number.isFinite(v.adP[i])) continue;
+        const l = Math.log(Math.max(v.adP[i], 1e-12));
+        logAd[i] = Number.isFinite(logAd[i]) ? logAd[i] + l : l;
+      }
     }
-    const mxAd = Math.max(logNu, ...logSum, ...logAd);
-    const exAd = logAd.map((l) => Math.exp(l - mxAd));
+    const mxAd = Math.max(logNu, ...logSum, ...logAd.filter(Number.isFinite));
+    const exAd = logAd.map((l) => (Number.isFinite(l) ? Math.exp(l - mxAd) : 0));
     const sumAd = logSum.reduce((a, l) => a + Math.exp(l - mxAd), 0)
       + Math.exp(logNu - mxAd)
       + exAd.reduce((a, b) => a + b, 0);
@@ -1103,8 +1150,18 @@ const c = genusScores(spP, spCos);
   // the verdict and the caller - a second caller recomputing it would be a
   // second disagreement measure, free to drift from the one the gate read.
   const agreement = viewAgreement(viewResults.map((v) => v.spP), spP);
-  return { labels: c.labels, detail, logits, demoted: c.demoted, spP, nuP, spCos, nViews: V,
-           agreement, verdict: verdictFrom(spP, agreement) };
+  // The per-class non-mosquito posteriors, keyed by the plain-language name, so
+  // the score panel can say WHICH non-mosquito it is without re-deriving the
+  // softmax. A class the embeddings file does not carry is simply absent here and
+  // the non-mosquito state cannot fire, which is what makes the state safe on an
+  // older embeddings file.
+  const adjacentDetail = {};
+  adjacentNames().forEach((fam, i) => {
+    adjacentDetail[(EMB.adjacent_common && EMB.adjacent_common[i]) || fam] = adP[i] || 0;
+  });
+
+  return { labels: c.labels, detail, logits, demoted: c.demoted, spP, nuP, adP, spCos, nViews: V,
+           adjacentDetail, agreement, verdict: verdictFrom(spP, agreement, adP) };
 }
 
 // ---- Genus, and the three-state verdict ----
@@ -1160,7 +1217,7 @@ function speciesGenusIndex() {
 // Returns null-ish fields rather than throwing on an empty posterior, so a
 // malformed score array degrades to "not confident" instead of taking the page
 // down.
-function verdictFrom(spP, agreement) {
+function verdictFrom(spP, agreement, adP) {
   if (!spP || !spP.length) {
     return { state: "unsure", genus: null, species: null, topGenusP: 0, topSpeciesP: 0, runnersUp: [] };
   }
@@ -1184,6 +1241,39 @@ function verdictFrom(spP, agreement) {
     .filter((i) => i !== topSpecies)
     .sort((a, b) => (spP[b] || 0) - (spP[a] || 0))
     .map((i) => ({ name: EMB.species[i], p: spP[i] || 0 }));
+
+  // "This is not a mosquito", which is a claim about the photograph and so has
+  // to outrank every species claim rather than sit beside one.
+  //
+  // It is checked FIRST, on the non-mosquito mass alone, and needs the classes to
+  // agree rather than merely to lead: a single view of paper can be a moment's
+  // artefact, but both views landing on a biting midge is the classifier saying
+  // something about the subject and not about the lighting. Measured on the
+  // 6,264-row in-domain cache this costs 0.67% of true mosquitoes, which is why
+  // the mass has to clear a floor rather than merely beat the best species -
+  // the in-domain negative benchmark in
+  // investigations/2026-10-02-mosquito-id/36-adjacent-taxa.md is what a lower
+  // floor would have to be measured against, and it did not exist when this was
+  // written. Neither number here is fitted.
+  if (adP && adP.length) {
+    const nonMosquito = adP.reduce((a, b) => a + b, 0);
+    if (nonMosquito >= NON_MOSQUITO_FLOOR) {
+      let top = 0;
+      for (let i = 1; i < adP.length; i++) if (adP[i] > adP[top]) top = i;
+      return {
+        state: "non-mosquito",
+        genus: null,
+        species: null,
+        topGenusP,
+        topSpeciesP,
+        runnersUp: [],
+        adjacent: adjacentNames()[top],
+        adjacentCommon: (EMB.adjacent_common || [])[top] || adjacentNames()[top],
+        adjacentP: adP[top],
+        nonMosquitoP: nonMosquito
+      };
+    }
+  }
 
   // A species claim needs the photo's views to have agreed as well as the fused
   // posterior to be high. The veto demotes into the genus branch below rather
@@ -1222,6 +1312,14 @@ function pooledPosterior(aggLogits) {
 function verdictSentence(v) {
   if (!v) return "";
   if (v.state === "species") return "";
+  // The one state that names what it saw instead of what it did not: the ranking
+  // below it is a list of mosquitoes this photo was not, so the sentence has to
+  // come first and has to be about the subject.
+  if (v.state === "non-mosquito") {
+    const what = v.adjacentCommon || v.adjacent;
+    const pct = Math.round((v.nonMosquitoP || 0) * 100);
+    return `This does not look like a mosquito - it looks like ${what} (${pct}% of the match).`;
+  }
   if (v.state === "genus") {
     // "Definitely Aedes - maybe aegypti or albopictus". Two runners-up is enough
     // to say which way it is torn; more is noise, and the ranking below already
@@ -1565,7 +1663,8 @@ async function classifyImage(imgBitmap, filename) {
     const emb = await clipEmbed(cropCv);
     const j = softmaxJoint(emb);
     if (Math.max(...j.spP) >= Math.max(...j.nuP)) {
-      cropView = { spP: j.spP, nuTotal: j.nuP.reduce((a, b) => a + b, 0), scale: localViewScale() };
+      cropView = { spP: j.spP, nuTotal: j.nuP.reduce((a, b) => a + b, 0), adP: j.adP,
+                   scale: localViewScale() };
     } else {
       cropCv = fullCv;
       cropBox = null;
@@ -1580,7 +1679,8 @@ async function classifyImage(imgBitmap, filename) {
   // passed the gate, or the only view there is.
   const wholeEmb = await clipEmbed(fullCv);
   const wholeJ = softmaxJoint(wholeEmb);
-  views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0), scale: localViewScale() });
+  views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
+               adP: wholeJ.adP, scale: localViewScale() });
 
   const clipTime = Math.round(performance.now() - tClip0);
   const totalTime = Math.round(performance.now() - t0);
@@ -1624,6 +1724,7 @@ async function classifyImage(imgBitmap, filename) {
     logits: fused.logits,
     demoted: fused.demoted,
     verdict: fused.verdict,
+    adjacentDetail: fused.adjacentDetail,
     agreement: fused.agreement,
     viewsLanded: views.length,
     viewsTotal: views.length,
@@ -1796,6 +1897,7 @@ async function processFiles(fileList) {
           is_cropped: data.is_cropped,
           demoted: fused.demoted,
           verdict: fused.verdict,
+          adjacentDetail: fused.adjacentDetail,
           agreement: fused.agreement,
           viewsLanded: views.length, viewsTotal: views.length,
           fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
@@ -1903,7 +2005,10 @@ function deletePhoto(idx) {
 // A photo can only be pooled if its checkbox is enabled, so the bulk actions use
 // the same rule rather than a second one that could drift from it.
 function isSelectable(p) {
-  return Boolean(p) && !p.fallback && !p.pending && !p.error;
+  if (!p || p.fallback || p.pending || p.error) return false;
+  // A photo the gate called not-a-mosquito is finished and valid, but it has
+  // nothing to contribute to a pooled mosquito result, so it is not selectable.
+  return p.verdict?.state !== "non-mosquito";
 }
 
 function renderThumbnails() {
@@ -2215,6 +2320,34 @@ function renderActivePhoto() {
     scoreList.appendChild(item);
   }
 
+  // A photo the gate called not-a-mosquito gets the winning non-mosquito class
+  // on top of the list and the mosquito ranking dropped below it, because a
+  // sixteen-row ranking of species this photo is not is the exact readout that
+  // made a photograph of paper come back as a confident mosquito. The species
+  // scores are still in p.detail for the pooling maths - they are simply not the
+  // thing to put in front of someone here.
+  if (p.verdict?.state === "non-mosquito" && p.adjacentDetail) {
+    const top = Object.entries(p.adjacentDetail).sort((a, b) => b[1] - a[1])[0];
+    if (top) {
+      const notMosquito = document.createElement("div");
+      notMosquito.className = "score-item is-not-mosquito";
+      const pct = (top[1] * 100).toFixed(1);
+      notMosquito.innerHTML = `
+        <div class="score-item-header">
+          <span class="species-name-wrap">${top[0]}</span>
+          <strong>${pct}%</strong>
+        </div>
+        <div class="score-item-track">
+          <div class="score-item-fill" style="width: ${Math.max(0, Math.min(100, top[1] * 100))}%"></div>
+        </div>
+      `;
+      scoreList.insertBefore(notMosquito, scoreList.firstChild);
+      for (const item of scoreList.querySelectorAll(".score-item:not(.is-not-mosquito)")) {
+        item.style.display = "none";
+      }
+    }
+  }
+
   // The status line names the photo and, when one failed, why. A pending
   // photo's p.status describes work in flight ("decoding… detecting…") and is
   // deliberately not shown: the name alone, with the score list dimmed below it,
@@ -2392,8 +2525,8 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
 // finished verdict, because the verdict is the fused one.
 async function classifyViewLocal(canvas) {
   const emb = await clipEmbed(canvas);
-  const { spP, nuP } = softmaxJoint(emb);
-  return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), scale: localViewScale() };
+  const { spP, nuP, adP } = softmaxJoint(emb);
+  return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), adP, scale: localViewScale() };
 }
 
 // The server's answer for one crop box, in the same shape. `detail` is the
@@ -2698,8 +2831,15 @@ function updatePooling() {
   // gating at all. A photo that reached only the genus state does still
   // contribute, because its evidence is sound and only its resolution is
   // coarser; it is marked as such below rather than dropped.
+  // A photo the gate called NOT a mosquito is left out on the same grounds as one
+  // it could not name: its evidence is about a different subject, so pooling it
+  // would fold a midge's logits into a mosquito's posterior. Anything other than a
+  // species or genus verdict is therefore excluded, which is what makes the
+  // non-mosquito state safe to introduce without a second filter here.
   const abstained = checked.filter(p => !p.pending && !p.error && p.verdict?.state === "unsure");
-  const included = checked.filter(p => !p.pending && !p.error && p.verdict?.state !== "unsure");
+  const included = checked.filter(
+    p => !p.pending && !p.error &&
+         (p.verdict?.state === "species" || p.verdict?.state === "genus"));
   if (included.length <= 1) {
     // The card is permanent, so the empty case is drawn rather than hidden:
     // hiding it resized the whole row above the gallery, and zooming re-pools,

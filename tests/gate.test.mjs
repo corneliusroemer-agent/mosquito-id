@@ -16,7 +16,10 @@ const EMBS = JSON.parse(readFileSync(join(here, "..", "text_embeds.json"), "utf8
 
 // The real 16-species label set, so genus derivation is exercised on the names
 // that actually ship rather than on a convenient fixture.
-const EMB = { species: EMBS.species, logit_scale: 100 };
+// The real adjacent classes too, so the non-mosquito state is exercised against
+// the names that actually ship rather than a convenient fixture.
+const EMB = { species: EMBS.species, adjacent: EMBS.adjacent,
+              adjacent_common: EMBS.adjacent_common, logit_scale: 100 };
 
 const grab = (name) => {
   const start = src.indexOf(`function ${name}(`);
@@ -53,6 +56,8 @@ ${grab("speciesGenusIndex")}
 const SPECIES_CONFIDENCE_FLOOR = globalThis.__SPECIES_FLOOR;
 const GENUS_CONFIDENCE_FLOOR = globalThis.__GENUS_FLOOR;
 const VIEW_DISAGREEMENT_VETOES_SPECIES = globalThis.__DISAGREEMENT_VETOES;
+const NON_MOSQUITO_FLOOR = globalThis.__NON_MOSQUITO_FLOOR;
+${grab("adjacentNames")}
 ${grab("verdictFrom")}
 ${grab("verdictSentence")}
 ${grab("genusScores")}
@@ -60,16 +65,19 @@ ${grab("fuseViews")}
 ${grab("viewAgreement")}
 const GENUS_MARGIN = globalThis.__GENUS_MARGIN;
 globalThis.__api = { verdictFrom, verdictSentence, fuseViews, viewAgreement,
-  speciesGenusIndex, genusOf,
-  SPECIES_CONFIDENCE_FLOOR, GENUS_CONFIDENCE_FLOOR, VIEW_DISAGREEMENT_VETOES_SPECIES };
+  speciesGenusIndex, genusOf, adjacentNames,
+  SPECIES_CONFIDENCE_FLOOR, GENUS_CONFIDENCE_FLOOR, VIEW_DISAGREEMENT_VETOES_SPECIES,
+  NON_MOSQUITO_FLOOR };
 `;
 globalThis.__SPECIES_FLOOR = constOf("SPECIES_CONFIDENCE_FLOOR");
 globalThis.__GENUS_FLOOR = constOf("GENUS_CONFIDENCE_FLOOR");
 globalThis.__GENUS_MARGIN = constOf("GENUS_MARGIN");
 globalThis.__DISAGREEMENT_VETOES = boolOf("VIEW_DISAGREEMENT_VETOES_SPECIES");
+globalThis.__NON_MOSQUITO_FLOOR = constOf("NON_MOSQUITO_FLOOR");
 (0, eval)(harness);
 const api = globalThis.__api;
-const { verdictFrom, verdictSentence, fuseViews, viewAgreement, speciesGenusIndex } = api;
+const { verdictFrom, verdictSentence, fuseViews, viewAgreement, speciesGenusIndex,
+        adjacentNames, NON_MOSQUITO_FLOOR } = api;
 
 const S = EMB.species.length;
 const post = (over) => {
@@ -260,6 +268,64 @@ check("the disagreement measure is computed once, by fuseViews, and is the same 
   // One view cannot disagree with itself, so the gate is inert there.
   assert.equal(fuseViews([views[0]]).agreement, null);
   assert.equal(fuseViews([views[0]]).verdict.state, "species");
+});
+
+// --- the non-mosquito state.
+const AD = EMB.adjacent.length;
+const adjPost = (over) => {
+  const p = new Array(AD).fill(0);
+  for (const [i, v] of Object.entries(over)) p[i] = v;
+  return p;
+};
+
+check("a heavy adjacent posterior names a non-mosquito instead of a species", () => {
+  const v = verdictFrom(post({ "Aedes aegypti": 0.99 }), { agree: true },
+                        adjPost({ 0: 0.95 }));
+  assert.equal(v.state, "non-mosquito");
+  assert.equal(v.adjacent, EMB.adjacent[0]);
+  // The sentence names the plain-language subject, which is the whole point:
+  // a user cannot act on "Ceratopogonidae".
+  const sent = verdictSentence(v);
+  assert.ok(sent.includes(EMB.adjacent_common[0]), `sentence names the subject: ${sent}`);
+  assert.ok(/does not look like a mosquito/i.test(sent), sent);
+});
+
+check("the non-mosquito state outranks a species claim, not just an unsure one", () => {
+  // The defect this state exists for: a confident, well-separated mosquito
+  // posterior alongside a big non-mosquito one must not render a ranking.
+  const v = verdictFrom(post({ "Aedes aegypti": 0.999 }), { agree: true },
+                        adjPost({ 2: 0.9 }));
+  assert.equal(v.state, "non-mosquito");
+});
+
+check("a small adjacent mass leaves the photo's own verdict alone", () => {
+  const v = verdictFrom(post({ "Aedes aegypti": 0.99 }), { agree: true },
+                        adjPost({ 0: 0.05 }));
+  assert.equal(v.state, "species");
+  assert.equal(v.species, "Aedes aegypti");
+});
+
+check("no adjacent classes supplied means the gate cannot fire", () => {
+  const v = verdictFrom(post({ "Aedes aegypti": 0.99 }), { agree: true }, []);
+  assert.equal(v.state, "species");
+});
+
+check("views that scored no adjacent classes pool to none, not to a flat split", () => {
+  // The masses have to sum to 1 across the three groups, because that is what a
+  // real softmax produces: 0.8 mosquito + 0.2 nuisance is one view's answer.
+  const views = [{ spP: post({ "Aedes aegypti": 0.8 }), nuTotal: 0.1,
+                   adP: adjPost({ 0: 0.1 }), scale: 100 }];
+  // One view, so the pool is that view's own answer: the 0.1 of mass the adjacent
+  // class carries survives as 0.1, which is what "it is not lost in the pool" means.
+  const withAd = fuseViews(views);
+  assert.ok(Math.abs(withAd.adP[0] - 0.1) < 1e-6, `adjacent keeps its mass, got ${withAd.adP[0]}`);
+  const noAd = fuseViews([{ spP: post({ "Aedes aegypti": 0.9 }), nuTotal: 0.1, scale: 100 }]);
+  assert.deepEqual(noAd.adP, []);
+  assert.equal(noAd.verdict.state, "species");
+});
+
+check("the non-mosquito floor is the shipped one", () => {
+  assert.equal(api.NON_MOSQUITO_FLOOR, 0.60);
 });
 
 check("the veto flag is the shipped one, not a local copy", () => {
