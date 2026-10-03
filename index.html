@@ -49,7 +49,12 @@
     background: var(--background-fill-primary);
     line-height: 1.5;
   }
+  /* width:100% so the container fills its parent from first paint. Without it
+     the block is content-sized, and three sections (gallery, combined card,
+     results table) are display:none until results exist - so the container
+     started narrow and widened as photos arrived. Fill the width; never grow. */
   .app-container {
+    width: 100%;
     max-width: 1180px;
     margin: 0 auto;
   }
