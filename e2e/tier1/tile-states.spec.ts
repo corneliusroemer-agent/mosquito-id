@@ -247,11 +247,16 @@ test.describe("tile states", () => {
 
     // It contributes nothing: the three mosquitoes' shares are unchanged by its
     // presence, which is the fusion-path guarantee the gate exists to protect.
+    // It gets its own row, with a dash rather than a share, because a checked
+    // photo that is not pooled has to be visible as such.
     const shares = await page.locator("#contribution-table tbody tr").evaluateAll((rows) =>
       rows.map((r) => `${(r as HTMLTableRowElement).cells[0]!.textContent!.split("\n")[0]}=${(r as HTMLTableRowElement).cells[1]!.textContent}`),
     );
-    for (const s of shares) expect(s).toMatch(/=\d/);
     expect(shares.filter((s) => s.includes("33.3%"))).toHaveLength(3);
+    // The excluded row's first cell carries its reason as well as its name, so
+    // the row is matched on the name and read for the dash.
+    const excluded = shares.find((s) => s.startsWith("no_mosquito.jpg"));
+    expect(excluded, "the unclassified photo must be listed").toMatch(/=-$/);
   });
 
   test("a photo with no detection never hangs or crashes the batch", async ({ page }) => {

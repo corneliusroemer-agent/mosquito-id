@@ -467,17 +467,22 @@ function renormalizedPooledPosterior(
  * alone. Three photos at 0.355 / 0.350 / 0.360 - none of which would have named
  * a species - pool to 0.4625 and did.
  *
- * So the pool is gated on the PHOTOS, not on its own posterior: it may reach a
- * species claim only when every photo contributing to it reached one. Pooling
- * exists to gather more evidence for a claim, never to manufacture resolution
- * the individual classifications did not have. The pooled posterior still
- * decides the genus, and a pool of genus-only photos reports a genus.
+ * So the pool is gated on the PHOTOS, not on its own posterior: its resolution is
+ * the coarsest resolution any photo in it reached. A species claim needs every
+ * photo to have claimed a species; a genus claim needs every photo to have
+ * reached a genus. Pooling exists to gather more evidence for a claim, never to
+ * manufacture resolution the individual classifications did not have. The
+ * pooled posterior still decides the genus, and a pool of genus-only photos
+ * reports a genus.
  *
- * An `unsure` photo now contributes to the aggregate, and it counts here: a pool
- * containing one may not name a species, however many named photos are beside
- * it. That is the down-weighting's floor rather than a special case of it. The
- * photo cannot overrule the pool, and the pool cannot claim more than the least
- * resolvable photo in it would allow on its own.
+ * This matters more since an `unsure` photo entered the pool rather than being
+ * dropped. Three flat photos - three photographs of a blank wall - pool to a
+ * genus posterior above the 0.80 genus floor, so with a species-only gate the
+ * pooled card answered the original bug's question at one resolution down: the
+ * blank walls are announced as a genus. An unsure photo therefore caps the pool
+ * at nothing rather than at a genus. It still contributes its evidence to the
+ * ranking and the contribution table; what it withholds is a claim, and the pool
+ * cannot claim what one of the photos the user checked would not claim itself.
  */
 export function pooledVerdict(
   head: Head,
@@ -497,13 +502,24 @@ export function pooledVerdict(
   // is there to make visible: the branch cannot fire, rather than firing on a
   // default.
   const v = verdictFrom(head, spP, null, adjP, floors);
-  if (v.state !== "species") return v;
+  // "Not a mosquito" is a claim about every photo in the pool at once, and it
+  // outranks a species claim rather than competing with one, so the photo gate
+  // below does not apply to it. Neither does `unsure`: there is nothing to
+  // gate, the floors already said no.
+  if (v.state !== "species" && v.state !== "genus") return v;
+  const claimed = included.map((p) => p.verdict?.state);
   // A photo with no verdict at all is not evidence that the pool may sharpen
-  // past the species floor, so it blocks the claim rather than being ignored.
-  const everyPhotoClaimed = included.length > 0 && included.every((p) => p.verdict?.state === "species");
+  // past what its photos reached, so it blocks the claim rather than being
+  // ignored.
+  const everyPhotoClaimed = claimed.length > 0 && claimed.every((s) => s === "species");
   if (everyPhotoClaimed) return v;
-  // Demote into the genus branch rather than past it: the pooled posterior
-  // genuinely does carry genus-level mass, so the genus floor is still the
-  // thing that decides whether the pool names one at all.
-  return { ...v, state: "genus", species: null };
+  // One level down: a genus claim needs every photo to have reached a genus.
+  // An `unsure` photo is pooled now, so the pool routinely contains one, and
+  // three flat photos pool to a genus posterior above the 0.80 floor - three
+  // photographs of a blank wall would otherwise be announced as a genus, which
+  // is the claim this gate exists to prevent, just one resolution down. A pool
+  // the user checked against a photo the app cannot name says so.
+  const everyPhotoResolvedToGenus = claimed.length > 0 && claimed.every((s) => s === "species" || s === "genus");
+  if (everyPhotoResolvedToGenus) return v.state === "species" ? { ...v, state: "genus", species: null } : v;
+  return { state: "unsure", genus: null, species: null, topGenusP: v.topGenusP, topSpeciesP: v.topSpeciesP, runnersUp: v.runnersUp };
 }

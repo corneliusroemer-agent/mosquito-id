@@ -169,10 +169,12 @@ describe("two views naming different species cannot reach a species claim", () =
 });
 
 describe("a pooling path cannot let a photo override a correct per-photo verdict", () => {
-  it("three blank-wall photos, each unsure, produce no included photos at all", () => {
+  it("three blank-wall photos still name nothing, now that they are in the sum", () => {
     // The reproduction: tmp/mosquito-id/bogusresults.png, three blank background
     // photos checked together, and the pooled card naming Culex pipiens. Each
-    // photo on its own read ~28.6% and abstained, so none of them may enter.
+    // photo on its own read ~28.6% and abstained. They are pooled now rather
+    // than dropped, at ~0.28 of a named photo each, so the safety property has
+    // to survive the pooling rather than be guaranteed by exclusion.
     const blank = (lead: number): PoolablePhoto => {
       const spP = post(head, {
         "Aedes japonicus": lead,
@@ -195,40 +197,82 @@ describe("a pooling path cannot let a photo override a correct per-photo verdict
       expect(p.verdict!.state).toBe("unsure");
       expect(p.verdict!.species).toBeNull();
     }
-    const { included, abstained } = splitPoolable(photos);
-    expect(included).toEqual([]);
-    expect(abstained).toHaveLength(3);
+    const { included, excluded } = splitPoolable(photos);
+    expect(included).toHaveLength(3);
+    expect(excluded).toEqual([]);
+    // Each is in the sum, at its own top posterior.
+    expect(included.map((p) => Math.round(p.poolWeight * 1000) / 1000)).toEqual([0.286, 0.31, 0.273]);
 
-    // And with nothing included, there is no aggregate to name anything.
+    // And the pool still names nothing - not a species, and not even the genus,
+    // because pooling three flat posteriors sharpens them well short of the
+    // 0.80 genus floor.
     const w = poolingWeights(included, "Dependent evidence", 0.5);
     const agg = aggregateLogits(head, included, w);
-    const v = pooledVerdict(head, agg);
-    // pooledPosterior of an all-zero aggregate is a uniform posterior over 16
-    // species: no species and no genus clears a floor.
-    const spP = pooledPosterior(head, agg)!;
-    expect(Math.max(...spP)).toBeCloseTo(1 / S(head), 9);
+    const v = pooledVerdict(head, agg, included);
+    expect(v!.state).not.toBe("species");
     expect(v!.state).toBe("unsure");
+    expect(v!.species).toBeNull();
+    expect(v!.genus).toBeNull();
   });
 
-  it("a non-mosquito photo is excluded on the same grounds as an unsure one", () => {
+  it("three pooled unsure photos are stopped by the photo gate, not by the floors", () => {
+    // The same three blank walls. Pooled at their own top posteriors they DO
+    // clear the shipped species floor (0.373) and the genus floor (0.80) - the
+    // pooling sharpens them - so the claim is withheld by the gate that reads
+    // the photos, not by the posterior. This is the assertion that would break
+    // if anyone removed the gate and trusted the numbers.
+    const blank = (lead: number): PoolablePhoto => {
+      const spP = post(head, {
+        "Aedes japonicus": lead,
+        "Aedes koreicus": 0.249,
+        "Aedes geniculatus": 0.131,
+        "Culiseta annulata": 0.125,
+        "Culex pipiens": 0.078,
+      });
+      return {
+        name: "blank.png",
+        fingerprint: `fp${lead}`,
+        scores: Object.fromEntries(head.species.map((s, i) => [s, spP[i]!])),
+        logits: logitsFor(spP),
+        verdict: verdictFrom(head, spP, null, []),
+      };
+    };
+    const { included } = splitPoolable([blank(0.286), blank(0.31), blank(0.273)]);
+    const w = poolingWeights(included, "Dependent evidence", 0.5);
+    const agg = aggregateLogits(head, included, w);
+    const spP = pooledPosterior(head, agg)!;
+    // Both floors are cleared, so the numbers alone would name a genus.
+    expect(Math.max(...spP)).toBeGreaterThan(DEFAULT_FLOORS.species);
+    const unweightedGenus = verdictFrom(head, spP, null, []);
+    expect(unweightedGenus.topGenusP).toBeGreaterThan(DEFAULT_FLOORS.genus);
+    // The gate is what withholds it, at both levels.
+    const v = pooledVerdict(head, agg, included)!;
+    expect(v.state).toBe("unsure");
+    expect(v.genus).toBeNull();
+    expect(v.species).toBeNull();
+  });
+
+  it("a non-mosquito photo is excluded: it is evidence against every species", () => {
     const spP = post(head, { "Aedes aegypti": 0.2, "Culex pipiens": 0.1 });
     const adP = new Array<number>((head.adjacent ?? []).length).fill(0);
     adP[0] = 0.9;
     const v = verdictFrom(head, spP, null, adP);
     expect(v.state).toBe("non-mosquito");
-    // Pooling it would fold a midge's logits into a mosquito's posterior.
-    const { included, abstained } = splitPoolable([{ name: "midge.jpg", verdict: v }]);
+    // Pooling it at any weight would fold a midge's logits into a mosquito's
+    // posterior, so there is no weight that keeps the meaning and is worth
+    // having: it is out, with the reason recorded.
+    const { included, excluded } = splitPoolable([{ name: "midge.jpg", verdict: v }]);
     expect(included).toEqual([]);
-    expect(abstained).toEqual([]);
+    expect(excluded.map((p) => p.excludedBecause)).toEqual(["non-mosquito"]);
   });
 
-  it("a pending or failed photo is neither included nor counted as abstained", () => {
-    const { included, abstained, pending } = splitPoolable([
+  it("a pending or failed photo is pending, not excluded", () => {
+    const { included, excluded, pending } = splitPoolable([
       { name: "a", pending: true },
       { name: "b", error: "boom" },
     ]);
     expect(included).toEqual([]);
-    expect(abstained).toEqual([]);
+    expect(excluded).toEqual([]);
     expect(pending.map((p) => p.name)).toEqual(["a", "b"]);
   });
 });

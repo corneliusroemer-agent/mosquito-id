@@ -243,13 +243,14 @@ test.describe("strip feedback", () => {
     ]);
     await settle(page);
 
-    // All three are checked; `unsure` is allowed to be checked and is then listed
-    // as excluded with its reason. Three ticks beside a table listing two is the
-    // report that started this, so the card has to account for the difference.
+    // All three are checked and all three are pooled - an unsure photo is
+    // counted, down-weighted - so there is no longer a gap between the ticks and
+    // the table. The card still has to say when there is one.
     const summary = page.locator("#inclusion-summary");
-    await expect(summary).toHaveText("3 checked, 2 in the pooled result");
+    await expect(summary).toHaveText("3 photos in the pooled result");
     const rows = await page.locator("#contribution-table tbody tr").allTextContents();
     expect(rows).toHaveLength(3);
+    // The row still says why one of them counts for less than the others.
     expect(rows.join(" ")).toMatch(/not confident enough/i);
 
     // Unchecking the unsure photo leaves nothing to explain.

@@ -71,21 +71,22 @@ test.describe("non-mosquito", () => {
     });
     await settle(page);
 
-    // The two mosquitoes pool. `splitPoolable` files an `unsure` photo under
-    // `abstained` and renders a row for it; a non-mosquito photo is in NEITHER
-    // list, so it carries no row and contributes no weight - the assertion is on
-    // the two survivors' shares, which must be the 50/50 split of a two-photo pool.
-    // Two rows, both with a share. `splitPoolable` renders a row for an `unsure`
-    // photo under `abstained`, and files a non-mosquito photo in NEITHER list - so
-    // a forced-in midge has no row and, more to the point, no share. A share is
-    // the claim that the photo contributed evidence to the pool, and asserting on
-    // its ABSENCE is what makes this a fusion-path test rather than a layout one.
+    // Three rows: the two mosquitoes with shares, and the midge with a dash. A
+    // checked photo that contributes nothing is LISTED with its reason - a row
+    // with no share is the claim that it was counted, and asserting on the
+    // absence of the share is what makes this a fusion-path test rather than a
+    // layout one. The two survivors keep the 50/50 split of a two-photo pool, so
+    // the midge's presence changes nothing about the arithmetic.
     const rows = page.locator("#contribution-table tbody tr");
-    await expect(rows).toHaveCount(2);
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(2)).toHaveClass(/row-excluded/);
+    await expect(rows.nth(2)).toContainText("not a mosquito");
     const shares = await rows.evaluateAll((r) =>
       r.map((x) => (x as HTMLTableRowElement).cells[1]!.textContent!.trim()),
     );
-    expect(shares, "the two poolable photos must carry equal shares").toEqual(["50.0%", "50.0%"]);
+    expect(shares, "the two poolable photos must carry equal shares, the midge none").toEqual(
+      ["50.0%", "50.0%", "-"],
+    );
   });
 
   test("a pool of three non-mosquito photos never names a species", async ({ page }) => {
@@ -144,20 +145,22 @@ test.describe("non-mosquito", () => {
     ]);
     await settle(page);
 
-    // The three mosquitoes pool; the midge contributes nothing and has no row,
-    // because `splitPoolable` files it in neither list. Equal shares prove the
-    // three-way split is unaffected by its presence.
-    await expect(page.locator("#contribution-table tbody tr")).toHaveCount(3);
+    // The three mosquitoes pool; the midge contributes nothing and is listed
+    // with a dash. Equal shares prove the three-way split is unaffected by its
+    // presence.
+    await expect(page.locator("#contribution-table tbody tr")).toHaveCount(4);
     const shares = await page.locator("#contribution-table tbody tr").evaluateAll((r) =>
       r.map((x) => (x as HTMLTableRowElement).cells[1]!.textContent!.trim()),
     );
-    expect(shares, "the three mosquitoes must share equally").toEqual(["33.3%", "33.3%", "33.3%"]);
+    expect(shares, "the three mosquitoes must share equally, the midge none").toEqual(
+      ["33.3%", "33.3%", "33.3%", "-"],
+    );
     // The pool still answers about a mosquito, and the midge has not dragged it.
     await expect(page.locator("#combined-scores")).not.toContainText("does not look like a mosquito");
     await expect(page.locator("#combined-scores")).toContainText("Aedes aegypti");
   });
 
-  test("an unsure photo is excluded from the pool with its reason stated", async ({ page }) => {
+  test("an unsure photo is pooled down-weighted, with the weight stated", async ({ page }) => {
     await boot(page);
     await populate(page, [
       ONE_MOSQUITO,
@@ -166,19 +169,33 @@ test.describe("non-mosquito", () => {
     ]);
     await settle(page);
 
-    // Two mosquitoes pool into the aggregate; the unsure photo is listed BELOW
-    // them with its reason, rather than folded in. So three rows: two with a
-    // share, one without.
+    // All three are pooled, and the shares say so: the blurry photo peaked at
+    // 0.12, so it carries 0.12 of a named photo's weight. With "Dependent
+    // evidence" at r=0.5 over three distinct photos the method gives each 1/2
+    // (total 1.5); scaling by [1, 1, 0.12] gives [0.5, 0.5, 0.06], and
+    // restoring the method's total scales all three by 1.5/1.06. Shares are
+    // therefore 0.5 : 0.5 : 0.06 of 1.06 - 47.2%, 47.2%, 5.7%.
     const rows = page.locator("#contribution-table tbody tr");
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(0)).toContainText("aegypti_01.jpg");
     await expect(rows.nth(1)).toContainText("aegypti_02.jpg");
     await expect(rows.nth(2)).toContainText("blur.jpg");
+    // The share alone would not say WHY it is smaller, so the row says so.
     await expect(rows.nth(2)).toContainText("not confident enough to name a genus");
-    await expect(rows.nth(2)).toHaveClass(/row-excluded/);
-    // Only the two named photos carry a share.
-    await expect(rows.nth(0).locator("td").nth(1)).toHaveText("50.0%");
-    await expect(rows.nth(1).locator("td").nth(1)).toHaveText("50.0%");
+    await expect(rows.nth(2)).toContainText("counted at 12% of a named photo");
+    await expect(rows.nth(2)).not.toHaveClass(/row-excluded/);
+    await expect(rows.nth(0).locator("td").nth(1)).toHaveText("47.2%");
+    await expect(rows.nth(1).locator("td").nth(1)).toHaveText("47.2%");
+    await expect(rows.nth(2).locator("td").nth(1)).toHaveText("5.7%");
+
+    // It cannot make the pool name the species it disagrees with. The pool holds
+    // a photo that named nothing, so it names nothing itself - the candidate
+    // ranking still lists what the evidence points at, but the headline claims
+    // neither a species nor a genus.
+    await expect(page.locator("#combined-scores")).toContainText(
+      "Not confident enough to name a genus",
+    );
+    await expect(page.locator(".combined-genus-headline")).not.toHaveClass(/is-genus/);
     // It is still selectable - it is a valid photo, just not a decidable one.
     await expect(page.locator("#thumbnail-strip .tile").nth(2).locator(".thumb-optin")).toBeEnabled();
     // And selecting it shows that it is the PHOTO that cannot be named, not that

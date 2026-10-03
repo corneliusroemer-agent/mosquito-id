@@ -2,11 +2,21 @@
  * Differential test: the pooling logic as it was INLINE in updatePooling(),
  * against the module it now calls.
  *
- * The old implementations are copied verbatim from main.js at the commit that
- * moved them (36c992b). They are here so the move can be PROVEN behaviour-
- * preserving rather than asserted to be: 400 randomised cases over photo counts,
- * verdicts, pooling methods, correlation factors, duplicate fingerprints and
- * pending/errored photos, comparing all five outputs to 1e-9.
+ * The old implementations are copied from main.js at the commit that moved them
+ * (36c992b). They are here so the move can be PROVEN behaviour-preserving rather
+ * than asserted to be: 400 randomised cases over photo counts, verdicts, pooling
+ * methods, correlation factors, duplicate fingerprints and pending/errored
+ * photos, comparing all five outputs to 1e-9.
+ *
+ * The split and the weights have since been changed on purpose: an `unsure`
+ * photo is pooled, down-weighted, rather than dropped, and a non-mosquito photo
+ * is excluded with a recorded reason. Those two functions below carry the new
+ * rule, so this file is still worth running - it is an independent second
+ * implementation of the arithmetic, including the down-weight and the rescale
+ * that keeps the method's total, and it would catch a change to either that the
+ * module's own tests agree with for the wrong reason. The aggregation, the
+ * candidate ranking and the posterior are untouched and still compared against
+ * the original code.
  *
  * This is a test with a delete-by date. Once the refactor has settled and the
  * inline copies are no longer load-bearing history, delete this file and the
@@ -23,11 +33,24 @@ import { genusOf } from "../src/confidence/genus";
 
 const head = realHead();
 // ---- the OLD inline implementations, copied verbatim from main.js -------------
+// The unsure photo's share, written out independently of the module: its own
+// top species posterior, capped at the species floor. `p.scores` is used because
+// these fixtures carry a verdict with no topSpeciesP, which is the fallback path
+// and worth covering here.
+const CAP = 0.373;
+function oldPoolWeight(p: any): number {
+  if (p.verdict?.state === "species" || p.verdict?.state === "genus") return 1;
+  const top = Math.max(...Object.values(p.scores ?? {}));
+  if (!Number.isFinite(top) || top <= 0) return 0;
+  return Math.min(top, CAP);
+}
 function oldSplit(checked: any[]) {
-  const abstained = checked.filter(p => !p.pending && !p.error && p.verdict?.state === "unsure");
   const included = checked.filter(p => !p.pending && !p.error &&
-    (p.verdict?.state === "species" || p.verdict?.state === "genus"));
-  return { included, abstained };
+    (p.verdict?.state === "species" || p.verdict?.state === "genus" || p.verdict?.state === "unsure"))
+    .map(p => ({ ...p, poolWeight: oldPoolWeight(p) }));
+  const excluded = checked.filter(p => !p.pending && !p.error &&
+    p.verdict?.state !== "species" && p.verdict?.state !== "genus" && p.verdict?.state !== "unsure");
+  return { included, excluded };
 }
 function oldWeights(included: any[], selectedMethod: string, r: number) {
   const N = included.length; const weights: number[] = [];
@@ -37,7 +60,13 @@ function oldWeights(included: any[], selectedMethod: string, r: number) {
   else if (selectedMethod === "Accumulate evidence") { for (let i=0;i<N;i++) weights.push(1); }
   else { const seen=new Set(); const eff:number[]=[]; included.forEach(p=>{ if(seen.has(p.fingerprint)) eff.push(0); else {seen.add(p.fingerprint); eff.push(1);} });
          const d=1+(seen.size-1)*r; for(let i=0;i<N;i++) weights.push(eff[i]/d); }
-  return weights;
+  // Then the down-weight, and a rescale to the total the method asked for.
+  const pw = included.map(oldPoolWeight);
+  if (pw.every(w => w === 1)) return weights;
+  const after = weights.reduce((acc, w, i) => acc + w * pw[i], 0);
+  if (!(after > 0)) return weights;
+  const before = weights.reduce((a, b) => a + b, 0);
+  return weights.map((w, i) => w * pw[i] * (before / after));
 }
 function oldAgg(included: any[], weights: number[]) {
   const agg: Record<string,number> = {}; head.species.forEach(sp => { agg[sp]=0; });
