@@ -391,9 +391,18 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   // Bind the species this head cannot separate to the label helpers. Done where
   // the head is assigned, so an engine switch rebinds them with it.
   setActiveHead(EMB);
-  if (resolvableGroups(EMB).length) {
-    console.info("[granularity] this head cannot separate:\n  " + activeGroups().map((g) => g.label).join("\n  "));
+  // Logged, not just printed: when the head is refitted and these groups split,
+  // this line is how that shows up in a deployment's own log rather than only in
+  // the source diff.
+  const groups = resolvableGroups(EMB);
+  if (groups.length) {
+    console.info("[granularity] this head cannot separate:\n  " + groups.map((g) => g.label).join("\n  "));
   }
+  sendLog("head_granularity", {
+    species: EMB.species.length,
+    unresolvableGroups: groups.length,
+    unresolvableSpecies: groups.reduce((n, g) => n + g.species.length, 0),
+  });
 
   const deviceLabel = `inference: ${clipCfg.name} (${clipEP.toUpperCase()}) · YOLO11n (${detEP.toUpperCase()})`;
   document.getElementById("footer-device").textContent = deviceLabel;
