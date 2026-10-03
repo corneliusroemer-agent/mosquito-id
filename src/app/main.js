@@ -1853,9 +1853,57 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
     sendLog("views_superseded", { name: p.name, rev, currentRev: p.rev, landed: landed.length });
     return { dropped: true };
   }
-  sendLog("views_fused", { name: p.name, rev, views: landed.length });
+  // Numbers, not conclusions. `views_fused` alone says a thing happened; what a
+  // reader needs is the distribution it produced, because an exact-zero species
+  // posterior and a confident one look identical from the outside.
+  sendLog("views_fused", {
+    name: p.name,
+    rev,
+    views: landed.length,
+    ...posteriorSummary(fused),
+    ...verdictSummary(p),
+  });
   return { dropped: false };
 }
+
+// A posterior in a form a log line can be read from. The failure this exists to
+// catch is a distribution that is uniformly zero or uniformly flat, which is
+// indistinguishable from "no result" in every log line that reports only a
+// conclusion - and exact zeros across every photo are the symptom.
+function posteriorSummary(fused) {
+  const sp = fused.spP || fused.species || [];
+  if (!sp.length) return { spN: 0 };
+  const vals = Array.from(sp);
+  const sum = vals.reduce((a, b) => a + b, 0);
+  const max = Math.max(...vals);
+  const nz = vals.filter((v) => v > 0).length;
+  const idx = vals.indexOf(max);
+  return {
+    spN: vals.length,
+    spSum: round4(sum),
+    spMax: round4(max),
+    spNonZero: nz,
+    spTopIdx: idx,
+    adMass: round4(fused.adP ? fused.adP.reduce((a, b) => a + b, 0) : null),
+    genusTotal: round4(genusTotals(fused, idx)),
+  };
+}
+
+function verdictSummary(p) {
+  const v = p.verdict;
+  return v ? { state: v.state, genus: v.genus, topGenusP: round4(v.topGenusP), topSpeciesP: round4(v.topSpeciesP) } : {};
+}
+
+function genusTotals(fused, topIdx) {
+  const head = EMB;
+  if (!head || topIdx < 0) return null;
+  const g = genusOf(head.species[topIdx]);
+  let t = 0;
+  head.species.forEach((name, i) => { if (genusOf(name) === g) t += (fused.spP?.[i] || 0); });
+  return t;
+}
+
+const round4 = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v * 1e4) / 1e4 : null);
 
 // Write the fused verdict for the views that have landed: commitScores for the
 // verdict itself, then the multi-view bookkeeping on top. The photo stays
@@ -1975,7 +2023,10 @@ async function executeCrop(p, idx, cropBox, t0) {
   renderResultsTable(previews);
   sendLog("crop_executed", {
     engine: currentEngine, cropBox, cw, ch,
-    topSpecies: Object.keys(p.scores)[0] || null
+    is_cropped: p.is_cropped === true,
+    detScore: round4(p.detScore ?? p.detectionScore ?? null),
+    ...posteriorSummary({ spP: scoreVector(p), adP: p.adP }),
+    ...verdictSummary(p),
   });
 }
 
@@ -2187,3 +2238,14 @@ window.addEventListener("DOMContentLoaded", () => {
     setTimeout(warmSamples, 1500);
   }
 });
+
+// The per-species scores already committed for a photo, as a vector in head
+// order, so a log line can report a distribution rather than a name.
+function scoreVector(p) {
+  const scores = p && p.scores;
+  const head = EMB;
+  if (!scores || !head) return null;
+  const v = new Array(head.species.length).fill(0);
+  for (const name of head.species) v[head.species.indexOf(name)] = scores[name] || 0;
+  return v;
+}

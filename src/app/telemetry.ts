@@ -34,6 +34,21 @@ export type LogFn = (action: string, data?: LogData) => void;
  * thirty call sites, all of which care about the action and the data and none of
  * which should have to restate which engine is loaded.
  */
+/**
+ * An explicit diagnostic sink, read once from `?log=`.
+ *
+ * Absent on the deployed site: the cost of a wrong guess here is a failed
+ * request per log line, which is the noise this whole path exists to remove.
+ */
+function diagnosticSink(): string | null {
+  try {
+    const v = new URLSearchParams(location.search).get("log");
+    return v && /^https?:\/\//.test(v) ? v.replace(/\/+$/, "") : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createLogger(ctx: LogContext): (action: string, data?: LogData) => void {
   return function sendLog(action: string, data: LogData = {}): void {
     const payload = {
@@ -44,9 +59,20 @@ export function createLogger(ctx: LogContext): (action: string, data?: LogData) 
       ...data
     };
     console.log(`[CLIENT LOG] ${action}:`, payload);
-    // Only the Cloud GPU deployment has an /api/log endpoint. Posting to it from
-    // the static site just produces a failed request, which the browser reports as
-    // a console error no matter how the promise is handled.
+    // Where the payload goes. The Cloud GPU deployment serves /api/log; the
+    // static Pages deploy serves neither, and posting there is the /api/health
+    // 404 in the console. A diagnostic sink can be pointed at with
+    // ?log=<origin> so a local run reports into a file instead of nowhere.
+    const sink = diagnosticSink();
+    if (sink) {
+      fetch(`${sink}/api/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        mode: "cors",
+      }).catch(() => {});
+      return;
+    }
     if (!ctx.serverAvailable()) return;
     fetch("/api/log", {
       method: "POST",
