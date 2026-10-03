@@ -634,15 +634,18 @@
   }
 
   .app-footer {
-    margin-top: auto;
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 8px;
     font-size: 12px;
     color: var(--body-text-color-subdued);
-    margin-top: 32px;
-    padding-top: 16px;
+    /* `auto` pushes the footer to the bottom of the viewport when the page is
+       short. It must be the only margin-top here: a later `margin-top: 32px`
+       in the same rule silently overrode it, which is why the footer never
+       actually stuck. The gap is carried by padding instead. */
+    margin-top: auto;
+    padding-top: 32px;
     border-top: 1px solid var(--border-color-primary);
   }
   .divider { opacity: 0.6; }
