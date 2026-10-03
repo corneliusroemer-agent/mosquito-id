@@ -34,6 +34,11 @@ jobs:
       # there is no query string left to rewrite, and editing the built HTML
       # would only desync it from the hash Vite derived.
       - name: Install and build
+        # Vite inlines VITE_* at build time, so the deployed bundle carries the
+        # exact SHA it was built from and the page puts it in its URL as
+        # ?build=<sha> (src/app/buildSha.ts).
+        env:
+          VITE_COMMIT_SHA: ${{ github.sha }}
         run: npm ci && npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
