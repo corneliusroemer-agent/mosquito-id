@@ -1,3 +1,9 @@
-
 # Cloudflare R2 S3 credentials - real values, never commit
 .r2-env
+
+# Playwright harness dependencies and vendored binaries (28 MB wasm, 10 MB onnx)
+node_modules/
+package.json
+package-lock.json
+tests/vendor/
+tests/*.json
