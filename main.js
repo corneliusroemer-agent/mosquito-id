@@ -32,19 +32,23 @@ const CACHE_NAME = "mosquito-models-v1";
 //     images at 96.6% accuracy (95% CI 93.2-99.1) against the shipped argmax's
 //     88.0% on the same rows.
 //
-//   GENUS_CONFIDENCE_FLOOR 0.54 - a genus is easier to get right than a species,
-//     so the floor for naming one is higher: it is the smallest value at which
-//     the genus is right on every val row the species gate abstains on.
+//   GENUS_CONFIDENCE_FLOOR 0.80 - a genus is easier to get right than a species,
+//     so the floor for naming one is higher. Refit on the 6,264-image cache: the
+//     previous 0.54 was right on only 76% of the rows it answered, and the
+//     failures were concentrated rather than diffuse - naming Anopheles on
+//     Culiseta photos, 1 of 13 correct. At 0.80 (val-fitted, 100% bar, 28 val
+//     rows) genus-only answers are 93% correct and whole-set accuracy rises
+//     86.10% -> 87.16% for 5.3pp less coverage. The direction is solid; the
+//     value is not sharply identified, since the bar choice moves it (a 95% bar
+//     gives 0.766).
 //
-// THE BINDING CONSTRAINT IS THE VAL->TEST TRANSFER GAP, not either value. On
-// this corpus a threshold picked on val at 5% FPR got 60.0% recall on test
-// where the test-oracle threshold got 86.0%, on 74 val rows. Genus answers are
-// where that gap bites hardest and they are measured on very few rows: at this
-// floor the genus is right on 7 of 7 test rows the species gate abstains on,
-// and wrong on 2 of 16 at a floor of 0.30. Re-fit both when more labelled data
-// exists; do not tune either on the test split.
+// THE VAL->TEST TRANSFER GAP IS NO LONGER BINDING. On the earlier 74-row cache a
+// threshold picked on val at 5% FPR got 60.0% recall on test against an 86.0%
+// oracle. On the 6,264-image cache the gap between a val-fitted threshold and the
+// test oracle is at most 0.41pp across seven coverage levels. More labelled data
+// closed it, which is what these constants were waiting for.
 const SPECIES_CONFIDENCE_FLOOR = 0.373;
-const GENUS_CONFIDENCE_FLOOR = 0.54;
+const GENUS_CONFIDENCE_FLOOR = 0.80;
 
 // Models live on Cloudflare R2, reached through the bucket's public development
 // URL. Objects sit at the root of that host - the dev URL serves the one bucket
