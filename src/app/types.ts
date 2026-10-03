@@ -54,3 +54,58 @@ export interface OrtTensor {
   data: ArrayLike<number>;
   dims: readonly number[];
 }
+
+/**
+ * One photo in the gallery, as far as the geometry and label modules read it.
+ *
+ * The full record carries the classifier's outputs too - scores, logits, a
+ * verdict, the per-view counters - and those belong to the render path. This is
+ * the subset the modules outside that path need, so a photo can be passed to the
+ * crop geometry or the label helpers without dragging the whole app state along.
+ *
+ * `cropBox` and `contextBox` are null before a crop exists; `contextCanvas`
+ * falls back to `fullCanvas` for a photo classified on the whole frame.
+ */
+export interface Preview {
+  name?: string;
+  fullCanvas: HTMLCanvasElement | null;
+  cropCanvas: HTMLCanvasElement | null;
+  contextCanvas?: HTMLCanvasElement | null;
+  cropBox: Box | null;
+  contextBox: Box | null;
+  /** The detector found nothing and the whole frame was classified. */
+  fallback?: boolean;
+  /** The user asked for the whole photo after cropping it. */
+  manual_full_photo?: boolean;
+}
+
+/** Anything the surface-mapping helpers can measure: a canvas or an image. */
+export interface CanvasLike {
+  width: number;
+  height: number;
+}
+
+/** A box in percent of the surface it is drawn on, which is what CSS wants. */
+export interface BoxPercent {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The affine map between a surface and the photo painted in it:
+ * imageFraction = k * surfaceFraction + o, per axis.
+ */
+export interface Mapping {
+  kx: number;
+  ox: number;
+  ky: number;
+  oy: number;
+}
+
+/** A context region cut around a crop: the pixels and where they came from. */
+export interface ContextCrop {
+  contextCanvas: HTMLCanvasElement;
+  contextBox: Box;
+}
