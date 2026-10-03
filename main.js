@@ -214,7 +214,8 @@ const ASYNC = (window.__mosqAsync = {
   get sessDet() { return sessDet; },
   get selectedIndex() { return selectedIndex; },
   selectPhoto,
-  processFiles
+  processFiles,
+  deletePhoto
 });
 (function countFrames() {
   requestAnimationFrame(() => { ASYNC.frames++; countFrames(); });
@@ -1217,7 +1218,14 @@ function deletePhoto(idx) {
     else if (i > idx) updated.add(i - 1);
   }
   includedIndices = updated;
-  if (selectedIndex >= previews.length) {
+  // Follow the photo, not the index. Deleting anything before the selected photo
+  // shifts every later photo down one, so the selection has to move with it -
+  // otherwise deleting the leftmost tile silently switched the gallery to a
+  // different photo while the highlighted tile stayed where it was. The clamp
+  // alone only handled the case where the selection fell off the end.
+  if (idx < selectedIndex) {
+    selectedIndex -= 1;
+  } else if (selectedIndex >= previews.length) {
     selectedIndex = Math.max(0, previews.length - 1);
   }
   if (previews.length === 0) {
@@ -1330,15 +1338,23 @@ function selectPhoto(idx) {
   sendLog("select_photo", { index: selectedIndex, name: previews[selectedIndex]?.name });
 }
 
+// The crop surfaces take their box from the container, never from the photo.
+//
+// They used to be sized here in px from the canvas's own aspect ratio, which
+// closed a loop with the grid: a grid item's default `min-width: auto` lets its
+// content widen its track, so canvas aspect -> px width -> track min-content ->
+// container width. Every arrival of a photo therefore resized the page, and the
+// resize landed again on every selection change and every re-crop.
+//
+// The photo's aspect is not lost, it is delegated: `.crop-surface img` is
+// object-fit:cover, and coverMapping() reads the surface's box at paint time, so
+// crop overlays stay aligned whatever shape the box is.
 function fitSurface(surface, cv) {
-  if (!surface || !cv || !cv.width || !cv.height) return;
-  const maxH = 320;
-  const aspect = cv.width / cv.height;
-  const targetH = maxH;
-  const targetW = Math.round(maxH * aspect);
-  surface.style.height = `${targetH}px`;
-  surface.style.width = `${targetW}px`;
-  surface.style.maxWidth = "100%";
+  if (!surface) return;
+  // A fixed percentage box, so the surface has its final geometry from the first
+  // paint and no photo state can change it.
+  surface.style.width = "100%";
+  surface.style.height = "100%";
 }
 
 function renderActivePhoto() {
@@ -1390,11 +1406,18 @@ function renderActivePhoto() {
   const cropEmpty = document.getElementById("crop-empty");
   const zoomedActiveBox = document.getElementById("zoomed-active-crop-box");
 
-  // Show the photo whenever there is one to show. Reverting to the full photo sets
-  // manual_full_photo and clears cropBox while still having a canvas, so gating on
-  // cropBox showed the "Using full photo" placeholder over an available image.
+  // The panel shows the mosquito, or it shows nothing. It does not narrate our
+  // processing state: `pending` means the verdict is stale, not that there is
+  // nothing to look at, so a pending photo keeps the last good crop on screen
+  // instead of blanking and snapping back. A failure is the same case - show the
+  // photo we have rather than a message about a crop. Only a photo with no image
+  // at all (decode not finished) leaves the panel empty, which is honest.
+  //
+  // Gating on `!p.pending && !p.error` is what caused the blank-then-flicker:
+  // the panel emptied the instant a re-crop was released and refilled when the
+  // numbers landed.
   const zoomSource = p.contextCanvas || p.fullCanvas;
-  if (zoomSource && !p.fallback && !p.pending && !p.error) {
+  if (zoomSource) {
     surfaceZoomed.style.width = "100%";
     surfaceZoomed.style.height = "100%";
     contextImg.src = zoomSource.toDataURL("image/jpeg", 0.9);
@@ -1405,7 +1428,7 @@ function renderActivePhoto() {
     cropEmpty.style.display = "none";
 
     // Draw where the crop sits within the context region
-    if (zoomedActiveBox && p.contextBox && p.cropBox) {
+    if (zoomedActiveBox && p.contextBox && p.cropBox && !p.pending) {
       const [cx1, cy1, cx2, cy2] = p.cropBox;
       const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
       const ctx_w = ctx_x2 - ctx_x1;
@@ -1428,11 +1451,10 @@ function renderActivePhoto() {
   } else {
     contextImg.style.display = "none";
     cropEmpty.style.display = "block";
-    cropEmpty.textContent = p.pending
-      ? "Analyzing photo…"
-      : p.error
-        ? "Crop unavailable"
-        : p.manual_full_photo ? "Using full photo" : "No mosquito detected";
+    // Only ever a statement about the photo, never about our machinery. There is
+    // deliberately no "Crop unavailable" here: a failed classification is not a
+    // missing photo, and the panel already has an image in that case.
+    cropEmpty.textContent = p.manual_full_photo ? "Using full photo" : "No mosquito detected";
     if (zoomedActiveBox) zoomedActiveBox.style.display = "none";
   }
 
@@ -1466,24 +1488,11 @@ function renderActivePhoto() {
     const item = document.createElement("div");
     item.className = "score-item";
     const percent = (score * 100).toFixed(1);
-    const meta = SPECIES_META[name];
-    const commonLabel = meta ? ` <span class="species-common">(${escapeHtml(meta.common)})</span>` : "";
-    const vectorLabel = meta?.vectors ? `<span class="species-vectors">Vector: ${escapeHtml(meta.vectors)}</span>` : "";
-    const wikiLink = meta?.wiki ? `<a href="${meta.wiki}" target="_blank" rel="noopener" class="species-wiki" title="Wikipedia">🔗</a>` : "";
-    // Species name links to the species guide, which is a route of this same
-    // document (#/species/<slug>) rather than a second page: the browser only
-    // changes the hash, so going back restores this photo, crop and score list
-    // untouched instead of re-running the model.
-    const speciesSlug = name.toLowerCase().replace(/\s+/g, "-");
-    const kbLink = meta
-      ? `<a class="species-kb-link" href="#/species/${encodeURIComponent(speciesSlug)}">${escapeHtml(name)}</a>`
-      : `<span>${escapeHtml(name)}</span>`;
     item.innerHTML = `
       <div class="score-item-header">
-        <span class="species-name-wrap">${wikiLink}${kbLink}${commonLabel}</span>
+        <span class="species-name-wrap">${speciesLabelHtml(name)}</span>
         <strong>${percent}%</strong>
       </div>
-      ${vectorLabel}
       <div class="score-item-track">
         <div class="score-item-fill" style="width: ${Math.max(0, Math.min(100, score * 100))}%"></div>
       </div>
@@ -1952,7 +1961,7 @@ function updatePooling() {
     const widthPct = Math.max(0, Math.min(100, ((c.relScore + 20) / 20) * 100));
     row.innerHTML = `
       <div class="combined-score-row">
-        <span><strong>${escapeHtml(c.name)}</strong></span>
+        <span class="species-name-wrap">${speciesLabelHtml(c.name)}</span>
         <span>${c.relScore.toFixed(1)}</span>
       </div>
       <div class="combined-bar-track">
@@ -2065,6 +2074,33 @@ async function loadSamplePhotos() {
   if (files.length) {
     processFiles(files);
   }
+}
+
+// One species label, used everywhere a species is named.
+//
+// This existed as two divergent copies: the per-photo score list rendered the
+// guide link and the common name, the pooled card rendered a bare <strong> of
+// the binomial - so the same species read differently depending on which panel
+// it appeared in. Anything added to a species label from here on (a vector
+// status, a thumbnail, a range note) has to be added once.
+//
+// The guide link is a hash route of this same document, so following it and
+// coming back preserves the photo, the crop and the scores instead of re-running
+// the model.
+function speciesLabelHtml(name) {
+  const meta = SPECIES_META[name];
+  const wikiLink = meta?.wiki
+    ? `<a href="${meta.wiki}" target="_blank" rel="noopener" class="species-wiki" title="Wikipedia">\u{1F517}</a>`
+    : "";
+  const nameHtml = meta
+    ? `<a class="species-kb-link" href="#/species/${encodeURIComponent(speciesSlug(name))}">${escapeHtml(name)}</a>`
+    : `<span>${escapeHtml(name)}</span>`;
+  const common = meta?.common ? ` <span class="species-common">(${escapeHtml(meta.common)})</span>` : "";
+  return `${wikiLink}${nameHtml}${common}`;
+}
+
+function speciesSlug(name) {
+  return name.toLowerCase().replace(/\s+/g, "-");
 }
 
 function escapeHtml(str) {
