@@ -12,11 +12,15 @@ const CROP_PAD = 0.10;
 const COMPLEX_MARGIN = 0.02;
 const CACHE_NAME = "mosquito-models-v1";
 
-// Models live in a GitHub Release: too large for Pages itself, and the 1.2 GB
-// model exceeds HuggingFace's 1 GB per-repository cap on a free account.
-// Release assets are flat, so paths here carry no "models/" prefix.
+// Models live on HuggingFace. GitHub Releases are not an option: they serve no
+// Access-Control-Allow-Origin, so a browser cannot fetch them cross-origin.
+// Cloudflare R2 is the intended final host (CORS-configurable, free egress);
+// this HF Space is the interim one. It holds 3 of the 4 models - a free HF
+// account caps at 1 GB per repository and bioclip_2_5_fp16.onnx is 1207 MB,
+// so that one only loads once R2 is live.
 const MODEL_BASE_URL =
-  "https://github.com/corneliusroemer-agent/mosquito-id/releases/download/v1/";
+  "https://huggingface.co/spaces/corneliusroemer-agent/mosquito-id/resolve/main/models/";
+const FP16_AVAILABLE = false;
 
 const COMPLEX_OF = {
   "Aedes albopictus": "Aedes albopictus",
@@ -424,15 +428,18 @@ async function initEngine() {
     serverAvailable = false;
   }
 
-  // Preference: URL query param > localStorage > default ("webgpu-fp16")
-  const defaultEngine = "webgpu-fp16";
+  // Preference: URL query param > localStorage > default. fp16 is skipped while
+  // it is unavailable, so a stale saved choice falls through instead of 404ing.
+  const defaultEngine = "webgpu-int8";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
   const savedEngine = localStorage.getItem("mosquito_engine");
+  const selectable = (e) =>
+    (e === "server-gpu" ? false : !!WEBGPU_MODELS[e]) && (e !== "webgpu-fp16" || FP16_AVAILABLE);
 
-  const chosenEngine = (requestedEngine && (WEBGPU_MODELS[requestedEngine] || requestedEngine === "server-gpu"))
+  const chosenEngine = selectable(requestedEngine)
     ? requestedEngine
-    : (savedEngine && (WEBGPU_MODELS[savedEngine] || savedEngine === "server-gpu"))
+    : selectable(savedEngine)
       ? savedEngine
       : defaultEngine;
 
