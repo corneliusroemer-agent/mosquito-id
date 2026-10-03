@@ -188,9 +188,13 @@ describe("what a verdict is allowed to print", () => {
   });
 
   it("says nothing for unsure and keeps the non-mosquito sentence", () => {
-    expect(claimSentence(verdictFor({ "Aedes albopictus": 0.05 }), groups)).toBe(
-      "Not confident enough to name a genus",
-    );
+    // Unsure abstains and names what it is torn between. The group machinery has
+    // nothing to contribute here - it merges species a head cannot separate, and an
+    // unsure photo names no species - so the sentence is the plain verdict's.
+    const unsure = claimSentence(verdictFor({ "Aedes albopictus": 0.05 }), groups);
+    expect(unsure).toMatch(/^Not confident enough to name a genus/);
+    expect(unsure).toContain("albopictus");
+    expect(unsure).toBe(verdictSentence(verdictFor({ "Aedes albopictus": 0.05 })));
     expect(claimSentence(null, groups)).toBe("");
   });
 

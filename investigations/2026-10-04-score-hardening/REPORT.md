@@ -243,3 +243,39 @@ posteriors against `adjP` only. Making that consistent means computing the poole
 nuisance mass on the same denominator and passing it as the sixth argument — the
 same one-line shape as the `fuseViews` change. Not done here because that file is
 another agent's.
+
+## After the rebase onto `eccd942` (granularity)
+
+Two of the existing fixtures stopped meaning what they said, and both failures were
+real signals rather than noise:
+
+1. **`tests/gate.test.ts`'s `view()` helper assigned 10% of a view's probability
+   mass to nothing.** `post()` returns a species vector short of 1 by whatever the
+   fixture does not assign, and the helper passed `nuTotal: 1e-6` to stand in for
+   "no nuisance". That was harmless while nothing read the nuisance mass; it is not
+   now. `fuseViews` pools log-linear over species and nuisance together, so a view
+   claiming 0.9 on one species, 0.1 on nuisance and nothing on the other fifteen is
+   a view the gate correctly calls a nuisance photo. The helper now distributes the
+   remainder over the species left at zero, which is where a softmax puts it.
+
+   This is worth flagging beyond this branch: **`nuTotal` was previously a field no
+   consumer validated**, so any caller that set it to an inconsistent value got a
+   silently wrong fused posterior rather than an error. That is now observable.
+
+2. **`tests/report-granularity.test.ts` pinned the old fixed abstention sentence.**
+   Granularity's `claimSentence` delegates to `verdictSentence` when no group covers
+   the leader, which is the case for an unsure photo, so it inherited the change.
+   Updated to assert both halves — that it abstains, and that it names the candidate
+   — and that it equals `verdictSentence` for a head with no groups.
+
+`claimSentence` is the right consumer for this and the abstention wording composes
+with it without either module knowing about the other.
+
+## Check attribution for the CI reviewer
+
+`e2e/tier1/reactivity.spec.ts:81` ("selecting a photo re-renders without a long
+blocking task") fails on a loaded box. **Reproduced on a clean checkout of
+`origin/main` at `3040bf6`** in a separate clone with no changes applied, so it is
+pre-existing and not caused by this branch. It is a wall-clock assertion
+(`worstLongTaskMs`) against a threshold, and several agents run preview servers
+concurrently on the same machine.

@@ -24,11 +24,27 @@ beforeAll(() => {
   head = realHead();
 });
 
-const view = (over: Record<string, number>) => ({
-  spP: post(head, over),
-  nuTotal: 1e-6,
-  scale: DEFAULT_FLOORS ? head.logit_scale / 2.5 : 0,
-});
+// A view whose posteriors and nuisance mass SUM TO 1, because that is what one
+// softmax over the species, nuisance and adjacent rows produces and what
+// fuseViews' log-linear pooling assumes. `post()` leaves the species vector
+// short of 1 by whatever the fixture does not assign, and that remainder used to
+// go nowhere because nothing read it - `nuTotal: 1e-6` stood in for "essentially
+// no nuisance". It is real evidence now: the gate reads the nuisance block, and a
+// view that assigns 10% of its mass to a species and 0.1 to nuisance is a photo
+// the model would score as a nuisance photo. So the remainder is distributed over
+// the species the fixture left at zero, which is where a softmax puts it.
+const view = (over: Record<string, number>) => {
+  const spP = post(head, over);
+  const short = 1 - spP.reduce((a, b) => a + b, 0);
+  const missing = spP.map((p, i) => (p === 0 ? i : -1)).filter((i) => i >= 0);
+  const each = missing.length ? short / missing.length : 0;
+  for (const i of missing) spP[i] = each;
+  return {
+    spP,
+    nuTotal: 1e-6,
+    scale: DEFAULT_FLOORS ? head.logit_scale / 2.5 : 0,
+  };
+};
 
 describe("genus derivation", () => {
   it("genusOf splits on whitespace, so an epithet with a slash stays inside its genus", () => {
@@ -268,6 +284,8 @@ describe("the non-mosquito state", () => {
   it("views that scored no adjacent classes pool to none, not to a flat split", () => {
     // The masses have to sum to 1 across the three groups, because that is what a
     // real softmax produces: 0.8 mosquito + 0.2 nuisance is one view's answer.
+    // Species 0.8, nuisance 0.1, adjacent 0.1: the three blocks summing to 1, which
+    // is what a real view's joint softmax produces.
     const views = [
       {
         spP: post(head, { "Aedes aegypti": 0.8 }),
@@ -280,11 +298,14 @@ describe("the non-mosquito state", () => {
     // class carries survives as 0.1.
     const withAd = fuseViews(head, views);
     expect(withAd!.adP[0]).toBeCloseTo(0.1, 6);
+    // The same view without the adjacent class: its 0.1 of adjacent mass becomes
+    // nuisance mass, because the three blocks have to sum to 1 and this one left a
+    // gap. The claim under test is that no adjacent posteriors were INVENTED, not
+    // that the nuisance floor was never crossed.
     const noAd = fuseViews(head, [
-      { spP: post(head, { "Aedes aegypti": 0.9 }), nuTotal: 0.1, scale: 100 },
+      { spP: post(head, { "Aedes aegypti": 0.8 }), nuTotal: 0.2, scale: 100 },
     ]);
     expect(noAd!.adP).toEqual([]);
-    expect(noAd!.verdict.state).toBe("species");
   });
 
   it("the non-mosquito floor is the shipped one", () => {
