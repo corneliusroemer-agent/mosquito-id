@@ -102,6 +102,22 @@
     visibility: hidden;
   }
   .progress-slot .progress-bar-track { flex: 0 0 160px; }
+  /* The transfer measurement: how many MB have arrived and how long is left.
+     Not a status sentence - it is the number and its unit, and it is what tells
+     a user whether to wait. Sits between the bar and the message so it keeps
+     its place next to the bar it belongs to, and so an error sentence still
+     gets the full remaining width. */
+  .progress-meter {
+    flex: 0 1 auto;
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--body-text-color-subdued);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .progress-msg {
     flex: 1 1 auto;
     min-width: 0;
@@ -901,6 +917,7 @@
          into this one slot, so starting or finishing work moves nothing. -->
     <div id="progress-slot" class="progress-slot">
       <div class="progress-bar-track"><div id="progress-fill" class="progress-bar-fill"></div></div>
+      <span id="progress-meter" class="progress-meter"></span>
       <span id="progress-msg" class="progress-msg"></span>
       <button id="btn-cancel-batch" class="btn btn-sm" type="button" style="background:#fee2e2;color:#ef4444;border-color:#fca5a5;padding:2px 8px;font-size:11px;" disabled>Abort</button>
     </div>

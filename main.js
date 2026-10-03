@@ -349,13 +349,20 @@ let progressOwner = null;
 // sentence describing what the app is currently doing is not information about
 // the photo, and it was asked to go. Only a failure is worth a sentence, and
 // that goes through setProgressError.
-function setProgress(owner, text, pct) {
+//
+// `meter` is the exception, and it is not a sentence: it is the transfer
+// measurement - bytes arrived and time remaining - which is the number the user
+// needs to decide whether to wait. It goes to its own element so that no
+// caller can turn the slot back into a status line by accident.
+function setProgress(owner, text, pct, meter) {
   const slot = document.getElementById("progress-slot");
   if (!slot) return;
   progressOwner = owner;
   const msg = document.getElementById("progress-msg");
+  const meterEl = document.getElementById("progress-meter");
   const fill = document.getElementById("progress-fill");
   if (msg) msg.textContent = "";
+  if (meterEl) meterEl.textContent = meter || "";
   if (fill) {
     slot.classList.toggle("indeterminate", pct === null || pct === undefined);
     fill.style.width = `${Math.max(0, Math.min(100, pct || 0))}%`;
@@ -381,6 +388,8 @@ function clearProgress(owner) {
   slot.classList.remove("indeterminate");
   const fill = document.getElementById("progress-fill");
   if (fill) fill.style.width = "0%";
+  const meterEl = document.getElementById("progress-meter");
+  if (meterEl) meterEl.textContent = "";
   const cancel = document.getElementById("btn-cancel-batch");
   if (cancel) { cancel.disabled = true; cancel.onclick = null; }
 }
@@ -391,23 +400,28 @@ function makeTransferProgress(label) {
   const start = performance.now();
   let lastAt = start;
   let lastGot = 0;
-  return (got, total) => {
+  // `done` bypasses the throttle: a cache hit reports completion exactly once,
+  // and throttling a single sample is what left a returning user watching a
+  // bar that never left 0%.
+  return (got, total, done) => {
     const now = performance.now();
-    if (now - lastAt < 500) return;   // rate needs a window, not a sample
-    const rate = ((got - lastGot) / (now - lastAt)) * 1000;
+    if (!done && now - lastAt < 500) return;   // rate needs a window, not a sample
+    const rate = done ? 0 : ((got - lastGot) / (now - lastAt)) * 1000;
     lastAt = now;
     lastGot = got;
     const known = total > 0;
     const mb = (x) => (x / 1048576).toFixed(0);
     let text = known ? `${label}: ${mb(got)} / ${mb(total)} MB` : label;
-    if (rate > 0) {
+    if (done) {
+      text += " · ready";
+    } else if (rate > 0) {
       text += ` · ${mb(rate)} MB/s`;
       if (known) {
         const secs = Math.round((total - got) / rate);
         text += secs > 0 ? ` · ${secs}s left` : " · done";
       }
     }
-    setProgress("model", text, known ? (100 * got) / total : null);
+    setProgress("model", text, known ? (100 * got) / total : null, text);
   };
 }
 
@@ -432,6 +446,7 @@ async function fetchWithProgress(url, onBytes) {
     out.set(chunk, offset);
     offset += chunk.length;
   }
+  if (onBytes) onBytes(got, total || got, true);   // final sample: the bar reaches 100%
   return out.buffer;
 }
 
@@ -443,7 +458,8 @@ async function fetchWithCache(url, onBytes) {
       if (cached) {
         console.log(`[CacheStorage] HIT for ${url}`);
         sendLog("cache_hit", { url });
-        if (onBytes) onBytes(1, 1);
+        const size = Number(cached.headers.get("content-length")) || 0;
+        if (onBytes) onBytes(size || 1, size || 1, true);
         return await cached.arrayBuffer();
       }
       console.log(`[CacheStorage] MISS for ${url}, fetching from network...`);
