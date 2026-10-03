@@ -473,20 +473,25 @@
   }
   /* The include checkbox is its own interactive element with its own accessible
      name. It used to be wrapped in a <label> with no text, which gave it no name
-     in any state, and shared a corner of the tile with a <button> for the
-     browser to retarget a click onto. The box is small for a touch target, so it
-     carries padding to make the hit area the tile's full width without a wrapper
-     element to do it: the padding is outside the drawn control, so nothing about
-     how it looks moves. */
+     in any state, and shared a corner of the tile with a <button> for the browser
+     to retarget a click onto.
+
+     The size is set on the element rather than widened with padding: the page is
+     `box-sizing: border-box`, so padding is inside the declared width and cannot
+     make the hit area any larger. A version of this rule that tried padding on a
+     14px box computed to `padding: 0px` and left a 14x14 target, below every
+     tap-target minimum.
+
+     It is square. Stretching a native checkbox to 44x24 renders a distorted
+     control with a tick floating in the middle of it, which looks broken however
+     good the hit area is; 24x24 is square, native-looking, and the WCAG 2.2
+     minimum target size. */
   .thumb-optin {
     margin: 0;
     cursor: pointer;
-    width: 14px;
-    height: 14px;
+    width: 24px;
+    height: 24px;
     accent-color: var(--color-accent);
-    padding: 7px 25px 5px;
-    background-clip: content-box;
-    border-color: transparent;
   }
   .thumb-optin:disabled { cursor: not-allowed; opacity: 0.55; }
   .hint { font-size: 12px; color: var(--body-text-color-subdued); margin: 0 0 12px; }
@@ -755,8 +760,7 @@
     .tile { width: 84px; }
     .tile-btn { width: 84px; height: 84px; }
     .tile-delete-btn { width: 28px; height: 28px; top: 2px; left: 2px; font-size: 15px; }
-    .thumb-optin { padding: 11px 25px 5px; }
-    .thumb-optin { width: 22px; height: 22px; }
+    .thumb-optin { width: 28px; height: 28px; }
     .btn-sm { padding: 9px 16px; font-size: 13px; }
     .combined-options summary { display: block; padding: 8px 0; }
     .radio-group label { padding: 7px 0; }
