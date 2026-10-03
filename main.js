@@ -763,6 +763,84 @@ function complexScores(spP, spCos) {
   return { labels, demoted: false };
 }
 
+// Whether there is a crop to draw, and where it sits in each panel, answered in
+// one place. Both panels used to gate the outline on their own independent
+// conditions, so a state could satisfy one and not the other and show the crop
+// on only one panel - the reported "zoom has a crop, the full photo does not".
+// Two guards that must agree is the defect; a third caller would reintroduce it.
+//
+// A crop is real when the photo was classified on a sub-region of itself. A
+// fallback, or a photo the user reverted to whole, was classified on the whole
+// frame, so drawing an outline over it would claim a crop that was never made.
+// `pending` is deliberately not a gate: a recompute in flight still has the
+// previous crop on screen, and both panels should keep showing it, dimmed on
+// the scores, rather than one panel blanking while the other holds.
+function hasCropBox(p) {
+  return Boolean(p && p.cropBox && !p.fallback && !p.manual_full_photo);
+}
+
+// The same p.cropBox expressed as fractions of each panel's surface. Both take
+// p.cropBox in full-image pixels; each panel shows a different image through a
+// different object-fit:cover window, so each needs its own map. Returns null
+// when the panel cannot place the box (no image, or no context region).
+function cropBoxInFullSurface(p) {
+  if (!hasCropBox(p) || !p.fullCanvas) return null;
+  const surfaceFull = document.getElementById("crop-surface-full");
+  const { k, off } = coverMapping(surfaceFull, p.fullCanvas);
+  const toSurface = (f) => (f - off) / k;
+  const [bx1, by1, bx2, by2] = p.cropBox;
+  const l = toSurface(bx1 / p.fullCanvas.width);
+  const t = toSurface(by1 / p.fullCanvas.height);
+  return {
+    left: l * 100,
+    top: t * 100,
+    width: (toSurface(bx2 / p.fullCanvas.width) - l) * 100,
+    height: (toSurface(by2 / p.fullCanvas.height) - t) * 100,
+  };
+}
+
+// The zoom panel shows the context region, not the whole photo, so the box has
+// to be expressed relative to that region before it goes through the cover map.
+// With no context region the panel shows the whole photo instead (zoomSource
+// falls back the same way), so the whole photo is the coordinate frame here too
+// - which keeps a real crop drawable on both panels in every state.
+function cropBoxInZoomSurface(p) {
+  if (!hasCropBox(p)) return null;
+  const surfaceZoomed = document.getElementById("crop-surface-zoomed");
+  const [cx1, cy1, cx2, cy2] = p.cropBox;
+  const ctx_x1 = p.contextBox ? p.contextBox[0] : 0;
+  const ctx_y1 = p.contextBox ? p.contextBox[1] : 0;
+  const ctx_x2 = p.contextBox ? p.contextBox[2] : p.fullCanvas.width;
+  const ctx_y2 = p.contextBox ? p.contextBox[3] : p.fullCanvas.height;
+  const ctx_w = ctx_x2 - ctx_x1;
+  const ctx_h = ctx_y2 - ctx_y1;
+  if (!(ctx_w > 0) || !(ctx_h > 0)) return null;
+  const { k, off } = coverMapping(surfaceZoomed, p.contextCanvas || p.fullCanvas);
+  const toSurface = (f) => (f - off) / k;
+  const l = toSurface((cx1 - ctx_x1) / ctx_w);
+  const t = toSurface((cy1 - ctx_y1) / ctx_h);
+  return {
+    left: l * 100,
+    top: t * 100,
+    width: (toSurface((cx2 - ctx_x1) / ctx_w) - l) * 100,
+    height: (toSurface((cy2 - ctx_y1) / ctx_h) - t) * 100,
+  };
+}
+
+// Place a box returned by one of the helpers above, or hide it.
+function applyBox(el, box) {
+  if (!el) return;
+  if (!box) {
+    el.style.display = "none";
+    return;
+  }
+  el.style.left = `${box.left}%`;
+  el.style.top = `${box.top}%`;
+  el.style.width = `${box.width}%`;
+  el.style.height = `${box.height}%`;
+  el.style.display = "block";
+}
+
 // The context canvas is painted with object-fit:cover, so a fraction of the
 // zoomed surface is only the same fraction of the image when the two aspects
 // match. Return the affine map surfaceFraction -> imageFraction for the photo
@@ -1378,27 +1456,7 @@ function renderActivePhoto() {
 
   // Active crop outline on full photo (for both manual and automatic crops!)
   const fullActiveBox = document.getElementById("full-active-crop-box");
-  if (fullActiveBox) {
-    if (p.cropBox && p.fullCanvas && !p.fallback && !p.manual_full_photo) {
-      const [bx1, by1, bx2, by2] = p.cropBox;
-      // The panel shows a centred object-fit:cover window of the photo, so image
-      // fractions have to go through the same map the panel uses or the box drifts
-      // off the mosquito - worst exactly where the panel is needed most.
-      const { k, off } = coverMapping(surfaceFull, p.fullCanvas);
-      const toSurface = (f) => (f - off) / k;
-      const l = toSurface(bx1 / p.fullCanvas.width) * 100;
-      const t = toSurface(by1 / p.fullCanvas.height) * 100;
-      const w = (toSurface(bx2 / p.fullCanvas.width) - l / 100) * 100;
-      const h = (toSurface(by2 / p.fullCanvas.height) - t / 100) * 100;
-      fullActiveBox.style.left = `${l}%`;
-      fullActiveBox.style.top = `${t}%`;
-      fullActiveBox.style.width = `${w}%`;
-      fullActiveBox.style.height = `${h}%`;
-      fullActiveBox.style.display = "block";
-    } else {
-      fullActiveBox.style.display = "none";
-    }
-  }
+  applyBox(fullActiveBox, cropBoxInFullSurface(p));
 
   // 2. Render Center Panel (Zoomed View with extra context)
   const surfaceZoomed = document.getElementById("crop-surface-zoomed");
@@ -1428,26 +1486,7 @@ function renderActivePhoto() {
     cropEmpty.style.display = "none";
 
     // Draw where the crop sits within the context region
-    if (zoomedActiveBox && p.contextBox && p.cropBox && !p.pending) {
-      const [cx1, cy1, cx2, cy2] = p.cropBox;
-      const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
-      const ctx_w = ctx_x2 - ctx_x1;
-      const ctx_h = ctx_y2 - ctx_y1;
-      // image fraction -> surface fraction, through the object-fit:cover window
-      const { k, off } = zoomedSurfaceMapping();
-      const toSurface = (f) => (f - off) / k;
-      const l = toSurface((cx1 - ctx_x1) / ctx_w) * 100;
-      const t = toSurface((cy1 - ctx_y1) / ctx_h) * 100;
-      const w = (toSurface((cx2 - ctx_x1) / ctx_w) - l / 100) * 100;
-      const h = (toSurface((cy2 - ctx_y1) / ctx_h) - t / 100) * 100;
-      zoomedActiveBox.style.left = `${l}%`;
-      zoomedActiveBox.style.top = `${t}%`;
-      zoomedActiveBox.style.width = `${w}%`;
-      zoomedActiveBox.style.height = `${h}%`;
-      zoomedActiveBox.style.display = "block";
-    } else if (zoomedActiveBox) {
-      zoomedActiveBox.style.display = "none";
-    }
+    applyBox(zoomedActiveBox, cropBoxInZoomSurface(p));
   } else {
     contextImg.style.display = "none";
     cropEmpty.style.display = "block";
