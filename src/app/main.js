@@ -35,6 +35,7 @@ import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
 import { downloadCSV, renderResultsTable } from "./resultsTable";
+import { loadSamplePhotos, prefetchSamples } from "./samples";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -2094,80 +2095,6 @@ function updatePooling() {
 }
 
 
-// Sample Photos Loader
-const SAMPLE_NAMES = [
-  "IMG-20261002-WA0007.jpeg",
-  "PXL_20261002_182523087.jpg",
-  "PXL_20261002_182614990.jpg",
-  "PXL_20261002_182628741.jpg",
-  "PXL_20261002_182632161.jpg",
-  "PXL_20261002_182639488.jpg",
-  "PXL_20261002_182720758.jpg",
-  "PXL_20261002_182737596.jpg",
-  "PXL_20261002_182741226.jpg",
-  "PXL_20261002_182754446.jpg"
-];
-
-// One sample, as a File. Kept separate so the preload below can populate the
-// cache and the click below can read it, without fetching twice.
-async function fetchSampleFile(name) {
-  const resp = await fetch(`samples/${name}`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const blob = await resp.blob();
-  return new File([blob], name, { type: blob.type || "image/jpeg" });
-}
-
-const sampleFileCache = new Map();
-async function getSampleFile(name) {
-  if (!sampleFileCache.has(name)) {
-    sampleFileCache.set(name, fetchSampleFile(name));
-  }
-  return sampleFileCache.get(name);
-}
-
-// All ten at once, bounded so a cold cache on a phone does not open ten
-// connections for images nobody asked for.
-//
-// The sequential version paid ten round trips back to back, and the wait was
-// visible: the button did nothing until the last download landed.
-const SAMPLE_PREFETCH_CONCURRENCY = 5;
-async function prefetchSamples() {
-  const names = SAMPLE_NAMES.slice();
-  let i = 0;
-  await Promise.all(Array.from({ length: Math.min(SAMPLE_PREFETCH_CONCURRENCY, names.length) }, async () => {
-    for (;;) {
-      const idx = i++;
-      if (idx >= names.length) return;
-      try {
-        await getSampleFile(names[idx]);
-      } catch (e) {
-        // A sample that will not prefetch must not poison the cache: drop it so
-        // the click retries rather than replaying this failure forever.
-        sampleFileCache.delete(names[idx]);
-        console.warn("Could not prefetch sample:", names[idx], e);
-      }
-    }
-  }));
-}
-
-async function loadSamplePhotos() {
-  sendLog("sample_photos_clicked");
-  setProgress("samples", "Fetching sample photos…", null);
-  const results = await Promise.allSettled(SAMPLE_NAMES.map(getSampleFile));
-  clearProgress("samples");
-  const files = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
-  for (let i = 0; i < results.length; i++) {
-    if (results[i].status === "rejected") {
-      sampleFileCache.delete(SAMPLE_NAMES[i]);
-      console.warn("Could not fetch sample:", SAMPLE_NAMES[i], results[i].reason);
-    }
-  }
-  if (files.length) {
-    processFiles(files);
-  } else {
-    setProgressError("Could not load the sample photos.");
-  }
-}
 
 
 // ---- Router ----
@@ -2283,7 +2210,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   // Buttons & Controls
-  document.getElementById("btn-samples").onclick = loadSamplePhotos;
+  document.getElementById("btn-samples").onclick = () => loadSamplePhotos({ processFiles, sendLog });
   document.getElementById("btn-prev").onclick = () => selectPhoto(selectedIndex - 1);
   document.getElementById("btn-next").onclick = () => selectPhoto(selectedIndex + 1);
   document.getElementById("btn-csv").onclick = () => downloadCSV(previews, sendLog);
