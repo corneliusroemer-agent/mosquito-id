@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>mosquito-id</title>
 <style>
   :root {
@@ -33,7 +33,10 @@
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    padding: 20px 16px;
+    /* Keep clear of the notch and the home indicator on notched phones; the 0 fallback
+       is what non-notch devices get, since env() is 0 there anyway. */
+    padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             max(20px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: var(--body-text-color);
     background: var(--background-fill-primary);
@@ -368,10 +371,13 @@
   }
   .hint { font-size: 12px; color: var(--body-text-color-subdued); margin: 0 0 12px; }
 
-  /* 3-Panel Viewer Grid */
+  /* 3-Panel Viewer Grid. The scores column is the one people read, and at a
+     flat 1fr 1fr 1fr it is too narrow to hold "Aedes albopictus (Asian tiger
+     mosquito) 🔗" on one line, which pushed the 🔗 onto a line of its own.
+     The two photo panels have gutter to spare at desktop widths. */
   .viewer-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 0.9fr 0.9fr 1.2fr;
     gap: 12px;
     align-items: stretch;
   }
@@ -468,6 +474,14 @@
     transition: width 0.3s ease;
   }
 
+  /* Species name in a score row opens the standalone species page. */
+  .species-kb-link {
+    color: inherit;
+    text-decoration: none;
+    border-bottom: 1px dotted var(--color-accent);
+  }
+  .species-kb-link:hover { color: var(--color-accent); }
+
   .metadata-line {
     display: flex;
     align-items: center;
@@ -501,6 +515,125 @@
     border-top: 1px solid var(--border-color-primary);
   }
   .divider { opacity: 0.6; }
+
+  /* ------------------------------------------------------------------
+     Species result rows
+     main.js emits .species-name-wrap > (.species-wiki, .species-kb-link,
+     .species-common) in the header, then .species-vectors, then the bar.
+     The name row is the scannable part; the vector line is supporting
+     detail, so it gets its own quiet line at 11px in the subdued colour.
+     Nothing here is hover-gated: there is no hover on a phone.
+     ------------------------------------------------------------------ */
+  .score-item { position: relative; margin: 8px 0; }
+  .score-item-header { align-items: center; margin-bottom: 3px; }
+
+  .species-name-wrap {
+    display: flex;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 6px;
+    min-width: 0; /* let the name shrink instead of pushing the % out */
+  }
+  .species-name-wrap .species-kb-link { min-width: 0; overflow-wrap: break-word; }
+  .score-item-header > strong { flex: none; white-space: nowrap; }
+
+  /* main.js emits the wiki link first and main.js is not ours to change, so
+     the flex order puts it where the design wants it: after the common
+     name. It also gets a 24px box so it is a usable touch target. */
+  .species-wiki {
+    order: 2;
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    min-height: 24px;
+    margin: -4px -4px -4px 0;
+    font-size: 12px;
+    line-height: 1;
+    text-decoration: none;
+    opacity: 0.5;
+  }
+  .species-wiki:hover, .species-wiki:focus-visible { opacity: 1; }
+
+  .species-common {
+    order: 1;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.3;
+    color: var(--body-text-color-subdued);
+  }
+
+  .species-vectors {
+    display: block;
+    margin-top: 1px;
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--body-text-color-subdued);
+  }
+
+  /* The five-column summary table is wider than any phone; let its own
+     wrapper scroll instead of letting the page scroll sideways. */
+  .table-wrap { overflow: auto; }
+
+  /* Hit areas that are only comfortable with a mouse pointer. */
+  @media (pointer: coarse) {
+    .tile-delete-btn { width: 28px; height: 28px; top: 2px; left: 2px; font-size: 15px; }
+    .tile .include { padding: 8px 0 2px; }
+    .thumb-optin { width: 22px; height: 22px; }
+    .btn-sm { padding: 9px 16px; font-size: 13px; }
+    .combined-options summary { display: block; padding: 8px 0; }
+    .radio-group label { padding: 7px 0; }
+    .radio-group input[type="radio"] { width: 18px; height: 18px; }
+    .option-field input[type="range"] { height: 32px; }
+    .species-kb-link { padding: 2px 0; }
+  }
+
+  /* Phones: single column, so reclaim the width the gutters were using and
+     let the long panels use the full column. */
+  @media (max-width: 768px) {
+    body { padding: 16px 12px; }
+    .card { padding: 12px; }
+    .app-header { margin-bottom: 16px; }
+
+    /* The engine <select> is 472px wide because that is its widest option;
+       without this it drags the whole page 160px sideways. */
+    .engine-control-box { width: 100%; max-width: 100%; }
+    #engine-select { flex: 1 1 auto; min-width: 0; width: 100%; max-width: 100%; }
+
+    /* A phone cannot fit "Aedes albopictus (Asian tiger mosquito) 🔗 40.3%"
+       on one line, and breaking the binomial across lines is worse than
+       spending the line. The name and the 🔗 stay together on line 1; the
+       common name is forced onto its own full-width line under them, which
+       also makes every row the same height. */
+    .species-name-wrap .species-kb-link { flex: 0 0 auto; white-space: nowrap; }
+    /* 🔗 before the common name here, because the common name is the item
+       being pushed onto its own line. */
+    .species-wiki { order: 1; }
+    .species-common { order: 2; flex: 0 0 100%; font-size: 11px; }
+
+    /* One page scroll beats a scroller inside a scroller on touch. */
+    .score-list, .combined-scores {
+      height: auto;
+      max-height: none;
+      overflow-y: visible;
+      padding-right: 0;
+      scrollbar-gutter: auto;
+    }
+    .combined-card { max-height: none; overflow: visible; }
+
+    .metadata-line { flex-wrap: wrap; row-gap: 8px; }
+    .app-footer { flex-wrap: wrap; row-gap: 2px; }
+    .data-table { font-size: 11px; }
+    .data-table th, .data-table td { padding: 6px 6px; }
+  }
+
+  @media (max-width: 480px) {
+    .header-titles h1 { font-size: 22px; }
+    .header-titles .sub { font-size: 13px; }
+    .dropzone { padding: 20px 12px; }
+  }
 </style>
 </head>
 <body>
@@ -534,7 +667,9 @@
         <div class="dropzone-text">Drop photos or ZIP · paste images with ⌘V / Ctrl+V</div>
         <div class="dropzone-sub">or click to browse files</div>
         <input id="file-input" type="file" multiple accept="image/*,.zip" style="display:none">
+        <input id="camera-input" type="file" accept="image/*" capture="environment" style="display:none">
       </div>
+      <button id="btn-camera" class="btn btn-primary" style="margin-top:8px;width:100%;">📸 Take a photo</button>
       <button id="btn-samples" class="btn btn-primary" style="margin-top:12px;width:100%;">Try 10 sample photos</button>
       <div id="batch-progress" class="batch-progress" style="display:none;margin-top:12px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">

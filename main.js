@@ -205,6 +205,10 @@ function sendLog(action, data = {}) {
     ...data
   };
   console.log(`[CLIENT LOG] ${action}:`, payload);
+  // Only the Cloud GPU deployment has an /api/log endpoint. Posting to it from
+  // the static site just produces a failed request, which the browser reports as
+  // a console error no matter how the promise is handled.
+  if (!serverAvailable) return;
   fetch("/api/log", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -682,6 +686,59 @@ function complexScores(spP, spCos) {
   return { labels, demoted: false };
 }
 
+// The context canvas is painted with object-fit:cover, so a fraction of the
+// zoomed surface is only the same fraction of the image when the two aspects
+// match. Return the affine map surfaceFraction -> imageFraction for the photo
+// currently shown, so the crop-box overlay and the fine-tune drag agree with
+// what is on screen (and are the identity in the normal, matching-aspect case).
+function zoomedSurfaceMapping() {
+  const identity = { k: 1, off: 0 };
+  const p = previews[selectedIndex];
+  const surface = document.getElementById("crop-surface-zoomed");
+  if (!p?.contextCanvas || !surface) return identity;
+  const b = surface.getBoundingClientRect();
+  if (b.width <= 0 || b.height <= 0) return identity;
+  const boxAspect = b.width / b.height;
+  const imgAspect = p.contextCanvas.width / p.contextCanvas.height;
+  if (!imgAspect) return identity;
+  const k = Math.min(boxAspect / imgAspect, imgAspect / boxAspect);
+  return { k, off: (1 - k) / 2 };
+}
+
+// Aspect ratio (w/h) of the zoomed panel's container, i.e. the box the context
+// canvas is displayed in. The container lives inside #gallery-section, which is
+// display:none until the first photo has been classified, so on the very first
+// photo its clientWidth/clientHeight both read 0 and any aspect measured from it
+// is the 1/0 fallback. Measure against real layout instead: give the gallery
+// layout for one synchronous read, then restore it. Both style writes land in
+// the same frame, so the hidden gallery is never painted.
+let cachedViewerAspect = null;
+
+function measureViewerAspect() {
+  const container = document.getElementById("crop-surface-zoomed")?.parentElement;
+  if (container && container.clientWidth > 0 && container.clientHeight > 0) {
+    return container.clientWidth / container.clientHeight;
+  }
+  if (cachedViewerAspect) return cachedViewerAspect;
+
+  const gallery = document.getElementById("gallery-section");
+  if (gallery && container) {
+    const prevDisplay = gallery.style.display;
+    const prevVisibility = gallery.style.visibility;
+    gallery.style.display = "block";
+    gallery.style.visibility = "hidden";
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    gallery.style.display = prevDisplay;
+    gallery.style.visibility = prevVisibility;
+    if (w > 0 && h > 0) {
+      cachedViewerAspect = w / h;
+      return cachedViewerAspect;
+    }
+  }
+  return null;
+}
+
 // Compute context crop matching viewer container aspect ratio with 75% border fit along narrower dimension
 function extractContextCrop(fullCv, cropBox, targetAspect = null) {
   if (!cropBox) {
@@ -695,12 +752,7 @@ function extractContextCrop(fullCv, cropBox, targetAspect = null) {
 
   // Determine viewer container aspect ratio (width / height)
   if (!targetAspect) {
-    const container = document.getElementById("crop-surface-zoomed")?.parentElement;
-    if (container && container.clientHeight > 0) {
-      targetAspect = container.clientWidth / container.clientHeight;
-    } else {
-      targetAspect = 400 / 320;
-    }
+    targetAspect = measureViewerAspect() ?? 400 / 320;
   }
 
   // 75% to border along narrower dimension relative to container
@@ -1155,10 +1207,13 @@ function renderActivePhoto() {
       const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
       const ctx_w = ctx_x2 - ctx_x1;
       const ctx_h = ctx_y2 - ctx_y1;
-      const l = ((cx1 - ctx_x1) / ctx_w) * 100;
-      const t = ((cy1 - ctx_y1) / ctx_h) * 100;
-      const w = ((cx2 - cx1) / ctx_w) * 100;
-      const h = ((cy2 - cy1) / ctx_h) * 100;
+      // image fraction -> surface fraction, through the object-fit:cover window
+      const { k, off } = zoomedSurfaceMapping();
+      const toSurface = (f) => (f - off) / k;
+      const l = toSurface((cx1 - ctx_x1) / ctx_w) * 100;
+      const t = toSurface((cy1 - ctx_y1) / ctx_h) * 100;
+      const w = (toSurface((cx2 - ctx_x1) / ctx_w) - l / 100) * 100;
+      const h = (toSurface((cy2 - ctx_y1) / ctx_h) - t / 100) * 100;
       zoomedActiveBox.style.left = `${l}%`;
       zoomedActiveBox.style.top = `${t}%`;
       zoomedActiveBox.style.width = `${w}%`;
@@ -1184,23 +1239,21 @@ function renderActivePhoto() {
     const commonLabel = meta ? ` <span class="species-common">(${escapeHtml(meta.common)})</span>` : "";
     const vectorLabel = meta?.vectors ? `<span class="species-vectors">Vector: ${escapeHtml(meta.vectors)}</span>` : "";
     const wikiLink = meta?.wiki ? `<a href="${meta.wiki}" target="_blank" rel="noopener" class="species-wiki" title="Wikipedia">🔗</a>` : "";
-    const tooltip = meta ? `<div class="species-tooltip">` +
-      `<strong>${escapeHtml(name)}</strong> — ${escapeHtml(meta.common)}<br>` +
-      `<b>Diseases:</b> ${escapeHtml(meta.vectors)}<br>` +
-      `<b>Range:</b> ${escapeHtml(meta.range)}<br>` +
-      `<b>Activity:</b> ${escapeHtml(meta.activity)}<br>` +
-      `<b>Hosts:</b> ${escapeHtml(meta.hosts)}<br>` +
-      `<em>${escapeHtml(meta.notes)}</em></div>` : "";
+    // Species name links out to the standalone KB page for that species.
+    // Relative href so it survives the /mosquito-id/ subpath deployment.
+    const speciesSlug = name.toLowerCase().replace(/\s+/g, "-");
+    const kbLink = meta
+      ? `<a class="species-kb-link" href="species.html?s=${encodeURIComponent(speciesSlug)}">${escapeHtml(name)}</a>`
+      : `<span>${escapeHtml(name)}</span>`;
     item.innerHTML = `
       <div class="score-item-header">
-        <span class="species-name-wrap">${wikiLink}<span>${escapeHtml(name)}</span>${commonLabel}</span>
+        <span class="species-name-wrap">${wikiLink}${kbLink}${commonLabel}</span>
         <strong>${percent}%</strong>
       </div>
       ${vectorLabel}
       <div class="score-item-track">
         <div class="score-item-fill" style="width: ${Math.max(0, Math.min(100, score * 100))}%"></div>
       </div>
-      ${tooltip}
     `;
     scoreList.appendChild(item);
   }
@@ -1336,10 +1389,16 @@ async function applyCropFromZoomedSurface(idx, rect) {
   const ctx_w = ctx_x2 - ctx_x1;
   const ctx_h = ctx_y2 - ctx_y1;
 
-  const x1 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + rect[0] * ctx_w)));
-  const y1 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + rect[1] * ctx_h)));
-  const x2 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + rect[2] * ctx_w)));
-  const y2 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + rect[3] * ctx_h)));
+  // Surface fractions -> image fractions, through the object-fit:cover window,
+  // so a fine-tune drag lands where the user pointed even if the context canvas
+  // and the surface no longer share an aspect (e.g. after a window resize).
+  const { k, off } = zoomedSurfaceMapping();
+  const r = rect.map((f, i) => k * f + off);
+
+  const x1 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + r[0] * ctx_w)));
+  const y1 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + r[1] * ctx_h)));
+  const x2 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + r[2] * ctx_w)));
+  const y2 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + r[3] * ctx_h)));
 
   if (x2 - x1 < 10 || y2 - y1 < 10) return;
 
@@ -1683,6 +1742,28 @@ window.addEventListener("DOMContentLoaded", () => {
   fileInput.onchange = (e) => {
     if (e.target.files?.length) processFiles(Array.from(e.target.files));
   };
+
+  // Phone camera capture. `capture` makes iOS/Android open the camera directly,
+  // with no permission prompt and no getUserMedia stream to manage, and the
+  // chosen photo arrives as an ordinary File - so it reuses processFiles() and
+  // the rest of the pipeline unchanged. Without `capture` the same input would
+  // offer the photo library instead, which is the wrong primary path here.
+  const cameraInput = document.getElementById("camera-input");
+  const btnCamera = document.getElementById("btn-camera");
+  if (cameraInput && btnCamera) {
+    // The input lives inside #dropzone, and a programmatic .click() bubbles -
+    // without this the dropzone handler would open the file browser as well.
+    cameraInput.addEventListener("click", (e) => e.stopPropagation());
+    btnCamera.onclick = () => cameraInput.click();
+    cameraInput.onchange = (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = ""; // let the same photo be taken again
+      if (!file) return;
+      const name = file.name || `camera-${Date.now()}.jpg`;
+      sendLog("camera_capture", { name, type: file.type, bytes: file.size });
+      processFiles([new File([file], name, { type: file.type || "image/jpeg" })]);
+    };
+  }
 
   dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add("dragover"); };
   dropzone.ondragleave = () => dropzone.classList.remove("dragover");
