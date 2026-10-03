@@ -434,6 +434,50 @@ function sendLog(action, data = {}) {
   }).catch(() => {});
 }
 
+// A canvas -> data: URL memo, keyed on the canvas object.
+//
+// Every render re-encodes the same canvases: `renderThumbnails` runs after each
+// photo lands and encodes every tile's crop, and `renderActivePhoto` encodes the
+// selected photo's full and context canvases. `toDataURL` is a synchronous
+// JPEG encode of a full-resolution frame - tens of milliseconds each - on the
+// thread that also has to paint. With ten photos that is over a second of
+// blocking work per render, spread across the batch, which is what a frozen UI
+// during classification actually is.
+//
+// The cache is keyed on the canvas identity rather than the photo, because a
+// photo's canvas is *replaced* whenever its pixels change (a new decode, a crop
+// release, a manual re-crop). A fresh canvas is a fresh cache entry, so a stale
+// encode cannot outlive the pixels it was made from - the invalidation is
+// structural rather than something a call site has to remember to do. Entries
+// die with their canvas.
+const canvasUrlCache = new WeakMap();
+function canvasUrl(cv, quality) {
+  if (!cv) return null;
+  const key = quality;
+  let byQuality = canvasUrlCache.get(cv);
+  if (!byQuality) {
+    byQuality = new Map();
+    canvasUrlCache.set(cv, byQuality);
+  }
+  let url = byQuality.get(key);
+  if (url === undefined) {
+    url = cv.toDataURL("image/jpeg", quality);
+    byQuality.set(key, url);
+  }
+  return url;
+}
+
+// Setting an <img>'s src to the value it already holds is cheap to write and
+// not free to run: the element drops the decoded frame and re-decodes. The
+// caches above make the encode free, but only skipping the assignment makes the
+// *decode* free, so the same-string check is what actually keeps a re-render
+// from costing anything.
+function setImgSrc(img, url) {
+  if (url && img.getAttribute("src") === url) return;
+  if (url) img.setAttribute("src", url);
+  else img.removeAttribute("src");
+}
+
 function dataUrlToCanvas(dataUrl) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -1680,90 +1724,136 @@ function isSelectable(p) {
   return p.verdict?.state !== "non-mosquito";
 }
 
+// Tiles are keyed by the photo slot they were built for, so a re-render updates
+// them in place instead of rebuilding the strip.
+//
+// This used to be `strip.innerHTML = ""` followed by building every tile again,
+// on every call - and `renderThumbnails` runs after every single photo lands,
+// and again for a selection change and a checkbox toggle. Tearing the strip down
+// discards every decoded thumbnail, so the browser re-decoded all of them, and
+// because the strip sits above the results, every rebuild moved everything below
+// it. That is the layout shift on row expansion and on deleting a photo, and it
+// is most of the main-thread cost during a batch.
+//
+// Reusing the nodes removes both: an unchanged tile is not touched at all, so
+// nothing about it decodes, resizes or moves.
+const tileNodes = new Map();
+
+function buildTile(idx) {
+  const tile = document.createElement("div");
+
+  const delBtn = document.createElement("button");
+  delBtn.className = "tile-delete-btn";
+  delBtn.innerHTML = "&times;";
+  // Set per-render, because the index a tile was built for stops being its
+  // index as soon as a photo before it is deleted.
+  tile.appendChild(delBtn);
+
+  const btn = document.createElement("button");
+  btn.className = "tile-btn";
+  btn.onclick = () => selectPhoto(idx);
+  tile.appendChild(btn);
+
+  const img = document.createElement("img");
+  btn.appendChild(img);
+
+  const num = document.createElement("span");
+  num.className = "number";
+  btn.appendChild(num);
+
+  const badge = document.createElement("span");
+  btn.appendChild(badge);
+
+  const label = document.createElement("label");
+  label.className = "include";
+  const chk = document.createElement("input");
+  chk.type = "checkbox";
+  chk.className = "thumb-optin";
+  chk.onchange = (e) => {
+    if (e.target.checked) includedIndices.add(idx);
+    else includedIndices.delete(idx);
+    renderThumbnails();
+    updatePooling();
+  };
+  label.appendChild(chk);
+  tile.appendChild(label);
+
+  return { tile, delBtn, btn, img, num, badge, label, chk };
+}
+
 function renderThumbnails() {
   const strip = document.getElementById("thumbnail-strip");
-  strip.innerHTML = "";
   updateStripActions();
   document.getElementById("gallery-counter").textContent = `${selectedIndex + 1} / ${previews.length}`;
 
+  // Drop the entries for photos that are gone, so a tile whose photo was deleted
+  // is not kept alive by the cache.
+  const live = new Set(previews);
+  for (const [key, node] of tileNodes) {
+    if (!live.has(key)) {
+      node.tile.remove();
+      tileNodes.delete(key);
+    }
+  }
+
   previews.forEach((p, idx) => {
-    const tile = document.createElement("div");
+    let node = tileNodes.get(p);
+    if (!node) {
+      node = buildTile(idx);
+      tileNodes.set(p, node);
+    }
+
     // A photo still being analyzed is visibly unsettled: greyed tile, pending
     // badge, and it cannot be opted into the pooled result yet.
-    tile.className = "tile" + (selectedIndex === idx ? " active" : "") +
+    node.tile.className = "tile" + (selectedIndex === idx ? " active" : "") +
       (!includedIndices.has(idx) ? " excluded" : "") + (p.pending ? " pending" : "");
 
-    const delBtn = document.createElement("button");
-    delBtn.className = "tile-delete-btn";
-    delBtn.innerHTML = "&times;";
-    delBtn.title = `Remove ${p.name}`;
-    delBtn.onclick = (e) => {
+    node.delBtn.title = `Remove ${p.name}`;
+    node.delBtn.onclick = (e) => {
       e.stopPropagation();
       deletePhoto(idx);
     };
-    tile.appendChild(delBtn);
 
-    const btn = document.createElement("button");
-    btn.className = "tile-btn";
-    btn.setAttribute("aria-label", `View photo ${idx + 1}: ${p.name}`);
-    btn.onclick = () => selectPhoto(idx);
+    node.btn.setAttribute("aria-label", `View photo ${idx + 1}: ${p.name}`);
 
-    const img = document.createElement("img");
     // A queued photo has no canvas yet: it gets a greyed placeholder tile that
     // resolves to the real image as soon as its own decode finishes. The alt is
     // empty in that state, so the filename does not render over the tile.
     const src = p.cropCanvas || p.fullCanvas;
     if (src) {
-      img.src = src.toDataURL("image/jpeg", 0.8);
-      img.alt = p.name;
+      setImgSrc(node.img, canvasUrl(src, 0.8));
+      node.img.className = "";
+      node.img.alt = p.name;
     } else {
-      img.className = "thumb-placeholder";
-      img.alt = "";
+      node.img.removeAttribute("src");
+      node.img.className = "thumb-placeholder";
+      node.img.alt = "";
     }
-    btn.appendChild(img);
 
-    const num = document.createElement("span");
-    num.className = "number";
-    num.textContent = `${idx + 1}`;
-    btn.appendChild(num);
+    node.num.textContent = `${idx + 1}`;
 
-    const badge = document.createElement("span");
     const badgeState = p.error ? "error" : p.pending ? "pending" : p.is_cropped ? "cropped" : "uncropped";
-    badge.className = `crop-badge ${badgeState}`;
-    badge.textContent = p.error ? "!" : p.pending ? "…" : p.is_cropped ? "✓" : "✕";
-    badge.title = p.error
+    node.badge.className = `crop-badge ${badgeState}`;
+    node.badge.textContent = p.error ? "!" : p.pending ? "…" : p.is_cropped ? "✓" : "✕";
+    node.badge.title = p.error
       ? p.error
       : p.pending
         ? ""
         : p.is_cropped ? "Mosquito detected & cropped" : "Uncropped / no mosquito detected";
-    btn.appendChild(badge);
 
-    tile.appendChild(btn);
-
-    const label = document.createElement("label");
-    label.className = "include";
     // The one place a photo's own verdict is visible without selecting it, so an
     // excluded photo is never only knowable from the contribution table.
     const abstained = p.verdict?.state === "unsure";
-    label.title = abstained
+    node.label.title = abstained
       ? "Not confident enough to name a genus - excluded from the pooled result"
       : !p.fallback ? "Include this photo in pooled result" : "No usable mosquito detection";
 
-    const chk = document.createElement("input");
-    chk.type = "checkbox";
-    chk.className = "thumb-optin";
-    chk.checked = includedIndices.has(idx);
-    chk.disabled = !isSelectable(p);
-    chk.onchange = (e) => {
-      if (e.target.checked) includedIndices.add(idx);
-      else includedIndices.delete(idx);
-      renderThumbnails();
-      updatePooling();
-    };
+    node.chk.checked = includedIndices.has(idx);
+    node.chk.disabled = !isSelectable(p);
 
-    label.appendChild(chk);
-    tile.appendChild(label);
-    strip.appendChild(tile);
+    // One appendChild on an already-present child moves it to the end, which is
+    // how the strip is put into index order after a deletion.
+    strip.appendChild(node.tile);
   });
 }
 
@@ -1866,7 +1956,7 @@ function renderActivePhoto() {
   // image rather than leaving a broken-icon with alt text over an empty panel;
   // the pending notice beside it says what is happening.
   if (p.fullCanvas) {
-    fullImg.src = p.fullCanvas.toDataURL("image/jpeg", 0.9);
+    setImgSrc(fullImg, canvasUrl(p.fullCanvas, 0.9));
     fullImg.style.visibility = "visible";
   } else {
     fullImg.removeAttribute("src");
@@ -1897,7 +1987,7 @@ function renderActivePhoto() {
   if (zoomSource) {
     surfaceZoomed.style.width = "100%";
     surfaceZoomed.style.height = "100%";
-    contextImg.src = zoomSource.toDataURL("image/jpeg", 0.9);
+    setImgSrc(contextImg, canvasUrl(zoomSource, 0.9));
     contextImg.style.display = "block";
     contextImg.style.width = "100%";
     contextImg.style.height = "100%";
