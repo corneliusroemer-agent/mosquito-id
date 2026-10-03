@@ -25,9 +25,10 @@ import { pooledPosterior as _pooledPosterior,
          splitPoolable, poolingWeights, aggregateLogits, aggregateAdjacent,
          pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
+import { activeGroups, claimSentence, mergeUnresolvable, resolvableGroups, setActiveHead } from "./granularity";
 import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
-         FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, cosineOffsetsFor,
-         resolveModelUrl } from "./modelConfig";
+         FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, capabilityNote,
+         cosineOffsetsFor, resolveModelUrl } from "./modelConfig";
 import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
@@ -212,7 +213,7 @@ const ASYNC = (window.__mosqAsync = {
   // built, so a layout test cannot reach the pooled card without downloading the
   // 1.26 GB model. Production never writes it.
   get embeds() { return EMB; },
-  set embeds(v) { EMB = v; },
+  set embeds(v) { EMB = v; setActiveHead(v); },
   // The verdict functions are already bound to this file's EMB by the adapters
   // above, so a test can drive a layout case with the SHIPPED arithmetic rather
   // than re-reading the bundle and eval-ing it out - which is what this seam's
@@ -229,7 +230,10 @@ const ASYNC = (window.__mosqAsync = {
   renderThumbnails,
   renderActivePhoto,
   updatePooling: () => updatePooling(EMB, previews, includedIndices),
-  renderResultsTable: () => renderResultsTable(previews)
+  renderResultsTable: () => renderResultsTable(previews),
+  // The CSV is the other way a claim leaves the machine, and it is a separate
+  // function from the table it mirrors, so a test has to be able to call it.
+  downloadCSV: () => downloadCSV(previews, sendLog)
 });
 (function countFrames() {
   requestAnimationFrame(() => { ASYNC.frames++; countFrames(); });
@@ -384,6 +388,21 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     embedsCache[targetEmbedsPath] = data;
   }
   EMB = embedsCache[targetEmbedsPath];
+  // Bind the species this head cannot separate to the label helpers. Done where
+  // the head is assigned, so an engine switch rebinds them with it.
+  setActiveHead(EMB);
+  // Logged, not just printed: when the head is refitted and these groups split,
+  // this line is how that shows up in a deployment's own log rather than only in
+  // the source diff.
+  const groups = resolvableGroups(EMB);
+  if (groups.length) {
+    console.info("[granularity] this head cannot separate:\n  " + groups.map((g) => g.label).join("\n  "));
+  }
+  sendLog("head_granularity", {
+    species: EMB.species.length,
+    unresolvableGroups: groups.length,
+    unresolvableSpecies: groups.reduce((n, g) => n + g.species.length, 0),
+  });
 
   const deviceLabel = `inference: ${clipCfg.name} (${clipEP.toUpperCase()}) · YOLO11n (${detEP.toUpperCase()})`;
   document.getElementById("footer-device").textContent = deviceLabel;
@@ -441,6 +460,7 @@ async function initEngine() {
 
   currentEngine = chosenEngine;
   applyEngineNotices(chosenEngine);
+  labelEngineOptions();
   if (engineSelect) {
     engineSelect.value = chosenEngine;
     engineSelect.addEventListener("change", async (e) => {
@@ -497,6 +517,31 @@ const loadModels = () => initEngine();
  * which is where someone chooses it and therefore the only place the label has to
  * be seen.
  */
+/**
+ * Say, in the engine dropdown, what each engine's head can name.
+ *
+ * The head behind an unchosen engine is not loaded, so this is the only place the
+ * limitation can be read before the user picks one, and the dropdown is where they
+ * pick. Nothing is added above the content: a header caveat moved the page (0.27
+ * CLS on desktop) and has been rejected twice.
+ *
+ * Appended to whatever the option already says, so the size and the "experimental"
+ * marker each keep one source and this owns only the granularity. Idempotent: it
+ * runs on every init.
+ */
+function labelEngineOptions() {
+  const engineSelect = document.getElementById("engine-select");
+  if (!engineSelect) return;
+  for (const opt of engineSelect.options) {
+    const cfg = WEBGPU_MODELS[opt.value];
+    if (!cfg || opt.dataset.granularity === cfg.reports) continue;
+    opt.dataset.granularity = cfg.reports;
+    opt.textContent = cfg.reports === "species"
+      ? opt.textContent.replace(/ \u00b7 genus only$/, "")
+      : opt.textContent + capabilityNote(cfg.reports);
+  }
+}
+
 function applyEngineNotices(engineKey) {
   const cfg = WEBGPU_MODELS[engineKey];
   const sub = document.getElementById("pipeline-sub");
@@ -1564,13 +1609,21 @@ function renderActivePhoto() {
   // coarser claim than its own argmax, never a silently narrower one.
   const verdictEl = document.getElementById("score-uncertain");
   if (verdictEl) {
-    const vText = (p.verdict && !p.pending && !p.error) ? verdictSentence(p.verdict) : "";
+    const vText = (p.verdict && !p.pending && !p.error) ? claimSentence(p.verdict) : "";
     verdictEl.textContent = vText;
     verdictEl.className = `uncertain${vText ? " shown" : ""}`;
     verdictEl.title = vText;
   }
-  const sortedScores = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
-  for (const [name, score] of sortedScores) {
+  // Species the loaded head cannot tell apart are ONE row here, carrying the
+  // class phrase and the class's score. Three identical bars under three names is
+  // a ranking that asserts the model separated them, and it is why one species of
+  // each group appeared to win essentially every tie it was in.
+  const sortedScores = mergeUnresolvable(
+    Object.entries(p.detail).sort((a, b) => b[1] - a[1]),
+    (e) => e[1],
+    (e) => e[0],
+  );
+  for (const { name, score } of sortedScores) {
     // A non-finite score has no bar and no number. Math.min/Math.max pass NaN
     // straight through, which emitted `width: NaN%` - an invalid declaration
     // the browser drops, leaving the fill at its default width and drawing a

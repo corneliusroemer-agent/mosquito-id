@@ -821,6 +821,11 @@
     .species-wiki { order: 1; }
     .species-common { order: 2; flex: 0 0 100%; font-size: 11px; }
 
+    /* A set of species the head cannot separate. Styled as a qualifier on the
+       genus rather than as a name: same weight as the name it follows, dimmer,
+       so the row reads "this genus, but not to a species". */
+    .species-unresolvable { color: var(--body-text-color-subdued); font-size: 11px; }
+
     /* One page scroll beats a scroller inside a scroller on touch. */
     .score-list {
       height: auto;
