@@ -435,12 +435,25 @@ async function initEngine() {
     serverAvailable = false;
   }
 
-  // Preference: URL query param > localStorage > default. fp16 is skipped while
-  // it is unavailable, so a stale saved choice falls through instead of 404ing.
-  // fp16 is the default: it stays on the GPU and is the most accurate. INT8 is
-  // never the default - onnxruntime-web has no int8 WebGPU kernels, so the session
-  // silently falls back to WASM CPU and runs an order of magnitude slower.
-  const defaultEngine = "webgpu-fp16";
+  // Preference: URL query param > localStorage > device default. fp16 is skipped
+  // while it is unavailable, so a stale saved choice falls through instead of 404ing.
+  //
+  // INT8 is never a default: onnxruntime-web has no int8 WebGPU kernels, so the
+  // session silently falls back to WASM CPU and runs an order of magnitude slower.
+  //
+  // Between the two GPU models, fp16 (1.25 GB) is the better classifier but a
+  // poor default on a phone, where the download alone dominates. Prefer B/16
+  // (172 MB) when the device asks to save data, reports a slow connection, has
+  // little memory, or is primarily touch-driven; fp16 everywhere else. An
+  // explicit choice in the dropdown or ?engine= always wins over this.
+  const prefersSmallModel = () => {
+    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (conn && (conn.saveData || /^(slow-)?[23]g$/.test(conn.effectiveType || ""))) return true;
+    if (navigator.deviceMemory && navigator.deviceMemory <= 4) return true;
+    return window.matchMedia("(pointer: coarse)").matches &&
+           window.matchMedia("(max-width: 820px)").matches;
+  };
+  const defaultEngine = FP16_AVAILABLE && !prefersSmallModel() ? "webgpu-fp16" : "webgpu-b16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
   const savedEngine = localStorage.getItem("mosquito_engine");
