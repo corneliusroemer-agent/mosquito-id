@@ -30,12 +30,18 @@ const grab = (name) => {
   throw new Error(`unbalanced braces in ${name}`);
 };
 
-// The two gate constants are read out of main.js too, so the test fails if the
+// The gate constants are read out of main.js too, so the test fails if the
 // shipped value is edited and the expectations are not.
 const constOf = (name) => {
   const m = src.match(new RegExp(`^const ${name} = ([\\d.]+);$`, "m"));
   if (!m) throw new Error(`${name} not found in main.js`);
   return parseFloat(m[1]);
+};
+// Boolean-valued, so the same "do not let it drift from the test" property.
+const boolOf = (name) => {
+  const m = src.match(new RegExp(`^const ${name} = (true|false);$`, "m"));
+  if (!m) throw new Error(`${name} not found in main.js`);
+  return m[1] === "true";
 };
 
 globalThis.__EMB = EMB;
@@ -46,21 +52,24 @@ ${grab("genusOf")}
 ${grab("speciesGenusIndex")}
 const SPECIES_CONFIDENCE_FLOOR = globalThis.__SPECIES_FLOOR;
 const GENUS_CONFIDENCE_FLOOR = globalThis.__GENUS_FLOOR;
+const VIEW_DISAGREEMENT_VETOES_SPECIES = globalThis.__DISAGREEMENT_VETOES;
 ${grab("verdictFrom")}
 ${grab("verdictSentence")}
 ${grab("genusScores")}
 ${grab("fuseViews")}
 ${grab("viewAgreement")}
 const GENUS_MARGIN = globalThis.__GENUS_MARGIN;
-globalThis.__api = { verdictFrom, verdictSentence, fuseViews, speciesGenusIndex, genusOf,
-  SPECIES_CONFIDENCE_FLOOR, GENUS_CONFIDENCE_FLOOR };
+globalThis.__api = { verdictFrom, verdictSentence, fuseViews, viewAgreement,
+  speciesGenusIndex, genusOf,
+  SPECIES_CONFIDENCE_FLOOR, GENUS_CONFIDENCE_FLOOR, VIEW_DISAGREEMENT_VETOES_SPECIES };
 `;
 globalThis.__SPECIES_FLOOR = constOf("SPECIES_CONFIDENCE_FLOOR");
 globalThis.__GENUS_FLOOR = constOf("GENUS_CONFIDENCE_FLOOR");
 globalThis.__GENUS_MARGIN = constOf("GENUS_MARGIN");
+globalThis.__DISAGREEMENT_VETOES = boolOf("VIEW_DISAGREEMENT_VETOES_SPECIES");
 (0, eval)(harness);
 const api = globalThis.__api;
-const { verdictFrom, verdictSentence, fuseViews, speciesGenusIndex } = api;
+const { verdictFrom, verdictSentence, fuseViews, viewAgreement, speciesGenusIndex } = api;
 
 const S = EMB.species.length;
 const post = (over) => {
@@ -194,6 +203,67 @@ check("the fused verdict is not recomputed from any single view's posterior", ()
   // behaviour the gate exists to catch.
   assert.ok(Math.abs(fused.verdict.topGenusP - 0.5) > 1e-6, `top genus ${fused.verdict.topGenusP}`);
   console.log(`    (fused top genus posterior ${fused.verdict.topGenusP.toFixed(4)} against 0.90 per view)`);
+});
+
+// --- a disagreement between the views costs the photo its species claim.
+check("two views naming different species cannot reach a species verdict, however high the fused posterior", () => {
+  const scale = EMB.logit_scale / 2.5;
+  const view = (over) => ({ spP: post(over), nuTotal: 1e-6, scale });
+  // Each view is sure, and sure of a different species. Pooled, the top species
+  // lands at 0.818 - far above the species floor - and the genus at 0.909, far
+  // above the genus floor. Before the disagreement reached the gate, this photo
+  // named Aedes aegypti at 82%.
+  const fused = fuseViews([
+    view({ "Aedes aegypti": 0.60, "Aedes albopictus": 0.20, "Culex pipiens": 0.20 }),
+    view({ "Aedes albopictus": 0.60, "Aedes aegypti": 0.20, "Culex pipiens": 0.20 })
+  ]);
+  assert.ok(fused.verdict.topSpeciesP > api.SPECIES_CONFIDENCE_FLOOR,
+            `test setup: fused top must clear the species floor, got ${fused.verdict.topSpeciesP}`);
+  assert.ok(fused.verdict.topGenusP > api.GENUS_CONFIDENCE_FLOOR,
+            `test setup: fused genus must clear the genus floor, got ${fused.verdict.topGenusP}`);
+  assert.equal(fused.agreement.agree, false);
+  assert.notEqual(fused.verdict.state, "species");
+  assert.equal(fused.verdict.genus, "Aedes");
+  assert.equal(fused.verdict.species, null);
+});
+
+check("the same posterior with agreeing views still names its species", () => {
+  // One posterior, two verdicts: the ONLY difference is the agreement object.
+  // A gate that abstains whenever disagreement is present has to leave this
+  // untouched, or the app is uniformly hesitant and the fix is worthless.
+  const spP = post({ "Aedes aegypti": 0.45, "Aedes albopictus": 0.40, "Culex pipiens": 0.15 });
+  assert.equal(verdictFrom(spP, { agree: true }).state, "species");
+  assert.equal(verdictFrom(spP, { agree: false }).state, "genus");
+  // No agreement at all - one view, or a pool of photos - is not a disagreement.
+  assert.equal(verdictFrom(spP, null).state, "species");
+  assert.equal(verdictFrom(spP).state, "species");
+});
+
+check("a disagreement can also take the photo all the way to unsure", () => {
+  // The demotion falls into the genus floor rather than past it: with a genus
+  // that does not clear it, a disagreeing photo says it is not confident, and
+  // an agreeing photo with the same posterior still names its species.
+  const spP = post({ "Aedes aegypti": 0.40, "Aedes albopictus": 0.15, "Culex pipiens": 0.45 });
+  assert.equal(verdictFrom(spP, { agree: true }).species, "Culex pipiens");
+  const v = verdictFrom(spP, { agree: false });
+  assert.equal(v.state, "unsure");
+  assert.equal(verdictSentence(v), "Not confident enough to name a genus");
+});
+
+check("the disagreement measure is computed once, by fuseViews, and is the same object", () => {
+  const scale = EMB.logit_scale / 2.5;
+  const view = (over) => ({ spP: post(over), nuTotal: 1e-6, scale });
+  const views = [view({ "Aedes aegypti": 0.5, "Aedes albopictus": 0.3, "Culex pipiens": 0.2 }),
+                 view({ "Aedes aegypti": 0.4, "Aedes albopictus": 0.4, "Culex pipiens": 0.2 })];
+  const fused = fuseViews(views);
+  assert.deepEqual(fused.agreement, viewAgreement(views.map((v) => v.spP), fused.spP));
+  // One view cannot disagree with itself, so the gate is inert there.
+  assert.equal(fuseViews([views[0]]).agreement, null);
+  assert.equal(fuseViews([views[0]]).verdict.state, "species");
+});
+
+check("the veto flag is the shipped one, not a local copy", () => {
+  assert.equal(api.VIEW_DISAGREEMENT_VETOES_SPECIES, true);
 });
 
 // --- the pooled card is not corrupted by an abstaining photo.
