@@ -330,10 +330,9 @@ function resolveModelUrl(path) {
 let progressOwner = null;
 
 // `text` is deliberately ignored. Progress is shown by the bar alone: a
-// sentence describing what the app is currently doing ("Classifying…",
-// "Analyzing 3 of 10 photos on …") is not information about the photo, and it
-// was asked to go. Only a failure is worth a sentence, and that goes through
-// setProgressError.
+// sentence describing what the app is currently doing is not information about
+// the photo, and it was asked to go. Only a failure is worth a sentence, and
+// that goes through setProgressError.
 function setProgress(owner, text, pct) {
   const slot = document.getElementById("progress-slot");
   if (!slot) return;
