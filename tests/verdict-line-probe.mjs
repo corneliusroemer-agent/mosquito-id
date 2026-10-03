@@ -6,7 +6,11 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = path.resolve(import.meta.dirname, "..");
+// The BUILT site, not the checkout: index.html now loads a Vite bundle, so
+// serving the repo root would 404 on the entry script. This probe needs the
+// build to be current - run `npm run build` first, which is also why a stale
+// bundle would give a false pass here.
+const ROOT = path.resolve(import.meta.dirname, "..", "dist");
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".json": "application/json" };
 
 const server = http.createServer((req, res) => {
@@ -56,28 +60,17 @@ await page.evaluate(async () => {
     });
   }
 
-  // The verdict comes from main.js's own verdictFrom(), read out of the served
-  // source rather than reimplemented, and the floors from the served constants.
-  const src = await (await fetch("main.js")).text();
-  const grab = (fn) => {
-    const s = src.indexOf(`function ${fn}(`);
-    let i = src.indexOf("{", s), d = 0;
-    for (; i < src.length; i++) { if (src[i] === "{") d++; else if (src[i] === "}" && --d === 0) return src.slice(s, i + 1); }
-  };
-  const cst = (n) => parseFloat(src.match(new RegExp(`^const ${n} = ([\\d.]+);$`, "m"))[1]);
-  globalThis.__EMBX = window.__mosqAsync.embeds;
-  (0, eval)(`const EMB=globalThis.__EMBX;let genusIndexCache=null;
-${grab("genusOf")}${grab("speciesGenusIndex")}
-const SPECIES_CONFIDENCE_FLOOR=${cst("SPECIES_CONFIDENCE_FLOOR")};
-const GENUS_CONFIDENCE_FLOOR=${cst("GENUS_CONFIDENCE_FLOOR")};
-${grab("verdictFrom")}${grab("verdictSentence")}
-globalThis.__v={verdictFrom,verdictSentence};`);
+  // The verdict comes from the app's OWN verdictFrom, reached through the test
+  // seam rather than by re-reading and eval-ing the served source: that worked
+  // while the app was one unbundled file and cannot work now the app is a
+  // bundle whose function names are mangled. The seam is bound to the same EMB
+  // the app uses, so this is the shipped arithmetic either way.
   for (const p of arr) {
-    p.verdict = window.__v.verdictFrom(SP.map((n) => p.detail[n]));
+    p.verdict = window.__mosqAsync.verdictFrom(SP.map((n) => p.detail[n]));
   }
   window.__probeVerdicts = arr.map((p) => ({
     name: p.name, state: p.verdict.state, genus: p.verdict.genus,
-    text: window.__v.verdictSentence(p.verdict),
+    text: window.__mosqAsync.verdictSentence(p.verdict),
   }));
 });
 

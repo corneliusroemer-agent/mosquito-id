@@ -1147,7 +1147,13 @@
 
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.all.min.js"></script>
-<script src="species.js?v=20261003_4"></script>
-<script src="main.js?v=20261003_5"></script>
+<!--
+  main.js is now the entry of a Vite build (src/app/main.js -> dist/assets/*), so
+  its ?v= stamp is gone: the bundle filename carries a content hash, which busts
+  the cache per deploy without anything having to rewrite it. The species guide
+  (src/app/speciesPage.js) is bundled with it - it had exactly one consumer, so
+  it was a global for no reason.
+-->
+<script type="module" src="/src/app/main.js"></script>
 </body>
 </html>
