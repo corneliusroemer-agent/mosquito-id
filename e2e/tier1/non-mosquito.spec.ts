@@ -75,14 +75,17 @@ test.describe("non-mosquito", () => {
     // `abstained` and renders a row for it; a non-mosquito photo is in NEITHER
     // list, so it carries no row and contributes no weight - the assertion is on
     // the two survivors' shares, which must be the 50/50 split of a two-photo pool.
+    // Two rows, both with a share. `splitPoolable` renders a row for an `unsure`
+    // photo under `abstained`, and files a non-mosquito photo in NEITHER list - so
+    // a forced-in midge has no row and, more to the point, no share. A share is
+    // the claim that the photo contributed evidence to the pool, and asserting on
+    // its ABSENCE is what makes this a fusion-path test rather than a layout one.
     const rows = page.locator("#contribution-table tbody tr");
     await expect(rows).toHaveCount(2);
-    await expect(page.locator("#contribution-table tbody tr.row-excluded")).toHaveCount(0);
-    await expect
-      .poll(async () =>
-        rows.evaluateAll((r) => r.map((x) => ((x as HTMLTableRowElement).cells[1] as HTMLElement).innerText.trim())),
-      )
-      .toEqual(["50.0%", "50.0%"]);
+    const shares = await rows.evaluateAll((r) =>
+      r.map((x) => (x as HTMLTableRowElement).cells[1]!.textContent!.trim()),
+    );
+    expect(shares, "the two poolable photos must carry equal shares").toEqual(["50.0%", "50.0%"]);
   });
 
   test("a pool of three non-mosquito photos never names a species", async ({ page }) => {
@@ -141,9 +144,14 @@ test.describe("non-mosquito", () => {
     ]);
     await settle(page);
 
-    // The two real photos pool; the midge contributes nothing.
+    // The three mosquitoes pool; the midge contributes nothing and has no row,
+    // because `splitPoolable` files it in neither list. Equal shares prove the
+    // three-way split is unaffected by its presence.
     await expect(page.locator("#contribution-table tbody tr")).toHaveCount(3);
-    await expect(page.locator("#contribution-table tbody tr.row-excluded")).toHaveCount(1);
+    const shares = await page.locator("#contribution-table tbody tr").evaluateAll((r) =>
+      r.map((x) => (x as HTMLTableRowElement).cells[1]!.textContent!.trim()),
+    );
+    expect(shares, "the three mosquitoes must share equally").toEqual(["33.3%", "33.3%", "33.3%"]);
     // The pool still answers about a mosquito, and the midge has not dragged it.
     await expect(page.locator("#combined-scores")).not.toContainText("does not look like a mosquito");
     await expect(page.locator("#combined-scores")).toContainText("Aedes aegypti");
@@ -173,6 +181,12 @@ test.describe("non-mosquito", () => {
     await expect(rows.nth(1).locator("td").nth(1)).toHaveText("50.0%");
     // It is still selectable - it is a valid photo, just not a decidable one.
     await expect(page.locator("#thumbnail-strip .tile").nth(2).locator(".thumb-optin")).toBeEnabled();
+    // And selecting it shows that it is the PHOTO that cannot be named, not that
+    // the classifier is still working: the panel's headline follows the selection,
+    // so this is asserted after selecting the unsure photo rather than the first.
+    await page.locator("#thumbnail-strip .tile").nth(2).locator(".tile-btn").click();
+    await settle(page);
+    await expect(page.locator("#photo-name")).toContainText("blur.jpg");
     await expect(page.locator("#score-uncertain")).toContainText("Not confident enough to name a genus");
   });
 
