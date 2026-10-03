@@ -35,7 +35,13 @@ const page = await browser.newPage();
 await page.route(/(\.onnx|\.r2\.dev)/, (r) => r.abort());
 await page.goto(base);
 
-// Do exactly what main.js does when a photo's verdict is `unsure`.
+// Do exactly what main.js does when a photo's verdict is `unsure`, then read the
+// element's own box back.
+//
+// The assertion is on the element's own computed `display` and its inline style
+// attribute, NOT on its rendered height: #gallery-section is display:none until
+// photos are loaded, so on a bare page load every descendant measures zero
+// whether it is styled correctly or not.
 const out = await page.evaluate(() => {
   const el = document.getElementById("score-uncertain");
   const vText = "Not confident enough to name a genus";
@@ -43,20 +49,31 @@ const out = await page.evaluate(() => {
   el.className = `uncertain${vText ? " shown" : ""}`;
   el.title = vText;
   const cs = getComputedStyle(el);
-  return { inline: el.getAttribute("style"), className: el.className,
-           display: cs.display, visibility: cs.visibility,
-           rendered: el.offsetParent !== null, height: el.getBoundingClientRect().height };
+  const gallery = document.getElementById("gallery-section");
+  return {
+    inline: el.getAttribute("style"),
+    className: el.className,
+    display: cs.display,
+    visibility: cs.visibility,
+    // What the stylesheet reserves for the line whether or not there is text.
+    reservedHeight: cs.minHeight,
+    galleryVisible: gallery ? getComputedStyle(gallery).display !== "none" : null,
+  };
 });
 
 console.log(JSON.stringify(out, null, 2));
 await browser.close();
 server.close();
 
-if (out.rendered && out.height > 0) {
-  console.log("\nok   the abstention line renders");
+if (out.display !== "none" && out.visibility === "visible") {
+  console.log("\nok   the abstention line is styled to show when it has a claim\n"
+    + `     (reserved height ${out.reservedHeight}; gallery currently `
+    + `${out.galleryVisible ? "visible" : "hidden - no photos loaded, so height is not measurable here"})`);
 } else {
-  console.log('\nFAIL  #score-uncertain is display:none even with class "shown".\n'
-    + "      Remove the inline style attribute from it in index.html - an inline\n"
-    + "      display:none beats the stylesheet's visibility rule.");
+  console.log('\nFAIL  #score-uncertain does not show even with class "shown":\n'
+    + `       computed display ${out.display}, visibility ${out.visibility},`
+    + ` inline style ${JSON.stringify(out.inline)}.\n`
+    + "      An inline display:none beats the stylesheet's visibility rule, and\n"
+    + "      main.js never clears it.");
   process.exitCode = 1;
 }
