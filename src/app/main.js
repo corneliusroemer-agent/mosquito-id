@@ -37,7 +37,7 @@ const VIEW_DISAGREEMENT_VETOES_SPECIES = DEFAULT_FLOORS.viewDisagreementVetoesSp
 const localViewScale = () => _localViewScale(EMB);
 const serverViewScale = () => _serverViewScale(EMB);
 const adjacentNames = () => _adjacentNames(EMB);
-const genusScores = (spP, spCos) => _genusScores(EMB, spP, spCos);
+const genusScores = (spP) => _genusScores(EMB, spP);
 const fuseViews = (viewResults) => _fuseViews(EMB, viewResults);
 const verdictFrom = (spP, agreement, adP) => _verdictFrom(EMB, spP, agreement, adP);
 const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
@@ -389,7 +389,6 @@ function commitScores(p, r) {
   p.scores = r.labels;
   p.detail = r.detail;
   p.logits = r.logits;
-  p.demoted = r.demoted;
   // A verdict that claims nothing must not keep the one it had: pooling reads it.
   p.verdict = r.verdict || null;
   // The per-class non-mosquito posteriors, for the score panel to name the winner
@@ -1387,8 +1386,7 @@ async function classifyImage(imgBitmap, filename) {
     scores: fused.labels,
     detail: fused.detail,
     logits: fused.logits,
-    demoted: fused.demoted,
-    verdict: fused.verdict,
+        verdict: fused.verdict,
     adjacentDetail: fused.adjacentDetail,
     agreement: fused.agreement,
     viewsLanded: views.length,
@@ -1462,7 +1460,7 @@ async function processFiles(fileList) {
     fullCanvas: null, cropCanvas: null, contextCanvas: null,
     cropBox: null, contextBox: null,
     scores: {}, detail: {}, logits: null,
-    status: "queued…", fallback: false, is_cropped: false, demoted: false, verdict: null,
+    status: "queued…", fallback: false, is_cropped: false, verdict: null,
     manual_full_photo: false, fingerprint: null,
     rev: 0, pending: true, error: null,
     agreement: null, viewsLanded: 0, viewsTotal: 0,
@@ -1560,8 +1558,7 @@ async function processFiles(fileList) {
           cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
           detail: fused.detail, logits: fused.logits, status: data.status, fallback: data.fallback,
           is_cropped: data.is_cropped,
-          demoted: fused.demoted,
-          verdict: fused.verdict,
+                    verdict: fused.verdict,
           adjacentDetail: fused.adjacentDetail,
           agreement: fused.agreement,
           viewsLanded: views.length, viewsTotal: views.length,
@@ -2228,7 +2225,6 @@ async function classifyCanvasServer(p, cropBox) {
     labels: data.labels,
     detail: data.detail,
     logits: data.logits,
-    demoted: Boolean(Object.keys(data.labels)[0]?.includes("low confidence"))
   };
 }
 
@@ -2630,19 +2626,16 @@ function renderResultsTable() {
     // What the app would claim about the photo. It is a coarser claim than the
     // ranking when the species gate abstains, never a fabricated one: a photo
     // the classifier cannot place shows the genus it did place, or nothing.
-    // A demoted photo has no species verdict - the classifier separated the top
-    // two genera by less than GENUS_MARGIN - so the genus is reported alone
-    // rather than topped up with a species name the evidence does not support.
     const v = p.verdict || { state: "species" };
     const topCell = v.state === "species" ? String(topSpec[0])
       : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
-    const specPct = p.demoted ? null : (topSpec[1] || 0) * 100;
+    const specPct = (topSpec[1] || 0) * 100;
     tr.innerHTML = `
       <td title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
       <td title="${escapeHtml(topGenus[0])}">${escapeHtml(topGenus[0])}</td>
       <td style="text-align:right">${(topGenus[1] * 100).toFixed(1)}%</td>
       <td title="${escapeHtml(String(topCell))}">${escapeHtml(String(topCell))}</td>
-      <td style="text-align:right">${specPct === null ? "-" : specPct.toFixed(1) + "%"}</td>
+      <td style="text-align:right">${specPct.toFixed(1)}%</td>
     `;
     tbody.appendChild(tr);
   });
@@ -2668,7 +2661,7 @@ function downloadCSV() {
     const v = p.verdict || { state: "species" };
     const claim = v.state === "species" ? String(topSpec[0])
       : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
-    const specPct = p.demoted ? "-" : ((topSpec[1] || 0) * 100).toFixed(1);
+    const specPct = ((topSpec[1] || 0) * 100).toFixed(1);
     csv += `"${p.name}","${p.status}",${p.is_cropped},"${topGenus[0]}",${(topGenus[1] * 100).toFixed(1)},"${claim}",${specPct}\n`;
   });
 

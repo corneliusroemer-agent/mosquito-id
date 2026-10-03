@@ -50,8 +50,6 @@ export interface Agreement {
   topSpecies: string;
   /** Species named by a view other than the fused winner. */
   runnersUp: string[];
-  /** Fused top-two gap in percentage points. */
-  marginPts: number;
   fusedTop: number;
 }
 
@@ -124,12 +122,6 @@ export interface Floors {
    */
   nonMosquito: number;
   /**
-   * GENUS_MARGIN 0.02 - the cosine gap below which a top genus is reported as
-   * low confidence. Below it the classifier has not separated the winner from
-   * the runner-up, whatever the posteriors say.
-   */
-  genusMargin: number;
-  /**
    * Whether two views naming different species cost the photo its species
    * claim. BOOLEAN because that is what the data identifies: on the 180-row
    * two-view cache, views agree -> genus correct 93.8% val / 95.2% test,
@@ -153,7 +145,6 @@ export const DEFAULT_FLOORS: Floors = Object.freeze({
   species: 0.373,
   genus: 0.80,
   nonMosquito: 0.60,
-  genusMargin: 0.02,
   viewDisagreementVetoesSpecies: true,
   temperature: 2.5,
 });
