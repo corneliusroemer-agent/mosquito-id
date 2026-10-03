@@ -154,9 +154,6 @@ function render(sp, all) {
   if (sp.notes) {
     h.push('<h2 class="kb-h">Notes</h2><p class="kb-notes">' + esc(sp.notes) + "</p>");
   }
-  if (sp.local) {
-    h.push('<h2 class="kb-h">Around Basel</h2><p class="kb-local">' + esc(sp.local) + "</p>");
-  }
 
   h.push('<h2 class="kb-h">Read more</h2><p class="kb-links">');
   if (sp.wiki) h.push('<a href="' + esc(sp.wiki) + '" target="_blank" rel="noopener">' + esc(sp.name) + " on Wikipedia</a>");
