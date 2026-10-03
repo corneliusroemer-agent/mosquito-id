@@ -211,3 +211,30 @@ Keras, neither of which MLX loads.
 `95-future-work-ledger.md` in this directory. Per the coordinator's 18:24 update it is **stale and
 needs revising**: entries 1–5 were written when I believed CPU time was prohibitive. Only entry 1
 (LoRA) is a genuine structural impossibility; the rest are now just slow, which is permitted.
+
+## 8. Addendum, 18:45 — the fine-tune got further than §2 records
+
+Epoch 3 landed after the main handoff was written. genus4 **val** macro-F1:
+
+| epoch | `ce` | `ce_fd` |
+|---|---|---|
+| 1 | 0.7626 | 0.7588 |
+| 2 | 0.8005 | 0.8028 |
+| **3** | **0.8141** | **0.8107** |
+| frozen-feature linear probe | 0.7932 | 0.7932 |
+
+Both arms are still climbing and both are still above the frozen probe. **`ce` has overtaken
+`ce_fd`** — feature distillation led at epoch 2 and is behind at epoch 3, so the ordering flipped
+inside one epoch. Do not read "distillation helps the fine-tune" off the epoch-2 row.
+
+**Per-epoch checkpoints exist on disk** (`ftce_ce_ep{1,2,3}.pt`, `ftfd_ce_fd_ep{1,2,3}.pt`, ~5 MB
+each, head + projection + the 54 fine-tuned backbone tensors). **A fresh agent does not need to
+retrain to get the test number**: load `ep{max}` and run the `features()` + `lstsq` path at the
+bottom of `ft_backbone.py:run`. Epoch 4 was still running when this was written; check
+`ft_ce_genus4.log` and `ft_ce_fd_genus4.log` for it.
+
+`ce` at 0.8141 against a 0.7932 frozen probe is +2.1 pp val — still no interval, and val has been
+the generous split in every arm so far (the val→test gap on the cached sweep was 1.8 pp on genus4).
+**Put the paired CI on it before it goes in anyone's notes.**
+
+Arm E was resumed and is measuring the augmentation views; its result will arrive separately.
