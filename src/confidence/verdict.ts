@@ -29,8 +29,23 @@ import { speciesGenusIndex } from "./genus";
 export function verdictFrom(
   head: Head,
   spP: number[],
-  agreement: Agreement | null = null,
-  adP: number[] = [],
+  agreement: Agreement | null,
+  // REQUIRED, and passing `[]` is not the same as omitting it by accident.
+  //
+  // The pooled card called this with one argument, so `adP` arrived `undefined`,
+  // the non-mosquito branch never ran, and three photos each reading 97% biting
+  // midge were announced as a species - because pooledPosterior softmaxes over
+  // the 16 species alone, so the adjacent mass was in neither the numerator nor
+  // the denominator and the species posteriors summed to 1 as if nothing else
+  // existed. That was invisible: `undefined` is exactly what an omitted optional
+  // argument looks like, and it did the same thing as the deliberate `[]` the
+  // single-view path passes.
+  //
+  // Required so a caller cannot reach this by forgetting an argument again. A
+  // caller with genuinely no adjacent evidence - the pooled card, for now -
+  // passes `[]` in full view, which is a decision someone can see and grep for
+  // rather than an omission that reads as intent.
+  adP: number[],
   floors: Floors = DEFAULT_FLOORS,
 ): Verdict {
   if (!spP || !spP.length || spP.some((p) => !Number.isFinite(p))) {

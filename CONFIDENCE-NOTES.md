@@ -87,6 +87,37 @@ in the comment, so the failure is legible when a fix lands.
 
 The first is the one the data supports and the cheapest to check.
 
+## The same card can never say "not a mosquito"
+
+Independent of any threshold, and found separately: `updatePooling` calls
+`verdictFrom(pooledSpP)` with no adjacent posteriors, and `pooledPosterior`
+softmaxes over the 16 species **alone**. So the adjacent mass is absent from the
+numerator *and* from the denominator - the pooled species posteriors are inflated
+to sum to exactly 1 as if no other class existed - and the non-mosquito branch
+never runs at all.
+
+With the real head:
+
+```
+three photos, each 97% biting midge
+  per-photo verdict                     non-mosquito   (the gate does fire)
+  pooled species posteriors sum to      1.000000       (adjacent mass in neither term)
+  pooled verdict                        species        <- a midge, called a mosquito
+```
+
+This is not a threshold problem, so no floor value changes it. Carrying the
+adjacent classes through the pool is a prerequisite for the pooled card being
+able to say "not a mosquito" at all, and it is independent of the species-floor
+fix above.
+
+`adP` is now a **required** parameter of `verdictFrom`. It was optional, so
+`updatePooling`'s omission arrived as `undefined` - which is exactly what a
+deliberate empty array also looks like, so the omission and the intent were
+indistinguishable and the compiler accepted both. The one caller with genuinely
+no adjacent evidence, `pooledVerdict`, now passes `[]` on its own line with the
+gap documented: the omission can no longer happen by forgetting an argument, only
+by writing that line.
+
 ## Also found, lower severity
 
 **`updatePooling`'s comment described a formula the code did not implement.** It
