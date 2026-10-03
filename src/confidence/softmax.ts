@@ -1,5 +1,7 @@
 import type { Floors, Head } from "./types";
 import { localViewScale } from "./types";
+import { PER_GENUS_COSINE_OFFSET } from "./calibration";
+import { genusOf } from "./genus";
 
 // The adjacent classes - Diptera that a non-expert reads as a mosquito - share
 // the one softmax with the species and the nuisance classes, so "this is a
@@ -26,6 +28,12 @@ export interface JointOptions {
   /** Nuisance class count. Defaults to the head's; 0 for a head without them. */
   nuisanceCount?: number;
   floors?: Floors;
+  /**
+   * Per-genus cosine offsets. Defaults to the fitted `./calibration` map.
+   * Present so a test can exercise the calibration with values of its own rather
+   * than inferring its effect from a real head's 660 KB of embeddings.
+   */
+  offsets?: Readonly<Record<string, number>>;
 }
 
 /**
@@ -45,6 +53,8 @@ export function softmaxJoint(
   const AD = adj.length;
   const D = head.dim;
   const scale = localViewScale(head, opts.floors);
+  const offsets = opts.offsets ?? PER_GENUS_COSINE_OFFSET;
+  const offsetFor = (genus: string): number => offsets[genus] ?? 0;
 
   const dotAt = (base: Float32Array | number[] | undefined, i: number): number => {
     if (!base) return 0;
@@ -56,8 +66,17 @@ export function softmaxJoint(
 
   // Internal only: the species cosines build the joint softmax below and the
   // per-species logits. Nothing outside this function reads them.
+  //
+  // The species cosines carry the fitted per-genus calibration (see
+  // ./calibration), added HERE - to the raw cosine, before the scaling multiply
+  // below - so it reaches both the softmax and the reported logits through this
+  // one array. Moving the offset to the scaled side is not equivalent and not a
+  // tidy-up: it multiplies it by logit_scale, which is 100.0 for the B/16 head.
+  // Read ./calibration before changing the line below.
   const spCos: number[] = [];
-  for (let i = 0; i < S; i++) spCos.push(dotAt(head.species_emb, i));
+  for (let i = 0; i < S; i++) {
+    spCos.push(dotAt(head.species_emb, i) + offsetFor(genusOf(head.species[i]!)));
+  }
   const nuCos: number[] = [];
   for (let i = 0; i < N; i++) nuCos.push(dotAt(head.nuisance_emb, i));
   const adCos: number[] = [];
