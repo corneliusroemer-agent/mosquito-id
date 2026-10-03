@@ -27,9 +27,10 @@ import { pooledPosterior as _pooledPosterior,
 import { render as renderSpeciesPage } from "./speciesPage";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
-         FP16_AVAILABLE, MODEL_BASE_URL, NMS_IOU, TEMPERATURE, WEBGPU_MODELS } from "./modelConfig";
+         FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, resolveModelUrl } from "./modelConfig";
 import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
+import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -288,72 +289,8 @@ function markComputeFailed(p, err) {
 class Superseded extends Error {}
 
 
-// A canvas -> data: URL memo, keyed on the canvas object.
-//
-// Every render re-encodes the same canvases: `renderThumbnails` runs after each
-// photo lands and encodes every tile's crop, and `renderActivePhoto` encodes the
-// selected photo's full and context canvases. `toDataURL` is a synchronous
-// JPEG encode of a full-resolution frame - tens of milliseconds each - on the
-// thread that also has to paint. With ten photos that is over a second of
-// blocking work per render, spread across the batch, which is what a frozen UI
-// during classification actually is.
-//
-// The cache is keyed on the canvas identity rather than the photo, because a
-// photo's canvas is *replaced* whenever its pixels change (a new decode, a crop
-// release, a manual re-crop). A fresh canvas is a fresh cache entry, so a stale
-// encode cannot outlive the pixels it was made from - the invalidation is
-// structural rather than something a call site has to remember to do. Entries
-// die with their canvas.
-const canvasUrlCache = new WeakMap();
-function canvasUrl(cv, quality) {
-  if (!cv) return null;
-  const key = quality;
-  let byQuality = canvasUrlCache.get(cv);
-  if (!byQuality) {
-    byQuality = new Map();
-    canvasUrlCache.set(cv, byQuality);
-  }
-  let url = byQuality.get(key);
-  if (url === undefined) {
-    url = cv.toDataURL("image/jpeg", quality);
-    byQuality.set(key, url);
-  }
-  return url;
-}
-
-// Setting an <img>'s src to the value it already holds is cheap to write and
-// not free to run: the element drops the decoded frame and re-decodes. The
-// caches above make the encode free, but only skipping the assignment makes the
-// *decode* free, so the same-string check is what actually keeps a re-render
-// from costing anything.
-function setImgSrc(img, url) {
-  if (url && img.getAttribute("src") === url) return;
-  if (url) img.setAttribute("src", url);
-  else img.removeAttribute("src");
-}
-
-function dataUrlToCanvas(dataUrl) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const cv = document.createElement("canvas");
-      cv.width = img.naturalWidth || img.width;
-      cv.height = img.naturalHeight || img.height;
-      const ctx = cv.getContext("2d");
-      ctx.drawImage(img, 0, 0);
-      resolve(cv);
-    };
-    img.onerror = reject;
-    img.src = dataUrl;
-  });
-}
 
 
-// Resolve a model path: prefix with MODEL_BASE_URL for remote hosting
-function resolveModelUrl(path) {
-  if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  return MODEL_BASE_URL + path;
-}
 
 
 // ---- Model Loading with Persistent CacheStorage ----

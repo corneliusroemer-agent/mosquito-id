@@ -84,3 +84,14 @@ export const WEBGPU_MODELS: Record<string, ModelConfig> = {
   }
 };
 
+
+/**
+ * Resolve a model path against the model host.
+ *
+ * An absolute URL is returned untouched, so a caller may point one engine at a
+ * different host (a local server, a mirror) without this having to know.
+ */
+export function resolveModelUrl(path: string): string {
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  return MODEL_BASE_URL + path;
+}
