@@ -535,7 +535,13 @@
   .score-item { margin: 12px 0; }
   .score-item-header {
     display: flex;
-    justify-content: space-between;
+    /* flex-start, not space-between: space-between hands every spare pixel of
+       the row to the gap between the name and the percentage, which is what
+       put the dead band in the middle of the row. With the two items packed
+       left the score follows the name at the row's own 8px gap and the row's
+       spare width is empty panel, flush to the content edge, with nothing in
+       it. */
+    justify-content: flex-start;
     gap: 8px;
     font-size: 13px;
     margin-bottom: 4px;
@@ -613,7 +619,13 @@
 
   .species-name-wrap {
     display: flex;
-    flex: 1 1 auto;
+    /* flex-grow 0, so the block is exactly as wide as its own text and the
+       percentage sits the row's gap-width to its right. At flex-grow 1 the
+       name absorbed every spare pixel and the score was driven to the far
+       edge, which is what the row's justify-content now has to fight. The
+       name still shrinks (flex-shrink 1) and wraps rather than pushing the %
+       off the row. */
+    flex: 0 1 auto;
     flex-wrap: wrap;
     align-items: center;
     gap: 2px 6px;
