@@ -199,5 +199,16 @@ export function pooledVerdict(
   floors: Floors = DEFAULT_FLOORS,
 ): Verdict | null {
   const spP = pooledPosterior(head, aggLogits);
+  // The `[]` here is the pooled card's structural gap, stated in full rather
+  // than left as an omitted argument: pooledPosterior softmaxes over the 16
+  // species alone, so no adjacent mass exists to pass and the non-mosquito
+  // branch cannot run. Three photos each reading 97% biting midge are announced
+  // as a species here. Carrying the adjacent classes through the pool is
+  // prerequisite to this card ever being able to say "not a mosquito", and is
+  // separate from - and not fixed by - gating the species floor.
+  //
+  // `[]` is deliberate and greppable. That is the point of making `adP` a
+  // required parameter of verdictFrom: this omission can no longer happen by
+  // forgetting an argument, only by writing this line.
   return spP ? verdictFrom(head, spP, null, [], floors) : null;
 }
