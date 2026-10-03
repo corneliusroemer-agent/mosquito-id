@@ -230,7 +230,10 @@ const ASYNC = (window.__mosqAsync = {
   renderThumbnails,
   renderActivePhoto,
   updatePooling: () => updatePooling(EMB, previews, includedIndices),
-  renderResultsTable: () => renderResultsTable(previews)
+  renderResultsTable: () => renderResultsTable(previews),
+  // The CSV is the other way a claim leaves the machine, and it is a separate
+  // function from the table it mirrors, so a test has to be able to call it.
+  downloadCSV: () => downloadCSV(previews, sendLog)
 });
 (function countFrames() {
   requestAnimationFrame(() => { ASYNC.frames++; countFrames(); });

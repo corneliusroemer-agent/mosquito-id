@@ -225,6 +225,67 @@ describe("what the ranking is allowed to show", () => {
   });
 });
 
+describe("when the head is refitted so every row is distinct", () => {
+  // The direction that matters. The iNat sweep added labelled photos for the
+  // species that share a genus row today (vexans, quinquefasciatus, pipiens,
+  // geniculatus, cinereus, torrentium), so a refit is expected to split these
+  // groups. Nothing in this module changes for that to happen: the groups fall
+  // out of the weights, and every one of them is empty on a head whose rows are
+  // distinct. These assertions are the whole point - a test that pinned the
+  // groups instead of the derivation would fail in that world and would have
+  // been pinning the bug.
+  const refit = distinctHead(H14.species);
+  const groups = resolvableGroups(refit);
+
+  const posterior = (over: Record<string, number>): Verdict => {
+    const p = new Array<number>(refit.species.length).fill(0);
+    for (const [n, v] of Object.entries(over)) p[refit.species.indexOf(n)] = v;
+    return verdictFrom(refit, p, null, []);
+  };
+
+  it("finds no groups, so the head reports species", () => {
+    expect(groups).toEqual([]);
+    expect(capabilityOf(refit)).toBe("species");
+  });
+
+  it("names the species in the sentence and in the label, with the group phrase nowhere", () => {
+    // Under the species floor, so the sentence exists at all: it names the leader
+    // and its runner-ups, which are the species a split head can now separate.
+    const v = posterior({
+      "Aedes vexans": 0.30, "Aedes geniculatus": 0.25,
+      "Aedes cinereus": 0.20, "Aedes albopictus": 0.15,
+    });
+    expect(v.state).toBe("genus");
+    const spoken = claimSentence(v, groups);
+    expect(spoken).toBe(verdictSentence(v));
+    expect(spoken).toContain("vexans");
+    expect(spoken).not.toContain("not separable");
+
+    setActiveHead(refit);
+    try {
+      expect(speciesLabelHtml("Aedes vexans")).toContain("Aedes vexans");
+      expect(speciesLabelHtml("Aedes vexans")).not.toContain("not separable");
+      expect(activeName("Culex pipiens")).toBe("Culex pipiens");
+    } finally {
+      setActiveHead(H14);
+    }
+  });
+
+  it("shows one row per species again", () => {
+    const detail = Object.fromEntries(refit.species.map((s, i) => [s, 1 - i / 100]));
+    const rows = mergeUnresolvable(Object.entries(detail), (e) => e[1], (e) => e[0], groups);
+    expect(rows).toHaveLength(refit.species.length);
+    expect(rows.map((r) => r.name)).toEqual(refit.species);
+  });
+
+  it("and drops the `genus only` note from the engine that became species-capable", () => {
+    // One edit, and the dropdown, the sentence, the ranking, the table and the CSV
+    // all follow: `reports` is the only thing that says "genus" anywhere.
+    expect(capabilityNote(WEBGPU_MODELS["webgpu-culico"]!.reports)).toContain("genus only");
+    expect(capabilityNote("species")).toBe("");
+  });
+});
+
 describe("the species label itself", () => {
   it("renders a group as the group, and a singleton as before", () => {
     setActiveHead(CULICO);
