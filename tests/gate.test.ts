@@ -55,7 +55,7 @@ describe("the three states", () => {
     const v = verdictFrom(
       head,
       post(head, { "Aedes aegypti": 0.4, "Aedes albopictus": 0.35, "Culex pipiens": 0.25 }),
-    );
+    null, []);
     expect(v.state).toBe("species");
     expect(v.species).toBe("Aedes aegypti");
     expect(v.genus).toBe("Aedes");
@@ -63,7 +63,7 @@ describe("the three states", () => {
   });
 
   it("posterior exactly at the species floor still answers (>=, not >)", () => {
-    const v = verdictFrom(head, post(head, { "Aedes aegypti": DEFAULT_FLOORS.species }));
+    const v = verdictFrom(head, post(head, { "Aedes aegypti": DEFAULT_FLOORS.species }), null, []);
     expect(v.state).toBe("species");
     expect(v.species).toBe("Aedes aegypti");
   });
@@ -78,7 +78,7 @@ describe("the three states", () => {
         "Aedes japonicus": 0.25,
         "Culex pipiens": 0.1,
       }),
-    );
+    null, []);
     expect(v.state).toBe("genus");
     expect(v.genus).toBe("Aedes");
     expect(v.species).toBeNull();
@@ -89,7 +89,7 @@ describe("the three states", () => {
     const v = verdictFrom(
       head,
       post(head, { "Aedes aegypti": 0.3, "Aedes albopictus": 0.35, "Aedes vexans": 0.25 }),
-    );
+    null, []);
     // albopictus leads at 0.35 - under the species floor - and the two runners-up
     // are named in descending order after it.
     expect(verdictSentence(v)).toBe("Definitely Aedes - maybe aegypti or vexans");
@@ -101,7 +101,7 @@ describe("the three states", () => {
     const v = verdictFrom(
       head,
       post(head, { "Aedes aegypti": 0.1, "Culex pipiens": 0.2, "Culiseta annulata": 0.15 }),
-    );
+    null, []);
     expect(v.state).toBe("unsure");
     expect(v.genus).toBeNull();
     expect(v.species).toBeNull();
@@ -117,7 +117,7 @@ describe("the three states", () => {
       "Culex torrentium": 0.2,
       "Culiseta annulata": 0.2,
     });
-    const v = verdictFrom(head, p);
+    const v = verdictFrom(head, p, null, []);
     expect(v.topGenusP).toBeCloseTo(0.45, 9);
     expect(v.state).toBe("unsure");
     // A wrong genus is worse than no genus, so the leading genus is not named.
@@ -125,8 +125,8 @@ describe("the three states", () => {
   });
 
   it("an empty posterior degrades to not confident rather than throwing", () => {
-    expect(verdictFrom(head, []).state).toBe("unsure");
-    expect(verdictFrom(head, null as unknown as number[]).state).toBe("unsure");
+    expect(verdictFrom(head, [], null, []).state).toBe("unsure");
+    expect(verdictFrom(head, null as unknown as number[], null, []).state).toBe("unsure");
   });
 });
 
@@ -175,18 +175,18 @@ describe("a disagreement between the views costs the photo its species claim", (
   it("the same posterior with agreeing views still names its species", () => {
     // One posterior, two verdicts: the ONLY difference is the agreement object.
     const spP = post(head, { "Aedes aegypti": 0.45, "Aedes albopictus": 0.4, "Culex pipiens": 0.15 });
-    expect(verdictFrom(head, spP, { agree: true } as never).state).toBe("species");
-    expect(verdictFrom(head, spP, { agree: false } as never).state).toBe("genus");
+    expect(verdictFrom(head, spP, { agree: true } as never, []).state).toBe("species");
+    expect(verdictFrom(head, spP, { agree: false } as never, []).state).toBe("genus");
     // No agreement at all - one view, or a pool of photos - is not a disagreement.
-    expect(verdictFrom(head, spP, null).state).toBe("species");
-    expect(verdictFrom(head, spP).state).toBe("species");
+    expect(verdictFrom(head, spP, null, []).state).toBe("species");
+    expect(verdictFrom(head, spP, null, []).state).toBe("species");
   });
 
   it("a disagreement can also take the photo all the way to unsure", () => {
     // The demotion falls into the genus floor rather than past it.
     const spP = post(head, { "Aedes aegypti": 0.4, "Aedes albopictus": 0.15, "Culex pipiens": 0.45 });
-    expect(verdictFrom(head, spP, { agree: true } as never).species).toBe("Culex pipiens");
-    const v = verdictFrom(head, spP, { agree: false } as never);
+    expect(verdictFrom(head, spP, { agree: true } as never, []).species).toBe("Culex pipiens");
+    const v = verdictFrom(head, spP, { agree: false } as never, []);
     expect(v.state).toBe("unsure");
     expect(verdictSentence(v)).toBe("Not confident enough to name a genus");
   });
@@ -217,7 +217,7 @@ describe("the non-mosquito state", () => {
       post(head, { "Aedes aegypti": 0.99 }),
       { agree: true } as never,
       adjPost(head, { 0: 0.95 }),
-    );
+);
     expect(v.state).toBe("non-mosquito");
     expect(v.adjacent).toBe(head.adjacent![0]);
     // The sentence names the plain-language subject, which is the whole point.
@@ -234,7 +234,7 @@ describe("the non-mosquito state", () => {
       post(head, { "Aedes aegypti": 0.999 }),
       { agree: true } as never,
       adjPost(head, { 2: 0.9 }),
-    );
+);
     expect(v.state).toBe("non-mosquito");
   });
 
@@ -244,7 +244,7 @@ describe("the non-mosquito state", () => {
       post(head, { "Aedes aegypti": 0.99 }),
       { agree: true } as never,
       adjPost(head, { 0: 0.05 }),
-    );
+);
     expect(v.state).toBe("species");
     expect(v.species).toBe("Aedes aegypti");
   });
@@ -293,15 +293,15 @@ describe("the non-mosquito state", () => {
 describe("the pooled card is not corrupted by an abstaining photo", () => {
   it("pooling filters state 'unsure' out and keeps the genus-only photo in", async () => {
     const { splitPoolable } = await import("../src/confidence/pooling");
-    const keep = verdictFrom(head, post(head, { "Aedes aegypti": 0.8 }));
+    const keep = verdictFrom(head, post(head, { "Aedes aegypti": 0.8 }), null, []);
     const coarse = verdictFrom(
       head,
       post(head, { "Aedes aegypti": 0.3, "Aedes albopictus": 0.35, "Aedes vexans": 0.25 }),
-    );
+null, []);
     const drop = verdictFrom(
       head,
       post(head, { "Aedes aegypti": 0.1, "Culex pipiens": 0.2, "Culiseta annulata": 0.15 }),
-    );
+    null, []);
     const { included, abstained } = splitPoolable([
       { name: "a", verdict: keep },
       { name: "b", verdict: coarse },
