@@ -21,6 +21,7 @@ import type { PoolablePhoto, PoolingMethod } from "../confidence/pooling";
 import type { Head } from "../confidence/types";
 import { verdictSentence } from "../confidence/verdict";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
+import { inclusionSummary } from "./thumbnailStrip";
 
 // ---- Pooling / Evidence Aggregation ----
 export function updatePooling(head: Head, previews: PoolablePhoto[], includedIndices: Iterable<number>): void {
@@ -28,8 +29,16 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   if (!poolScores) throw new Error("#combined-scores is missing from the page");
   const contribTable = document.getElementById("contribution-table")?.querySelector("tbody");
   if (!contribTable) throw new Error("#contribution-table has no tbody");
+  const summary = document.getElementById("inclusion-summary");
 
-  const checked = Array.from(includedIndices).map((i) => previews[i]).filter((p): p is PoolablePhoto => Boolean(p));
+  // An index the strip wrote that no longer names a photo is dropped here, and the
+  // drop is counted rather than swallowed. The strip re-validates the set on every
+  // render, so this is a backstop - but a backstop that reports itself is a
+  // backstop; one that drops in silence is how three ticked boxes reached a card
+  // counting one of them.
+  const wanted = Array.from(includedIndices);
+  const checked = wanted.map((i) => previews[i]).filter((p): p is PoolablePhoto => Boolean(p));
+  const unresolved = wanted.length - checked.length;
   // A photo whose crop is being re-classified, or whose classification failed,
   // has no verdict that matches its pixels. Pooling it would fold the previous
   // crop's evidence into the combined result, so it is left out. Its own row in
@@ -49,6 +58,18 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   // species or genus verdict is therefore excluded, which is what makes the
   // non-mosquito state safe to introduce without a second filter here.
   const { included, abstained } = splitPoolable(checked);
+
+  // Both counts, always. A checked photo that does not enter the sum is
+  // legitimate - it is listed in the contribution table with its reason - but
+  // three ticked boxes beside a table listing one of them reads as a bug unless
+  // the card says so itself.
+  if (summary) {
+    summary.textContent = inclusionSummary(checked.length, included.length);
+    summary.title = unresolved
+      ? `${unresolved} checked index${unresolved === 1 ? "" : "es"} no longer name${unresolved === 1 ? "s" : ""} a photo`
+      : "";
+  }
+
   if (included.length <= 1) {
     // The card is permanent, so the empty case is drawn rather than hidden:
     // hiding it resized the whole row above the gallery, and zooming re-pools,

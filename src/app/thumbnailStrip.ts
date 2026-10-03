@@ -106,9 +106,11 @@ const name = (p: ClassifiedPhoto): string => p.name ?? "(unnamed)";
  */
 export function checkLabel(p: ClassifiedPhoto, idx: number): string {
   const base = `Include photo ${idx} (${name(p)}) in the pooled result`;
-  if (p.pending) return "Waiting for this photo to be analysed";
+  if (p.pending) return "Still classifying - waiting for this photo to be analysed";
   if (p.error) return `This photo failed: ${p.error}`;
-  if (p.fallback) return "The nuisance gate rejected this photo's crop, so it cannot be pooled";
+  // Plain language, not the mechanism's name. "Nuisance gate" is what the crop
+  // engine calls it; what the user needs to know is that no mosquito was found.
+  if (p.fallback) return "No mosquito was detected in this photo, so it cannot be pooled";
   if (p.verdict?.state === "non-mosquito") return "The classifier found no mosquito in this photo";
   if (p.verdict?.state === "unsure") return `${base} — it will be listed as not confident enough to name a genus`;
   return base;
@@ -147,7 +149,11 @@ export function badge(p: ClassifiedPhoto): { glyph: string; className: string; t
     case "error":
       return { glyph: "!", className: "crop-badge error", title: p.error as string };
     case "queued":
-      return { glyph: "…", className: "crop-badge pending", title: "Waiting for this photo to be analysed" };
+      return {
+        glyph: "…",
+        className: "crop-badge pending",
+        title: "Still classifying - not yet part of the combined result",
+      };
     case "non-mosquito":
       // Its own badge, not the cropped one: the photo was analysed and it is not
       // a mosquito, which is the opposite of what a green tick says.

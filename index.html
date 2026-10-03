@@ -471,19 +471,24 @@
     pointer-events: none;
     box-sizing: border-box;
   }
-  .tile .include {
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
+  /* The include checkbox is its own interactive element with its own accessible
+     name. It used to be wrapped in a <label> with no text, which gave it no name
+     in any state, and shared a corner of the tile with a <button> for the
+     browser to retarget a click onto. The box is small for a touch target, so it
+     carries padding to make the hit area the tile's full width without a wrapper
+     element to do it: the padding is outside the drawn control, so nothing about
+     how it looks moves. */
   .thumb-optin {
     margin: 0;
     cursor: pointer;
     width: 14px;
     height: 14px;
     accent-color: var(--color-accent);
+    padding: 7px 25px 5px;
+    background-clip: content-box;
+    border-color: transparent;
   }
+  .thumb-optin:disabled { cursor: not-allowed; opacity: 0.55; }
   .hint { font-size: 12px; color: var(--body-text-color-subdued); margin: 0 0 12px; }
 
   /* 3-Panel Viewer Grid. The scores column is the one people read, and at a
@@ -750,7 +755,7 @@
     .tile { width: 84px; }
     .tile-btn { width: 84px; height: 84px; }
     .tile-delete-btn { width: 28px; height: 28px; top: 2px; left: 2px; font-size: 15px; }
-    .tile .include { padding: 8px 0 2px; }
+    .thumb-optin { padding: 11px 25px 5px; }
     .thumb-optin { width: 22px; height: 22px; }
     .btn-sm { padding: 9px 16px; font-size: 13px; }
     .combined-options summary { display: block; padding: 8px 0; }
@@ -945,6 +950,34 @@
   }
   .crop-badge.pending { background: var(--color-accent-subdued); color: var(--color-accent); }
   .crop-badge.error { background: #fee2e2; color: #b91c1c; }
+  /* A photo the gate found no mosquito in gets its own badge rather than the
+     green cropped one, which asserted the opposite of what happened. */
+  .tile .crop-badge.non-mosquito { background: rgba(220, 38, 38, 0.85); color: #fff; }
+  .tile .crop-badge.unsure { background: #fef3c7; color: #b45309; }
+
+  /* The zoomed panel's "no image" line changes text as the selection moves, so its
+     height is reserved: the longest message must not be able to resize the panel
+     and move everything under it. */
+  .crop-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 0 16px;
+    pointer-events: none;
+    min-height: 60px;
+  }
+
+  /* The pooled card's checked-versus-contributing line: one line, always present,
+     so a count appearing or changing cannot resize the card. */
+  .inclusion-summary {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: var(--body-text-color-subdued);
+    min-height: 18px;
+  }
   .data-table tr.row-pending td { color: var(--body-text-color-subdued); }
   /* Contribution-table rows for a photo that is in the pooled sum at a coarser
      claim than a species, and for one left out of it entirely. */
@@ -1037,6 +1070,7 @@
         <h2>Combined result · checked photos</h2>
         <div class="combined-axis"><span>−20</span><span>−10</span><span>0 (best)</span></div>
       </div>
+      <p id="inclusion-summary" class="inclusion-summary"></p>
       <div id="combined-scores" class="combined-scores"></div>
       <details class="combined-options" id="combined-options">
         <summary>Aggregation options</summary>
@@ -1079,9 +1113,9 @@
     <div class="strip-toolbar">
       <div id="thumbnail-strip" class="thumbnail-strip"></div>
       <div class="strip-actions">
-        <button id="btn-select-all" class="btn btn-sm" type="button">Select all</button>
-        <button id="btn-select-none" class="btn btn-sm" type="button">Select none</button>
-        <button id="btn-delete-all" class="btn btn-sm" type="button">Delete all</button>
+        <button id="btn-select-all" class="btn btn-sm" type="button" aria-label="Check all photos that can be pooled">Select all</button>
+        <button id="btn-select-none" class="btn btn-sm" type="button" aria-label="Uncheck all photos">Select none</button>
+        <button id="btn-delete-all" class="btn btn-sm" type="button" aria-label="Delete all photos">Delete all</button>
       </div>
     </div>
     <p class="hint">Select a photo to inspect it. Check photos of the same mosquito to combine their results.</p>
