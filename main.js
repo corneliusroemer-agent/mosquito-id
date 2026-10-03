@@ -1536,9 +1536,17 @@ function deletePhoto(idx) {
 }
 
 // ---- UI Rendering & Navigation ----
+
+// A photo can only be pooled if its checkbox is enabled, so the bulk actions use
+// the same rule rather than a second one that could drift from it.
+function isSelectable(p) {
+  return Boolean(p) && !p.fallback && !p.pending && !p.error;
+}
+
 function renderThumbnails() {
   const strip = document.getElementById("thumbnail-strip");
   strip.innerHTML = "";
+  updateStripActions();
   document.getElementById("gallery-counter").textContent = `${selectedIndex + 1} / ${previews.length}`;
 
   previews.forEach((p, idx) => {
@@ -1603,7 +1611,7 @@ function renderThumbnails() {
     chk.type = "checkbox";
     chk.className = "thumb-optin";
     chk.checked = includedIndices.has(idx);
-    chk.disabled = p.fallback || p.pending || p.error;
+    chk.disabled = !isSelectable(p);
     chk.onchange = (e) => {
       if (e.target.checked) includedIndices.add(idx);
       else includedIndices.delete(idx);
@@ -1615,6 +1623,58 @@ function renderThumbnails() {
     tile.appendChild(label);
     strip.appendChild(tile);
   });
+}
+
+function setAllSelected(on) {
+  previews.forEach((p, i) => {
+    if (isSelectable(p) && on) includedIndices.add(i);
+    else includedIndices.delete(i);
+  });
+  renderThumbnails();
+  updatePooling();
+  updateStripActions();
+}
+
+function deleteAllPhotos() {
+  if (!previews.length) return;
+  const n = previews.length;
+  // Destructive and not undoable, so it asks. The gallery is the user's work:
+  // photos may not be re-obtained if the originals are not on the device.
+  if (!window.confirm(`Delete all ${n} photo${n > 1 ? "s" : ""}? This cannot be undone.`)) return;
+  // Mark first, exactly as deletePhoto does, so every in-flight inference for any
+  // photo drops its result rather than writing into a slot that no longer exists.
+  previews.forEach((p) => { p.removed = true; });
+  previews.length = 0;
+  includedIndices = new Set();
+  selectedIndex = 0;
+  sendLog("delete_all_photos", { count: n });
+  renderThumbnails();
+  document.getElementById("gallery-section").style.display = "none";
+  document.getElementById("results-table-section").style.display = "none";
+  // The combined card is not hidden: hiding it shifts the layout under the
+  // strip. updatePooling() decides what it shows.
+  updatePooling();
+}
+
+// Nothing to select, deselect or delete without photos, so the buttons say so
+// rather than sitting there as no-ops.
+function updateStripActions() {
+  const empty = previews.length === 0;
+  for (const id of ["btn-select-all", "btn-select-none", "btn-delete-all"]) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = empty;
+  }
+}
+
+function wireStripActions() {
+  const on = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", fn);
+  };
+  on("btn-select-all", () => setAllSelected(true));
+  on("btn-select-none", () => setAllSelected(false));
+  on("btn-delete-all", deleteAllPhotos);
+  updateStripActions();
 }
 
 function selectPhoto(idx) {
@@ -2513,6 +2573,7 @@ function applyRoute() {
 // ---- Initialization & Event Listeners ----
 window.addEventListener("DOMContentLoaded", () => {
   setupCropSurfaces();
+  wireStripActions();
 
   window.addEventListener("hashchange", applyRoute);
   applyRoute();
