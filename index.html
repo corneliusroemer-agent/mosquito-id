@@ -743,6 +743,12 @@
 
   /* Hit areas that are only comfortable with a mouse pointer. */
   @media (pointer: coarse) {
+    /* The thumbnail is the point of the strip - it is how you tell the photos
+       apart - and 64px is a desktop-thumbnail size shown on a phone. Every other
+       target in this block grows for touch; this one is the reason you can tell
+       your mosquitoes apart at all. */
+    .tile { width: 84px; }
+    .tile-btn { width: 84px; height: 84px; }
     .tile-delete-btn { width: 28px; height: 28px; top: 2px; left: 2px; font-size: 15px; }
     .tile .include { padding: 8px 0 2px; }
     .thumb-optin { width: 22px; height: 22px; }
@@ -857,7 +863,6 @@
             background: color-mix(in srgb, var(--color-accent) 14%, transparent);
             color: var(--color-accent); }
   .kb-viz.none { background: var(--border-color-primary); color: var(--body-text-color-subdued); }
-  .kb-local { font-size: 15px; line-height: 1.6; }
   /* Reference photographs. Two columns at every width, and minmax(0, 1fr)
      rather than auto-fill: the zero minimum stops a long caption or an
      intrinsically wide image from stretching a column past the 720px .kb
