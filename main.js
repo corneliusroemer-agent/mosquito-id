@@ -2049,16 +2049,22 @@ function renderActivePhoto() {
   }
   const sortedScores = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
   for (const [name, score] of sortedScores) {
+    // A non-finite score has no bar and no number. Math.min/Math.max pass NaN
+    // straight through, which emitted `width: NaN%` - an invalid declaration
+    // the browser drops, leaving the fill at its default width and drawing a
+    // full bar that looks like a confident result for a value that means
+    // nothing. Say nothing instead of saying something wrong.
+    const finite = Number.isFinite(score);
     const item = document.createElement("div");
     item.className = "score-item";
-    const percent = (score * 100).toFixed(1);
+    const percent = finite ? (score * 100).toFixed(1) : "";
     item.innerHTML = `
       <div class="score-item-header">
         <span class="species-name-wrap">${speciesLabelHtml(name)}</span>
-        <strong>${percent}%</strong>
+        ${finite ? `<strong>${percent}%</strong>` : ""}
       </div>
       <div class="score-item-track">
-        <div class="score-item-fill" style="width: ${Math.max(0, Math.min(100, score * 100))}%"></div>
+        ${finite ? `<div class="score-item-fill" style="width: ${Math.max(0, Math.min(100, score * 100))}%"></div>` : ""}
       </div>
     `;
     scoreList.appendChild(item);
@@ -2619,11 +2625,13 @@ function updatePooling() {
   candidates.slice(0, 10).forEach(c => {
     const row = document.createElement("div");
     row.className = "combined-candidate";
-    const widthPct = Math.max(0, Math.min(100, ((c.relScore + 20) / 20) * 100));
+    // Same non-finite guard as the single-photo score list above.
+    const relFinite = Number.isFinite(c.relScore);
+    const widthPct = relFinite ? Math.max(0, Math.min(100, ((c.relScore + 20) / 20) * 100)) : 0;
     row.innerHTML = `
       <div class="combined-score-row">
         <span class="species-name-wrap">${speciesLabelHtml(c.name)}</span>
-        <span>${c.relScore.toFixed(1)}</span>
+        <span>${relFinite ? c.relScore.toFixed(1) : ""}</span>
       </div>
       <div class="combined-bar-track">
         <div class="combined-bar" style="width: ${widthPct}%"></div>
