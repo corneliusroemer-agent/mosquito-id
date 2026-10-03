@@ -114,7 +114,11 @@ describe("the verdict abstains when the top posterior is below both floors", () 
     expect(v.state).toBe("unsure");
     expect(v.genus).toBeNull();
     expect(v.species).toBeNull();
-    expect(verdictSentence(v)).toBe("Not confident enough to name a genus");
+    // The abstention is unchanged in what it CLAIMS - nothing - and now says what
+    // the photo was torn between, which is what the ranking underneath it shows.
+    expect(verdictSentence(v)).toMatch(/^Not confident enough to name a genus/);
+    expect(verdictSentence(v)).toContain("japonicus");
+    expect(verdictSentence(v)).toContain("koreicus");
   });
 
   it("abstaining is not the same as having no ranking", () => {

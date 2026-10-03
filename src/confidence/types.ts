@@ -85,13 +85,41 @@ export interface Verdict {
    * species, which reads as though the top three were a tie.
    */
   topSpecies?: string;
+  /**
+   * The leading species overall, descending, in the UNSURE state only.
+   *
+   * `runnersUp` is scoped to the leading genus, which is the wrong set when no
+   * genus is named: an undecided photo can be torn between Anopheles and Culex,
+   * and naming Anopheles' siblings would report a tie the posterior does not
+   * show. This is the set across genera that the abstention actually has.
+   */
+  candidates?: RunnerUp[];
   /** Adjacent class name, in the non-mosquito state only. */
   adjacent?: string;
   /** Plain-language adjacent name, in the non-mosquito state only. */
   adjacentCommon?: string;
-  /** The winning adjacent class's posterior, in the non-mosquito state only. */
+  /**
+   * The winning nuisance class, in the non-mosquito state only and only when the
+   * nuisance block is what tripped the gate.
+   *
+   * Mutually exclusive with `adjacent`. A nuisance row says there is nothing
+   * mosquito-like in the picture - a wall, a hand, a plant - so there is no insect
+   * family to name, and naming one would be a guess presented as a finding.
+   */
+  nuisance?: string;
+  /** The winning class's own posterior, in the non-mosquito state only. */
   adjacentP?: number;
-  /** Total non-mosquito mass, in the non-mosquito state only. */
+  /**
+   * Which block tripped the gate. "adjacent" is a different insect and the verdict
+   * names its family; "nuisance" is nothing mosquito-like and the verdict says so
+   * without inventing one.
+   */
+  nonMosquitoKind?: "adjacent" | "nuisance";
+  /**
+   * The mass of the block that tripped the gate, not the sum of both: the two are
+   * compared against different floors, so their totals are not on one axis and
+   * adding them would be a third number that means neither.
+   */
   nonMosquitoP?: number;
 }
 
@@ -124,14 +152,36 @@ export interface Floors {
    */
   genus: number;
   /**
-   * NON_MOSQUITO_FLOOR 0.60 - CHOSEN FOR BEHAVIOUR, NOT FITTED. The adjacent
-   * classes share the one softmax with the species, so their total is already
-   * on the species posterior's axis. On the 6,264-row in-domain cache the
-   * adjacent classes take more mass than the best mosquito in 0.67% of rows at
-   * any floor. The false-positive side could not be measured at all: that cache
-   * contains no non-mosquito images.
+   * NON_MOSQUITO_FLOOR 0.60 - the ADJACENT block only, and chosen for behaviour
+   * rather than fitted. The adjacent classes share the one softmax with the
+   * species, so their total is already on the species posterior's axis.
+   *
+   * Now measured on a negative set as well as the positives, which it was not
+   * before: against 700 detector-verified in-domain background crops it costs
+   * 15 of 6,264 true mosquitoes (0.239%) and catches 11 of the 700 (1.6%). So
+   * the floor is expensive in the currency it was fitted in and weak in the one
+   * it was not - which is why it is one number for one block rather than the
+   * gate's single answer.
    */
   nonMosquito: number;
+  /**
+   * NUISANCE_FLOOR 0.05 - MEASURED, and deliberately an order of magnitude
+   * below `nonMosquito` rather than equal to it.
+   *
+   * The two blocks cannot share a floor because their masses are on different
+   * scales. Over the same 700 negatives and 6,264 mosquitoes, nuisance mass
+   * reaches at most 0.498 and 0.204 respectively - so a 0.60 floor on this block
+   * is a floor nothing ever reaches, and the whole "this photo is a wall" path
+   * would be dead code that reads as working.
+   *
+   * 0.05 is the operating point where the block earns its place: it adds 69 of
+   * the 700 negatives (11.4% caught in total) for 15 more lost mosquitoes
+   * (0.479%), i.e. it quadruples what the gate rejects at the same false-positive
+   * rate the adjacent block already cost. Raising it to 0.10 buys half that
+   * (5.7%) for 17 lost; 0.02 buys 26.9% for 60 lost. 0.05 is the knee, not a
+   * round number chosen for how it reads.
+   */
+  nuisance: number;
   /**
    * Whether two views naming different species cost the photo its species
    * claim. BOOLEAN because that is what the data identifies: on the 180-row
@@ -156,6 +206,7 @@ export const DEFAULT_FLOORS: Floors = Object.freeze({
   species: 0.373,
   genus: 0.80,
   nonMosquito: 0.60,
+  nuisance: 0.05,
   viewDisagreementVetoesSpecies: true,
   temperature: 2.5,
 });

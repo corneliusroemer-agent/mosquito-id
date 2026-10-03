@@ -1,7 +1,90 @@
-import type { Agreement, Floors, Head, Verdict } from "./types";
+import type { Agreement, Floors, Head, RunnerUp, Verdict } from "./types";
 import { DEFAULT_FLOORS } from "./types";
 import { adjacentNames } from "./softmax";
 import { speciesGenusIndex } from "./genus";
+
+/** What tripped the non-mosquito gate, and what it is called. */
+export interface GateHit {
+  /**
+   * "adjacent" - a different insect family, which the app can name and the user
+   * can act on. "nuisance" - nothing mosquito-like in the picture, where there is
+   * no family to name and saying one would be a guess dressed as a finding.
+   */
+  kind: "adjacent" | "nuisance";
+  /** The winning class's label, from the block named by `kind`. */
+  name: string;
+  /** The plain-language name, for the adjacent block, where the head carries one. */
+  common: string;
+  /** The winning class's own posterior - not its block's total. */
+  p: number;
+  /** The block's total mass, which is what the floor was compared against. */
+  mass: number;
+}
+
+/**
+ * Has this photo been shown to contain no mosquito? Returns the winning block, or
+ * null if it has not.
+ *
+ * The gate exists because "this is not a mosquito" is a claim about the
+ * PHOTOGRAPH, and so has to outrank every species claim rather than sit beside one.
+ * It is checked before the species and genus floors, so a photo the classifier is
+ * confident about AND that is not an insect is answered as the latter.
+ *
+ * Two blocks, two floors, and the reason they are not one is arithmetic rather
+ * than taste: `softmaxJoint` puts species, nuisance and adjacent in ONE softmax,
+ * and the nuisance mass over the measured negatives tops out at 0.498 against a
+ * species floor of 0.373. A shared 0.60 would leave the nuisance path unreachable,
+ * which is the defect this function exists to fix. A shared LOW floor would let
+ * adjacent mass - which is an order of magnitude larger on true mosquitoes - reject
+ * healthy photos.
+ *
+ * It used to read the adjacent block alone, which is why a photograph of a wall
+ * could be named a species: the eight nuisance rows are literally photographs of
+ * walls, hands, plants and empty backgrounds, and the gate never saw them.
+ *
+ * When both blocks clear, the one whose winning class is more certain wins: that
+ * is the claim the photo is actually making, and mixing the two into one message
+ * would name a family on the strength of a wall.
+ */
+export function nonMosquitoGate(
+  head: Head,
+  adP: number[] | undefined | null,
+  nuP: number[] | undefined | null,
+  floors: Floors = DEFAULT_FLOORS,
+): GateHit | null {
+  const best = (p: number[] | undefined | null): { i: number; p: number } => {
+    let i = -1;
+    let top = 0;
+    for (let k = 0; k < (p?.length ?? 0); k++) {
+      const v = p![k]!;
+      if (Number.isFinite(v) && v > top) {
+        top = v;
+        i = k;
+      }
+    }
+    return { i, p: top };
+  };
+  const sum = (p: number[] | undefined | null): number =>
+    (p ?? []).reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+
+  const adMass = sum(adP);
+  const nuMass = sum(nuP);
+  const adj = best(adP);
+  const nu = best(nuP);
+  const adjNames = adjacentNames(head);
+
+  const adjHit =
+    adj.i >= 0 && adMass >= floors.nonMosquito
+      ? { kind: "adjacent" as const, name: adjNames[adj.i] ?? "", common: (head.adjacent_common || [])[adj.i] || adjNames[adj.i] || "", p: adj.p, mass: adMass }
+      : null;
+  const nuHit =
+    nu.i >= 0 && nuMass >= floors.nuisance
+      ? { kind: "nuisance" as const, name: (head.nuisance || [])[nu.i] ?? "", common: (head.nuisance || [])[nu.i] ?? "", p: nu.p, mass: nuMass }
+      : null;
+
+  if (adjHit && nuHit) return adjHit.p >= nuHit.p ? adjHit : nuHit;
+  return adjHit || nuHit;
+}
 
 /**
  * What the classifier will claim about one photo, from a single posterior.
@@ -47,6 +130,12 @@ export function verdictFrom(
   // rather than an omission that reads as intent.
   adP: number[],
   floors: Floors = DEFAULT_FLOORS,
+  // The nuisance posteriors, index-aligned with `head.nuisance`. OPTIONAL, unlike
+  // `adP`: a caller that has none says so by omitting it, and the gate reads the
+  // adjacent block alone exactly as it did before. Every path that has them passes
+  // them - `fuseViews` does, and `fuseViews` is what every fused photo goes
+  // through - so nothing reaches this in production without them.
+  nuP: number[] = [],
 ): Verdict {
   if (!spP || !spP.length || spP.some((p) => !Number.isFinite(p))) {
     return { state: "unsure", genus: null, species: null, topGenusP: 0, topSpeciesP: 0, runnersUp: [] };
@@ -72,33 +161,25 @@ export function verdictFrom(
     .sort((a, b) => (spP[b] || 0) - (spP[a] || 0))
     .map((i) => ({ name: head.species[i]!, p: spP[i] || 0 }));
 
-  // "This is not a mosquito", which is a claim about the photograph and so has
-  // to outrank every species claim rather than sit beside one.
-  //
-  // It is checked FIRST, on the non-mosquito mass alone. Measured on the
-  // 6,264-row in-domain cache this costs 0.67% of true mosquitoes, which is why
-  // the mass has to clear a floor rather than merely beat the best species - the
-  // in-domain negative benchmark that would settle a lower floor did not exist
-  // when this was written. Neither number here is fitted.
-  if (adP && adP.length) {
-    const nonMosquito = adP.reduce((a, b) => a + b, 0);
-    if (nonMosquito >= floors.nonMosquito) {
-      let top = 0;
-      for (let i = 1; i < adP.length; i++) if (adP[i]! > adP[top]!) top = i;
-      const names = adjacentNames(head);
-      return {
-        state: "non-mosquito",
-        genus: null,
-        species: null,
-        topGenusP,
-        topSpeciesP,
-        runnersUp: [],
-        adjacent: names[top],
-        adjacentCommon: (head.adjacent_common || [])[top] || names[top],
-        adjacentP: adP[top],
-        nonMosquitoP: nonMosquito,
-      };
-    }
+  const hit = nonMosquitoGate(head, adP, nuP, floors);
+  if (hit) {
+    return {
+      state: "non-mosquito",
+      genus: null,
+      species: null,
+      topGenusP,
+      topSpeciesP,
+      runnersUp: [],
+      // Exactly one of these two is set. A photo of a wall gets `nuisance` and no
+      // family; a midge gets `adjacent` and its family. Carrying both would let a
+      // consumer name a family on a photo of bare background.
+      ...(hit.kind === "adjacent"
+        ? { adjacent: hit.name, adjacentCommon: hit.common }
+        : { nuisance: hit.name }),
+      nonMosquitoKind: hit.kind,
+      adjacentP: hit.p,
+      nonMosquitoP: hit.mass,
+    };
   }
 
   // A species claim needs the photo's views to have agreed as well as the fused
@@ -135,7 +216,23 @@ export function verdictFrom(
       runnersUp,
     };
   }
-  return { state: "unsure", genus: null, species: null, topGenusP, topSpeciesP, runnersUp };
+  // Abstaining. `candidates` is the leading species ACROSS genera, which is not
+  // `runnersUp`: with no genus named, the photo may be torn between two of them,
+  // and their siblings are not the tie being reported.
+  const candidates: RunnerUp[] = spP
+    .map((p, i) => ({ name: head.species[i]!, p: p || 0 }))
+    .sort((a, b) => b.p - a.p)
+    .slice(0, 3);
+  return {
+    state: "unsure",
+    genus: null,
+    species: null,
+    topGenusP,
+    topSpeciesP,
+    topSpecies: speciesName,
+    runnersUp,
+    candidates,
+  };
 }
 
 /**
@@ -149,8 +246,14 @@ export function verdictSentence(v: Verdict | null | undefined): string {
   // below it is a list of mosquitoes this photo was not, so the sentence has to
   // come first and has to be about the subject.
   if (v.state === "non-mosquito") {
-    const what = v.adjacentCommon || v.adjacent;
     const pct = Math.round((v.nonMosquitoP || 0) * 100);
+    // The two blocks are two different answers and are worded as such. A midge is
+    // a finding, so it is named. A wall is an absence, so it is reported as one
+    // rather than dressed up with a family that was never in the picture.
+    if (v.nonMosquitoKind === "nuisance") {
+      return `There is no mosquito in this photo - it looks like ${v.nuisance} (${pct}% of the match).`;
+    }
+    const what = v.adjacentCommon || v.adjacent;
     return `This does not look like a mosquito - it looks like ${what} (${pct}% of the match).`;
   }
   if (v.state === "genus") {
@@ -183,5 +286,18 @@ export function verdictSentence(v: Verdict | null | undefined): string {
     if (!names.length) return `Definitely ${v.genus} - most likely ${short(lead)}`;
     return `Definitely ${v.genus} - most likely ${short(lead)}, possibly ${names[0]} or ${names[1]}`;
   }
-  return "Not confident enough to name a genus";
+  // Abstaining. "Not confident enough to name a genus" alone is true of every
+  // unconfident photo and so says nothing about this one; the sentence names what
+  // it is torn between, which is the only thing a reader can act on. Two
+  // candidates is enough to show which way it leans - the ranking underneath
+  // carries every probability, and naming four would be noise over that.
+  const short = (n: string) => {
+    const parts = n.trim().split(/\s+/);
+    return parts.length > 1 ? parts.slice(1).join(" ") : n;
+  };
+  const cands = (v.candidates || []).slice(0, 3).map((c) => short(c.name));
+  if (cands.length === 0) return "Not confident enough to name a genus";
+  if (cands.length === 1) return `Not confident enough to name a genus - most likely ${cands[0]}`;
+  if (cands.length === 2) return `Not confident enough to name a genus - between ${cands[0]} and ${cands[1]}`;
+  return `Not confident enough to name a genus - between ${cands[0]}, ${cands[1]} and ${cands[2]}`;
 }
