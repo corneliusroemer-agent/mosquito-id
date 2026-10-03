@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  badge, canCheck, canView, checkLabel, contributesToPool, inclusionSummary,
-  photoState, removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
-  validateIncluded, viewLabel,
+  badge, canView, checkLabel, contributesToPool, entersPooledSum, inclusionSummary,
+  photoState, poolExclusionReason, removeLabel, shiftIncluded, shiftIncludedForPrepend,
+  shiftSelected, validateIncluded, viewLabel,
 } from "../src/app/thumbnailStrip";
 import { splitPoolable } from "../src/confidence/pooling";
 import type { PoolablePhoto } from "../src/confidence/pooling";
@@ -110,68 +110,67 @@ describe("canView (spec §1.1)", () => {
   });
 });
 
-describe("canCheck (spec §1.1)", () => {
+describe("contributesToPool (spec §1.1)", () => {
   it("is exactly: not pending, not errored, not fallback, not non-mosquito", () => {
     for (const c of COMBINATIONS) {
       const expected = !c.pending && !c.error && !c.fallback && c.verdict?.state !== "non-mosquito";
-      expect(canCheck(photo(c)), JSON.stringify(c)).toBe(expected);
+      expect(contributesToPool(photo(c)), JSON.stringify(c)).toBe(expected);
     }
   });
 
   it("closes the checkbox on a fallback photo even though the photo is viewable", () => {
     const fb = photo({ fallback: true, is_cropped: false, verdict: null });
     expect(canView(fb)).toBe(true);
-    expect(canCheck(fb)).toBe(false);
+    expect(contributesToPool(fb)).toBe(false);
   });
 
   it("leaves an unsure photo checkable: deciding not to trust it is the user's call", () => {
-    expect(canCheck(photo({ verdict: verdict("unsure") }))).toBe(true);
-    expect(contributesToPool(photo({ verdict: verdict("unsure") }))).toBe(false);
+    expect(contributesToPool(photo({ verdict: verdict("unsure") }))).toBe(true);
+    expect(entersPooledSum(photo({ verdict: verdict("unsure") }))).toBe(false);
   });
 
   it("leaves checkable a photo with no verdict that nothing has excluded", () => {
-    expect(canCheck(photo({ verdict: null, is_cropped: false, manual_full_photo: true }))).toBe(true);
+    expect(contributesToPool(photo({ verdict: null, is_cropped: false, manual_full_photo: true }))).toBe(true);
   });
 });
 
-describe("canCheck and contributesToPool agree with splitPoolable (spec §1.1)", () => {
-  it("every checked photo that contributes is one the strip would have allowed", () => {
-    for (const c of COMBINATIONS) {
-      const p = photo(c);
-      if (!canCheck(p)) continue;
-      const { included } = splitPoolable([poolable(p)]);
-      expect(contributesToPool(p), JSON.stringify(c)).toBe(included.length === 1);
-    }
-  });
-
-  it("contributesToPool matches splitPoolable for every combination, checked or not", () => {
+describe("entersPooledSum agrees with splitPoolable (spec §1.1)", () => {
+  it("matches splitPoolable for every combination, checkable or not", () => {
     for (const c of COMBINATIONS) {
       const p = photo(c);
       const { included } = splitPoolable([poolable(p)]);
-      expect(contributesToPool(p), JSON.stringify(c)).toBe(included.length === 1);
+      expect(entersPooledSum(p), JSON.stringify(c)).toBe(included.length === 1);
     }
   });
 
-  it("routes every checked photo that has a verdict to exactly one of the two lists", () => {
+  it("routes every checkable photo that has a verdict to exactly one of the two lists", () => {
     // A checked photo that is neither pooled nor listed with a reason is the
     // silent drop. It is reachable only for a photo with no verdict at all,
     // which splitPoolable deliberately does not classify.
     for (const c of COMBINATIONS) {
       if (!c.verdict) continue;
       const p = photo(c);
-      if (!canCheck(p)) continue;
+      if (!contributesToPool(p)) continue;
       const { included, abstained } = splitPoolable([poolable(p)]);
       expect(included.length + abstained.length, JSON.stringify(c)).toBe(1);
     }
   });
 
-  it("counts a checked photo the strip forbids as contributing if it got in anyway", () => {
-    // The two rules differ on `fallback` on purpose: splitPoolable pools a
-    // whole-frame view it was handed, and the strip is what keeps the nuisance
-    // gate's rejected photo out. This is the seam the spec calls out in §1.
+  it("differs from the strip's permission only on fallback, which is the seam §1 records", () => {
+    // splitPoolable sums a whole-frame view it is handed; the strip is what
+    // keeps the nuisance gate's rejected photo out of the fusion step.
     const fb = photo({ fallback: true, is_cropped: false });
-    expect(canCheck(fb)).toBe(false);
-    expect(contributesToPool(fb)).toBe(true);
+    expect(contributesToPool(fb)).toBe(false);
+    expect(entersPooledSum(fb)).toBe(true);
+  });
+
+  it("never lets a photo into the sum that the strip has closed the checkbox for", () => {
+    // The one combination where the strip's rule is strictly tighter.
+    for (const c of COMBINATIONS) {
+      if (contributesToPool(photo(c))) continue;
+      expect(c.pending || !!c.error || c.fallback || c.verdict?.state === "non-mosquito",
+        JSON.stringify(c)).toBe(true);
+    }
   });
 });
 
@@ -180,7 +179,7 @@ describe("checkLabel (spec §3.3)", () => {
     for (const c of COMBINATIONS) {
       const p = photo(c);
       const label = checkLabel(p, 1);
-      if (canCheck(p)) continue;
+      if (contributesToPool(p)) continue;
       expect(label, JSON.stringify(c)).not.toMatch(/^Include photo/);
     }
   });
@@ -215,6 +214,31 @@ describe("checkLabel (spec §3.3)", () => {
     const p = photo({ name: undefined });
     expect(viewLabel(p, 1)).toBe("View photo 1: (unnamed)");
     expect(checkLabel(p, 1)).toContain("(unnamed)");
+  });
+});
+
+describe("poolExclusionReason (spec §3.3)", () => {
+  it("is empty exactly for the photos the strip would let into the sum", () => {
+    for (const c of COMBINATIONS) {
+      const p = photo(c);
+      const reason = poolExclusionReason(p);
+      if (contributesToPool(p)) continue;
+      expect(reason.length, JSON.stringify(c)).toBeGreaterThan(0);
+    }
+  });
+
+  it("says something different about each of the four reasons", () => {
+    const reasons = new Set([
+      poolExclusionReason(photo({ error: "x", verdict: null })),
+      poolExclusionReason(photo({ pending: true, verdict: null })),
+      poolExclusionReason(photo({ fallback: true, is_cropped: false, verdict: null })),
+      poolExclusionReason(photo({ verdict: verdict("non-mosquito") })),
+    ]);
+    expect(reasons.size).toBe(4);
+  });
+
+  it("carries the error text through", () => {
+    expect(poolExclusionReason(photo({ error: "decode failed", verdict: null }))).toContain("analysis failed");
   });
 });
 
