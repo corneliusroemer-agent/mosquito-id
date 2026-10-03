@@ -8,7 +8,7 @@ const root = join(here, "..");
 
 /** The shipped text embeddings. 660 KB; read once per test file. */
 export function realEmbeds(): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(root, "text_embeds.json"), "utf8"));
+  return JSON.parse(readFileSync(join(root, "public", "text_embeds.json"), "utf8"));
 }
 
 /**

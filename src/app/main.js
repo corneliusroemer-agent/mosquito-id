@@ -4,15 +4,47 @@
  */
 "use strict";
 
+/*
+ * The app shell. Everything the classifier's arithmetic needs now lives in
+ * src/confidence/ as tested modules; what is left here is the DOM, the model
+ * plumbing and the worker boundary, none of which is unit-testable.
+ *
+ * The adapters below re-bind those modules to this file's EMB, so the call sites
+ * below keep their existing one-argument shape. EMB is still assigned in one
+ * place (model loading), and because every adapter reads it at CALL time rather
+ * than binding it, a reloaded embeddings file is picked up.
+ */
+import { localViewScale as _localViewScale, serverViewScale as _serverViewScale,
+         DEFAULT_FLOORS } from "../confidence/types";
+import { adjacentNames as _adjacentNames, softmaxJoint } from "../confidence/softmax";
+import { genusScores as _genusScores } from "../confidence/genusScores";
+import { fuseViews as _fuseViews } from "../confidence/fuseViews";
+import { genusOf, speciesGenusIndex } from "../confidence/genus";
+import { verdictFrom as _verdictFrom, verdictSentence } from "../confidence/verdict";
+import { pooledPosterior as _pooledPosterior } from "../confidence/pooling";
+import { render as renderSpeciesPage } from "./speciesPage";
+
+// The floors moved to src/confidence/types.ts with their derivations. These four
+// names are kept so the app reads the same as before, and nothing else reads
+// them - a change to a floor is a change in exactly one file.
+const SPECIES_CONFIDENCE_FLOOR = DEFAULT_FLOORS.species;
+const GENUS_CONFIDENCE_FLOOR = DEFAULT_FLOORS.genus;
+const NON_MOSQUITO_FLOOR = DEFAULT_FLOORS.nonMosquito;
+const VIEW_DISAGREEMENT_VETOES_SPECIES = DEFAULT_FLOORS.viewDisagreementVetoesSpecies;
+
+const localViewScale = () => _localViewScale(EMB);
+const serverViewScale = () => _serverViewScale(EMB);
+const adjacentNames = () => _adjacentNames(EMB);
+const genusScores = (spP, spCos) => _genusScores(EMB, spP, spCos);
+const fuseViews = (viewResults) => _fuseViews(EMB, viewResults);
+const verdictFrom = (spP, agreement, adP) => _verdictFrom(EMB, spP, agreement, adP);
+const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
+
 const DET_SIZE = 640;
 const CLIP_SIZE = 224;
 const DET_CONF = 0.70;
 const NMS_IOU = 0.70;
 const CROP_PAD = 0.10;
-// The cosine gap below which a top genus is reported as low confidence: below
-// it the classifier has not really separated the winner from the runner-up,
-// whatever the numbers say.
-const GENUS_MARGIN = 0.02;
 const CACHE_NAME = "mosquito-models-v1";
 
 // ---- Confidence gating ----
@@ -47,8 +79,6 @@ const CACHE_NAME = "mosquito-models-v1";
 // oracle. On the 6,264-image cache the gap between a val-fitted threshold and the
 // test oracle is at most 0.41pp across seven coverage levels. More labelled data
 // closed it, which is what these constants were waiting for.
-const SPECIES_CONFIDENCE_FLOOR = 0.373;
-const GENUS_CONFIDENCE_FLOOR = 0.80;
 
 // Whether two views of one photo naming different species costs that photo its
 // species claim.
@@ -83,7 +113,6 @@ const GENUS_CONFIDENCE_FLOOR = 0.80;
 // not free abstention - coverage is unchanged, because a demoted photo still
 // clears GENUS_CONFIDENCE_FLOOR on the rows that earned it - and it is not
 // uniform hesitation, because photos whose views agree answer exactly as before.
-const VIEW_DISAGREEMENT_VETOES_SPECIES = true;
 
 // ---- "This is not a mosquito" ----
 //
@@ -116,7 +145,6 @@ const VIEW_DISAGREEMENT_VETOES_SPECIES = true;
 // give the missing half - the false-positive rate - and turn this into a
 // measured threshold. Until then, treat a "not a mosquito" result as a
 // well-founded guess and the FLOOR as a guess inside it.
-const NON_MOSQUITO_FLOOR = 0.60;
 
 // Models live on Cloudflare R2, reached through the bucket's public development
 // URL. Objects sit at the root of that host - the dev URL serves the one bucket
@@ -304,6 +332,12 @@ const ASYNC = (window.__mosqAsync = {
   // 1.26 GB model. Production never writes it.
   get embeds() { return EMB; },
   set embeds(v) { EMB = v; },
+  // The verdict functions are already bound to this file's EMB by the adapters
+  // above, so a test can drive a layout case with the SHIPPED arithmetic rather
+  // than re-reading the bundle and eval-ing it out - which is what this seam's
+  // predecessor did, and what made it break the moment the source was bundled.
+  verdictFrom,
+  verdictSentence,
   selectPhoto,
   processFiles,
   deletePhoto
@@ -902,73 +936,6 @@ const TEMPERATURE = 2.5;
 // is scored rather than read from the current engine at fuse time, because the
 // engine can be switched while a photo's second view is still in flight, and
 // the fused result must describe the views that actually produced it.
-function localViewScale() {
-  return EMB.logit_scale / TEMPERATURE;
-}
-
-function serverViewScale() {
-  return EMB.logit_scale;
-}
-
-// The adjacent classes - Diptera that a non-expert reads as a mosquito - share
-// the one softmax with the species and the nuisance classes, so "this is a biting
-// midge" competes with "this is a mosquito" on the same numbers rather than
-// through a second, separately-scaled score.
-const ADJACENT_DEFAULT = [];
-
-function adjacentNames() {
-  return EMB.adjacent && EMB.adjacent.length ? EMB.adjacent : ADJACENT_DEFAULT;
-}
-
-function softmaxJoint(emb) {
-  const S = EMB.species.length;
-  const N = EMB.nuisance.length;
-  const AD = adjacentNames().length;
-  const D = EMB.dim;
-  const scale = localViewScale();
-  const spCos = [];
-  const nuCos = [];
-  const adCos = [];
-
-  let s = 0;
-  for (let i = 0; i < S; i++) {
-    let d = 0;
-    for (let k = 0; k < D; k++) d += EMB.species_emb[s + k] * emb[k];
-    s += D;
-    spCos.push(d);
-  }
-  s = 0;
-  for (let i = 0; i < N; i++) {
-    let d = 0;
-    for (let k = 0; k < D; k++) d += EMB.nuisance_emb[s + k] * emb[k];
-    s += D;
-    nuCos.push(d);
-  }
-  s = 0;
-  for (let i = 0; i < AD; i++) {
-    let d = 0;
-    for (let k = 0; k < D; k++) d += EMB.adjacent_emb[s + k] * emb[k];
-    s += D;
-    adCos.push(d);
-  }
-
-  const sims = spCos.concat(nuCos, adCos).map((c) => scale * c);
-  const mx = Math.max(...sims);
-  const ex = sims.map((v) => Math.exp(v - mx));
-  const sum = ex.reduce((a, b) => a + b, 0);
-  const p = ex.map((v) => v / sum);
-
-  const logits = {};
-  EMB.species.forEach((name, i) => { logits[name] = scale * spCos[i]; });
-  return {
-    spP: p.slice(0, S),
-    nuP: p.slice(S, S + N),
-    adP: p.slice(S + N),
-    spCos,
-    logits
-  };
-}
-
 // Group the species posteriors by genus - the first whitespace-delimited word of
 // the label - and report the summed posterior per genus.
 //
@@ -982,39 +949,6 @@ function softmaxJoint(emb) {
 // whenever a complex held a single species - the common case, since most of the
 // label set is one species per complex - and offered no column that said
 // anything the species column did not.
-function genusScores(spP, spCos) {
-  const comp = {};
-  EMB.species.forEach((name, i) => {
-    const k = genusOf(name);
-    comp[k] = (comp[k] || 0) + spP[i];
-  });
-  const ranked = Object.entries(comp).sort((a, b) => b[1] - a[1]);
-
-  const topGenus = ranked[0][0];
-  const secondGenus = ranked.length > 1 ? ranked[1][0] : null;
-  let topCos = -Infinity;
-  let secCos = -Infinity;
-  EMB.species.forEach((name, i) => {
-    const k = genusOf(name);
-    if (k === topGenus && spCos[i] > topCos) topCos = spCos[i];
-    else if (k === secondGenus && spCos[i] > secCos) secCos = spCos[i];
-  });
-
-  const demoted = secondGenus !== null && topCos - secCos < GENUS_MARGIN;
-  const labels = {};
-  ranked.forEach(([k, v]) => { labels[k] = v; });
-  if (demoted) {
-    const winner = ranked[0][0];
-    // The reported label is already a genus, so the hedge is a plain
-    // confidence note rather than a drop to genus level.
-    const demotedLabel = winner + " - low confidence";
-    const val = labels[winner];
-    delete labels[winner];
-    return { labels: { [demotedLabel]: val, ...labels }, demoted: true };
-  }
-  return { labels, demoted: false };
-}
-
 // ---- Multi-view fusion ----
 //
 // One crop is one opinion about what is in the frame, and it is a fallible one:
@@ -1055,115 +989,6 @@ function genusScores(spP, spCos) {
 //
 // With one view this is algebraically identical to that view's own softmax, so
 // there is no separate single-view path to keep in step.
-function fuseViews(viewResults) {
-  const S = EMB.species.length;
-  const names = EMB.species;
-  const V = viewResults.length;
-  if (!V) return null;
-
-  const scale = viewResults[0].scale;
-  if (viewResults.some((v) => v.scale !== scale)) {
-    // Views on different scales cannot be pooled meaningfully, and rather than
-    // produce a number that looks like a fused score but is not one, say so.
-    console.warn("fuseViews: views on different scales, not pooling", viewResults.map((v) => v.scale));
-    return fuseViews([viewResults[0]]);
-  }
-
-  const logSum = new Array(S).fill(0);
-  let logNu = 0;
-  for (const v of viewResults) {
-    for (let i = 0; i < S; i++) logSum[i] += Math.log(Math.max(v.spP[i], 1e-12));
-    logNu += Math.log(Math.max(v.nuTotal, 1e-12));
-  }
-  const mx = Math.max(logNu, ...logSum);
-  const ex = logSum.map((l) => Math.exp(l - mx));
-  const nu = Math.exp(logNu - mx);
-  const sum = ex.reduce((a, b) => a + b, 0) + nu;
-  const spP = ex.map((e) => e / sum);
-  const nuP = [nu / sum];
-
-  // The adjacent classes are pooled the same log-linear way as everything else,
-  // but unlike the nuisance classes they keep their individual identities: the
-  // whole point of having them is to be able to say WHICH non-mosquito it was, so
-  // collapsing them to one number here would throw away the only thing they were
-  // added for. Each view contributes its own adjacent posterior per class, and the
-  // class that survives the pool is the one the views agree on.
-  const adjNames = adjacentNames();
-  const A = adjNames.length;
-  let adP = [];
-  // Only pool the adjacent classes if some view actually scored them. A caller
-  // that passes views without `adP` (a server path, or an embeddings file from
-  // before the classes existed) gets none, and the non-mosquito gate then cannot
-  // fire at all - which is right: it has no evidence to fire on.
-  if (A && viewResults.some((v) => v.adP)) {
-    const logAd = new Array(A).fill(-Infinity);
-    for (const v of viewResults) {
-      for (let i = 0; i < A; i++) {
-        // A view that carries no adjacent posteriors contributes NO mass rather
-        // than a flat share. A flat share would invent an even split of evidence
-        // nobody supplied and could carry the gate on its own.
-        if (!v.adP || !Number.isFinite(v.adP[i])) continue;
-        const l = Math.log(Math.max(v.adP[i], 1e-12));
-        logAd[i] = Number.isFinite(logAd[i]) ? logAd[i] + l : l;
-      }
-    }
-    const mxAd = Math.max(logNu, ...logSum, ...logAd.filter(Number.isFinite));
-    const exAd = logAd.map((l) => (Number.isFinite(l) ? Math.exp(l - mxAd) : 0));
-    const sumAd = logSum.reduce((a, l) => a + Math.exp(l - mxAd), 0)
-      + Math.exp(logNu - mxAd)
-      + exAd.reduce((a, b) => a + b, 0);
-    adP = exAd.map((e) => e / sumAd);
-  }
-
-  // genusScores needs cosine similarities to apply GENUS_MARGIN, and
-  // updatePooling needs logits. Recovering both from the fused posterior is not
-  // an approximation: log p_i = scale * cos_i - logZ, so
-  // (log p_i - log p_best) / scale is exactly cos_i - cos_best, and every
-  // consumer of these two quantities (GENUS_MARGIN's difference, the pooling
-  // card's max-relative score) takes differences. The recovered cosines are
-  // therefore shifted by a constant - best species at 0 - which no consumer can
-  // see, and are otherwise the fused view's real ones.
-  //
-  // The logits below are built from spCos, not from lp: lp is a log-probability
-  // and multiplying one by the logit scale gives numbers ~100x the axis they are
-  // plotted on. scale * spCos is the single-view path's own logit, so a fused
-  // photo's score is on the same scale as an un-fused one's.
-  const lp = spP.map((p) => Math.log(Math.max(p, 1e-12)));
-  const best = Math.max(...lp);
-  const spCos = lp.map((l) => (l - best) / scale);
-
-  const detail = {};
-  const logits = {};
-  names.forEach((n, i) => {
-    detail[n] = spP[i];
-    logits[n] = scale * spCos[i];
-  });
-
-const c = genusScores(spP, spCos);
-  // The gate reads the FUSED posterior, which is the whole point of fusing
-  // before deciding: one view alone is an opinion, the pool of the two is the
-  // photo's score.
-  //
-  // ...and the agreement of the very views that were pooled, which the fused
-  // posterior cannot express: an average of two contradictory opinions is still
-  // an average. Computed once here, from the views in hand, and handed to both
-  // the verdict and the caller - a second caller recomputing it would be a
-  // second disagreement measure, free to drift from the one the gate read.
-  const agreement = viewAgreement(viewResults.map((v) => v.spP), spP);
-  // The per-class non-mosquito posteriors, keyed by the plain-language name, so
-  // the score panel can say WHICH non-mosquito it is without re-deriving the
-  // softmax. A class the embeddings file does not carry is simply absent here and
-  // the non-mosquito state cannot fire, which is what makes the state safe on an
-  // older embeddings file.
-  const adjacentDetail = {};
-  adjacentNames().forEach((fam, i) => {
-    adjacentDetail[(EMB.adjacent_common && EMB.adjacent_common[i]) || fam] = adP[i] || 0;
-  });
-
-  return { labels: c.labels, detail, logits, demoted: c.demoted, spP, nuP, adP, spCos, nViews: V,
-           adjacentDetail, agreement, verdict: verdictFrom(spP, agreement, adP) };
-}
-
 // ---- Genus, and the three-state verdict ----
 //
 // The genus is the first word of the species name, and nothing else. It has to
@@ -1173,28 +998,6 @@ const c = genusScores(spP, spCos);
 // "Anopheles maculipennis complex" - stays inside its genus. Splitting on
 // whitespace first and only then taking the remainder handles that: the epithet
 // keeps its slash and its "complex", and neither is mistaken for a genus.
-function genusOf(name) {
-  const parts = String(name).trim().split(/\s+/);
-  // A one-word label is its own genus. Returning "" there would file every
-  // bare name under a single empty genus, which is worse than saying the name
-  // is the genus it is.
-  return parts[0] || "";
-}
-
-// Index of the genus each species belongs to, rebuilt whenever EMB changes.
-let genusIndexCache = null;
-function speciesGenusIndex() {
-  if (genusIndexCache && genusIndexCache.emb === EMB) return genusIndexCache;
-  const idx = new Map();
-  EMB.species.forEach((name, i) => {
-    const g = genusOf(name);
-    if (!idx.has(g)) idx.set(g, []);
-    idx.get(g).push(i);
-  });
-  genusIndexCache = { emb: EMB, idx };
-  return genusIndexCache;
-}
-
 // What the classifier will claim about one photo, from a single posterior.
 //
 // `spP` is the FUSED species posterior - never a single view's. Gating per view
@@ -1217,78 +1020,6 @@ function speciesGenusIndex() {
 // Returns null-ish fields rather than throwing on an empty posterior, so a
 // malformed score array degrades to "not confident" instead of taking the page
 // down.
-function verdictFrom(spP, agreement, adP) {
-  if (!spP || !spP.length) {
-    return { state: "unsure", genus: null, species: null, topGenusP: 0, topSpeciesP: 0, runnersUp: [] };
-  }
-  const { idx } = speciesGenusIndex();
-  const genP = [];
-  for (const [g, members] of idx) {
-    genP.push([g, members.reduce((a, i) => a + (spP[i] || 0), 0)]);
-  }
-  genP.sort((a, b) => b[1] - a[1]);
-  const [topGenus, topGenusP] = genP[0];
-
-  let topSpecies = 0;
-  for (let i = 1; i < spP.length; i++) if (spP[i] > spP[topSpecies]) topSpecies = i;
-  const topSpeciesP = spP[topSpecies] || 0;
-  const speciesName = EMB.species[topSpecies];
-
-  // The species it leaned toward, inside the genus being named: the claim is
-  // "one of these", so the runner-ups have to be siblings or the sentence would
-  // name a species from another genus.
-  const runnersUp = (idx.get(topGenus) || [])
-    .filter((i) => i !== topSpecies)
-    .sort((a, b) => (spP[b] || 0) - (spP[a] || 0))
-    .map((i) => ({ name: EMB.species[i], p: spP[i] || 0 }));
-
-  // "This is not a mosquito", which is a claim about the photograph and so has
-  // to outrank every species claim rather than sit beside one.
-  //
-  // It is checked FIRST, on the non-mosquito mass alone, and needs the classes to
-  // agree rather than merely to lead: a single view of paper can be a moment's
-  // artefact, but both views landing on a biting midge is the classifier saying
-  // something about the subject and not about the lighting. Measured on the
-  // 6,264-row in-domain cache this costs 0.67% of true mosquitoes, which is why
-  // the mass has to clear a floor rather than merely beat the best species -
-  // the in-domain negative benchmark in
-  // investigations/2026-10-02-mosquito-id/36-adjacent-taxa.md is what a lower
-  // floor would have to be measured against, and it did not exist when this was
-  // written. Neither number here is fitted.
-  if (adP && adP.length) {
-    const nonMosquito = adP.reduce((a, b) => a + b, 0);
-    if (nonMosquito >= NON_MOSQUITO_FLOOR) {
-      let top = 0;
-      for (let i = 1; i < adP.length; i++) if (adP[i] > adP[top]) top = i;
-      return {
-        state: "non-mosquito",
-        genus: null,
-        species: null,
-        topGenusP,
-        topSpeciesP,
-        runnersUp: [],
-        adjacent: adjacentNames()[top],
-        adjacentCommon: (EMB.adjacent_common || [])[top] || adjacentNames()[top],
-        adjacentP: adP[top],
-        nonMosquitoP: nonMosquito
-      };
-    }
-  }
-
-  // A species claim needs the photo's views to have agreed as well as the fused
-  // posterior to be high. The veto demotes into the genus branch below rather
-  // than past it, so whether the photo gets a genus or nothing is still the genus
-  // floor's call and not this one's.
-  const vetoed = Boolean(agreement && !agreement.agree && VIEW_DISAGREEMENT_VETOES_SPECIES);
-  if (!vetoed && topSpeciesP >= SPECIES_CONFIDENCE_FLOOR) {
-    return { state: "species", genus: topGenus, species: speciesName, topGenusP, topSpeciesP, runnersUp };
-  }
-  if (topGenusP >= GENUS_CONFIDENCE_FLOOR) {
-    return { state: "genus", genus: topGenus, species: null, topGenusP, topSpeciesP, runnersUp };
-  }
-  return { state: "unsure", genus: null, species: null, topGenusP, topSpeciesP, runnersUp };
-}
-
 // The species posterior a set of aggregated logits describes, or null if the
 // aggregate carries no usable signal.
 //
@@ -1297,44 +1028,8 @@ function verdictFrom(spP, agreement, adP) {
 // their weighted sum is the pooled posterior. Max-subtracted for overflow: raw
 // logits run to hundreds and exp() of that is Infinity on every species, which
 // would silently turn the whole pool into NaN.
-function pooledPosterior(aggLogits) {
-  const vals = EMB.species.map((sp) => aggLogits[sp]);
-  if (!vals.length || vals.some((v) => !Number.isFinite(v))) return null;
-  const max = Math.max(...vals);
-  const exps = vals.map((v) => Math.exp(v - max));
-  const total = exps.reduce((a, b) => a + b, 0);
-  if (!(total > 0) || !Number.isFinite(total)) return null;
-  return exps.map((e) => e / total);
-}
-
 // The sentence the score panel leads with. It is a claim about the photograph,
 // never about our machinery: there is deliberately no "analysing" state here.
-function verdictSentence(v) {
-  if (!v) return "";
-  if (v.state === "species") return "";
-  // The one state that names what it saw instead of what it did not: the ranking
-  // below it is a list of mosquitoes this photo was not, so the sentence has to
-  // come first and has to be about the subject.
-  if (v.state === "non-mosquito") {
-    const what = v.adjacentCommon || v.adjacent;
-    const pct = Math.round((v.nonMosquitoP || 0) * 100);
-    return `This does not look like a mosquito - it looks like ${what} (${pct}% of the match).`;
-  }
-  if (v.state === "genus") {
-    // "Definitely Aedes - maybe aegypti or albopictus". Two runners-up is enough
-    // to say which way it is torn; more is noise, and the ranking below already
-    // carries every one of them.
-    const names = [v.runnersUp[0], v.runnersUp[1]].filter(Boolean).map(r => {
-      const parts = r.name.trim().split(/\s+/);
-      return parts.length > 1 ? parts.slice(1).join(" ") : r.name;
-    });
-    if (!names.length) return `Definitely ${v.genus}`;
-    if (names.length === 1) return `Definitely ${v.genus} - maybe ${names[0]}`;
-    return `Definitely ${v.genus} - maybe ${names[0]} or ${names[1]}`;
-  }
-  return "Not confident enough to name a genus";
-}
-
 // Do the views of this photo agree on the species, and if not, by how much do
 // the fused top two sit apart? Measured on the benchmark: when the views agree
 // the fused answer is right 94.3% of the time, when they disagree 50.0% - so
@@ -1676,7 +1371,7 @@ async function classifyImage(imgBitmap, filename) {
   let fallback = false;
   if (best) {
     const emb = await clipEmbed(cropCv);
-    const j = softmaxJoint(emb);
+    const j = softmaxJoint(EMB, emb);
     if (Math.max(...j.spP) >= Math.max(...j.nuP)) {
       cropView = { spP: j.spP, nuTotal: j.nuP.reduce((a, b) => a + b, 0), adP: j.adP,
                    scale: localViewScale() };
@@ -1693,7 +1388,7 @@ async function classifyImage(imgBitmap, filename) {
   // The whole frame is always a view: either the second opinion on a crop that
   // passed the gate, or the only view there is.
   const wholeEmb = await clipEmbed(fullCv);
-  const wholeJ = softmaxJoint(wholeEmb);
+  const wholeJ = softmaxJoint(EMB, wholeEmb);
   views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
                adP: wholeJ.adP, scale: localViewScale() });
 
@@ -2539,7 +2234,7 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
 // finished verdict, because the verdict is the fused one.
 async function classifyViewLocal(canvas) {
   const emb = await clipEmbed(canvas);
-  const { spP, nuP, adP } = softmaxJoint(emb);
+  const { spP, nuP, adP } = softmaxJoint(EMB, emb);
   return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), adP, scale: localViewScale() };
 }
 
@@ -3189,7 +2884,7 @@ function applyRoute() {
   window.scrollTo(0, 0);
   // species.js fetches species-data.json once and caches the promise, so
   // repeated navigations cost nothing beyond the render.
-  window.SpeciesPage.render(route.slug, document.getElementById("kb-body"));
+  renderSpeciesPage(route.slug, document.getElementById("kb-body"));
 }
 
 // ---- Initialization & Event Listeners ----
