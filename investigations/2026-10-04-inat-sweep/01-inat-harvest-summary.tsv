@@ -1,0 +1,13 @@
+species	expected_rg	got_obs	photos	usable_after_nd	nd_rejected
+Aedes cinereus	73	73	172	172	0
+Aedes geniculatus	349	349	846	846	0
+Aedes vexans	2418	2418	4454	4454	0
+Anopheles claviger	11	11	30	30	0
+Anopheles maculipennis	0	0	0	0	0
+Anopheles plumbeus	58	58	147	147	0
+Culex pipiens	456	456	971	971	0
+Culex quinquefasciatus	961	961	2131	2131	0
+Culex torrentium	1	1	8	8	0
+Culiseta annulata	1388	1388	2883	2883	0
+Culiseta longiareolata	452	452	1130	1130	0
+Culiseta morsitans	14	14	56	56	0

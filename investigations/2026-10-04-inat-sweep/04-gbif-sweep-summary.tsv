@@ -1,0 +1,16 @@
+species	taxon_key_used	occurrences_seen	with_media	stillimage_count	human_obs_count	downloaded	skipped_too_large	failed	cc0	cc_by	cc_by_nc	other_licence	dedup_within_corpus
+Aedes albopictus	1651430	33652	33652	40818	33140	14788	0	103	24182	1405	8065	0	0
+Aedes koreicus	1652150	297	297	411	296	400	1	0	249	3	45	0	0
+Aedes vexans	1652274	2250	2250	3856	1952	3524	2	0	415	518	1317	0	0
+Aedes cinereus	1651718	70	70	165	65	153	0	0	10	8	52	0	0
+Aedes geniculatus	1651525	331	331	788	314	739	0	0	25	82	224	0	0
+Aedes japonicus	1652212	2736	2736	4685	2652	4549	0	23	953	390	1393	0	0
+Anopheles claviger	1650857	53	53	118	34	90	0	0	7	11	35	0	39
+Anopheles maculipennis	1650731	82	82	95	2	4	0	0	16	63	3	0	7
+Anopheles plumbeus	1650313	121	121	235	94	189	0	0	22	24	75	0	98
+Culex pipiens	1652991	1007	1007	1768	794	1502	0	0	139	340	528	0	0
+Culex quinquefasciatus	1652950	1039	1039	2095	844	1865	0	1	93	222	724	0	0
+Culex torrentium	1653558	5	5	17	5	17	0	0	0	3	2	0	0
+Culiseta annulata	1649565	1891	1891	3599	1851	3483	0	26	110	428	1353	0	1856
+Culiseta longiareolata	1649571	376	376	911	364	883	0	0	7	74	295	0	365
+Culiseta morsitans	1649556	108	108	214	32	128	0	0	4	75	29	0	62
