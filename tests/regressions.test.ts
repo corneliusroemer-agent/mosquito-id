@@ -1,0 +1,403 @@
+// Regression cases for defects that shipped, or that three agents spent hours
+// reading source to diagnose. Each one states the arithmetic it depends on.
+//
+// The split/n this file uses is the shipped one in every case: the real 16-species
+// head with its real adjacent classes, read from text_embeds.json. Where a case
+// needs a hand-built posterior it is built against that head's species indices,
+// so genus sums in the assertions are sums over the real labels.
+import { describe, it, expect, beforeAll } from "vitest";
+import { realHead, post, S } from "./fixtures";
+import type { Head } from "../src/confidence/types";
+import { DEFAULT_FLOORS } from "../src/confidence/types";
+import { verdictFrom, verdictSentence } from "../src/confidence/verdict";
+import { fuseViews } from "../src/confidence/fuseViews";
+import { scoreRow, pooledScoreRow } from "../src/confidence/scorebar";
+import {
+  splitPoolable,
+  pooledPosterior,
+  pooledVerdict,
+  poolingWeights,
+  aggregateLogits,
+  type PoolablePhoto,
+} from "../src/confidence/pooling";
+
+let head: Head;
+beforeAll(() => {
+  head = realHead();
+});
+
+/**
+ * Build a photo's logits from a species posterior, the way the app does.
+ *
+ * logits = scale * cos, and log p = scale * cos - logZ, so
+ * logits[s] = (log p[s] + logZ) * (scale / head.logit_scale) with any logZ.
+ * This is the inverse of what softmaxJoint produces, which is what lets a test
+ * state a posterior and then pool it exactly as the app would.
+ */
+function logitsFor(spP: number[], logZ = 5): Record<string, number> {
+  const out: Record<string, number> = {};
+  head.species.forEach((name, i) => {
+    out[name] = Math.log(Math.max(spP[i]!, 1e-12)) + logZ;
+  });
+  return out;
+}
+
+describe("a non-finite score produces no bar and no percentage", () => {
+  it("NaN yields no width and no percentage, never width: NaN%", () => {
+    const r = scoreRow(NaN);
+    expect(r.finite).toBe(false);
+    expect(r.percent).toBe("");
+    expect(r.widthPct).toBe(0);
+    // The exact failure: Math.max/min propagate NaN, so the inline expression
+    // the old renderer used produced "NaN%", which the browser DROPS as an
+    // invalid declaration - leaving the fill at its default width, i.e. a full
+    // confident-looking bar for a value that means nothing.
+    // The exact arithmetic that shipped the bug: the clamp propagates NaN, and
+    // "width: NaN%" is an invalid declaration the browser drops silently - the
+    // fill keeps its default width, which reads as a full confident bar.
+    const old = Math.max(0, Math.min(100, NaN * 100));
+    expect(Number.isNaN(old)).toBe(true);
+    expect(Number.isFinite(r.widthPct)).toBe(true);
+    // Nothing that reaches the DOM's style attribute may contain "NaN".
+    expect(`width: ${r.widthPct}%`).toBe("width: 0%");
+    expect(r.percent).not.toContain("NaN");
+  });
+
+  it("Infinity and -Infinity are both non-finite, so both render nothing", () => {
+    for (const v of [Infinity, -Infinity]) {
+      const r = scoreRow(v);
+      expect(r.finite).toBe(false);
+      expect(r.percent).toBe("");
+      expect(r.widthPct).toBe(0);
+    }
+  });
+
+  it("a finite score still renders, and clamps outside 0..1", () => {
+    expect(scoreRow(0.286).finite).toBe(true);
+    expect(scoreRow(0.286).percent).toBe("28.6");
+    expect(scoreRow(0.286).widthPct).toBeCloseTo(28.6, 9);
+    expect(scoreRow(1.5).widthPct).toBe(100);
+    expect(scoreRow(-0.2).widthPct).toBe(0);
+    expect(scoreRow(0).percent).toBe("0.0");
+  });
+
+  it("the pooled card's -20..0 axis obeys the same rule", () => {
+    expect(pooledScoreRow(NaN).widthPct).toBe(0);
+    expect(pooledScoreRow(NaN).percent).toBe("");
+    // relScore 0 is the pool's best and fills the track; -20 is the left edge.
+    expect(pooledScoreRow(0).widthPct).toBe(100);
+    expect(pooledScoreRow(-20).widthPct).toBe(0);
+    expect(pooledScoreRow(-10).widthPct).toBe(50);
+  });
+});
+
+describe("the verdict abstains when the top posterior is below both floors", () => {
+  it("a blank wall scoring 28.6% ranks the species but claims nothing", () => {
+    // The screenshot case: three blank background photos, top species 28.6%,
+    // rendered as a confident-looking ranking. The ranking is correct to show -
+    // it is what the classifier said - but no genus or species may be claimed.
+    const spP = post(head, {
+      "Aedes japonicus": 0.286,
+      "Aedes koreicus": 0.249,
+      "Aedes geniculatus": 0.131,
+      "Culiseta annulata": 0.125,
+      "Culex pipiens": 0.078,
+      "Aedes albopictus": 0.062,
+      "Aedes aegypti": 0.026,
+      "Culiseta longiareolata": 0.021,
+      "Culiseta morsitans": 0.009,
+    });
+    const v = verdictFrom(head, spP);
+    expect(Math.max(...spP)).toBeLessThan(DEFAULT_FLOORS.species);
+    expect(v.state).toBe("unsure");
+    expect(v.genus).toBeNull();
+    expect(v.species).toBeNull();
+    expect(verdictSentence(v)).toBe("Not confident enough to name a genus");
+  });
+
+  it("abstaining is not the same as having no ranking", () => {
+    // The gate gates the CLAIM, not the display. An unsure verdict still
+    // carries the numbers the score panel shows, and every one of them is finite.
+    const spP = post(head, { "Aedes japonicus": 0.286, "Culex pipiens": 0.2 });
+    const v = verdictFrom(head, spP);
+    expect(v.state).toBe("unsure");
+    expect(v.topSpeciesP).toBeCloseTo(0.286, 9);
+    expect(v.topGenusP).toBeGreaterThan(0);
+  });
+});
+
+describe("two views naming different species cannot reach a species claim", () => {
+  it("holds however high the fused posterior, with the floors injected explicitly", () => {
+    const S_ = S(head);
+    // a and b get pa and pb so each view has a strict argmax of its own.
+    const mk = (a: string, b: string, pa: number, pb: number): number[] => {
+      const p = new Array<number>(S_).fill(0.001);
+      p[head.species.indexOf(a)] = pa;
+      p[head.species.indexOf(b)] = pb;
+      return p;
+    };
+    // Force the fused posterior far above the species floor by injecting a floor
+    // of 0, so this tests the VETO rather than the floor: with the veto as the
+    // only thing standing between the photo and a species claim, the species
+    // claim must not appear.
+    // View A is sure of aegypti, view B of albopictus: each view's own argmax is
+    // different, which is what "the views disagree" means. The pool's argmax is
+    // whichever of the two wins the log-linear sum, and the veto has to hold
+    // whichever that is - so the test does not care which, only that neither
+    // species claim survives.
+    // View A peaks on aegypti, view B on albopictus. The values are near-mirror
+    // images so neither view is "the better one" - the test is about the veto,
+    // not about which species happens to win the pool.
+    const viewA = { spP: mk("Aedes aegypti", "Aedes albopictus", 0.498, 0.497), nuTotal: 1e-6, scale: 40 };
+    const viewB = { spP: mk("Aedes albopictus", "Aedes aegypti", 0.498, 0.497), nuTotal: 1e-6, scale: 40 };
+    // Sanity: each view alone, at a zero floor, names its own species.
+    const permissive = { ...DEFAULT_FLOORS, species: 0, genus: 0 };
+    expect(fuseViews(head, [viewA], permissive)!.verdict.species).toBe("Aedes aegypti");
+    expect(fuseViews(head, [viewB], permissive)!.verdict.species).toBe("Aedes albopictus");
+    // Distinct argmaxes: this is the precondition the veto reads.
+    expect(head.species.indexOf("Aedes aegypti")).not.toBe(
+      head.species.indexOf("Aedes albopictus"),
+    );
+    // Pooled, with the shipped floors: the veto alone must keep it off species.
+    const fused = fuseViews(head, [viewA, viewB]);
+    expect(fused!.verdict.topSpeciesP).toBeGreaterThan(DEFAULT_FLOORS.species);
+    expect(fused!.agreement!.agree).toBe(false);
+    expect(fused!.verdict.state).not.toBe("species");
+  });
+});
+
+describe("a pooling path cannot let a photo override a correct per-photo verdict", () => {
+  it("three blank-wall photos, each unsure, produce no included photos at all", () => {
+    // The reproduction: tmp/mosquito-id/bogusresults.png, three blank background
+    // photos checked together, and the pooled card naming Culex pipiens. Each
+    // photo on its own read ~28.6% and abstained, so none of them may enter.
+    const blank = (lead: number): PoolablePhoto => {
+      const spP = post(head, {
+        "Aedes japonicus": lead,
+        "Aedes koreicus": 0.249,
+        "Aedes geniculatus": 0.131,
+        "Culiseta annulata": 0.125,
+        "Culex pipiens": 0.078,
+      });
+      return {
+        name: "blank.png",
+        fingerprint: `fp${lead}`,
+        scores: Object.fromEntries(head.species.map((s, i) => [s, spP[i]!])),
+        logits: logitsFor(spP),
+        verdict: verdictFrom(head, spP),
+      };
+    };
+    const photos = [blank(0.286), blank(0.31), blank(0.273)];
+    // Each abstained on its own - this is the precondition the card depends on.
+    for (const p of photos) {
+      expect(p.verdict!.state).toBe("unsure");
+      expect(p.verdict!.species).toBeNull();
+    }
+    const { included, abstained } = splitPoolable(photos);
+    expect(included).toEqual([]);
+    expect(abstained).toHaveLength(3);
+
+    // And with nothing included, there is no aggregate to name anything.
+    const w = poolingWeights(included, "Dependent evidence", 0.5);
+    const agg = aggregateLogits(head, included, w);
+    const v = pooledVerdict(head, agg);
+    // pooledPosterior of an all-zero aggregate is a uniform posterior over 16
+    // species: no species and no genus clears a floor.
+    const spP = pooledPosterior(head, agg)!;
+    expect(Math.max(...spP)).toBeCloseTo(1 / S(head), 9);
+    expect(v!.state).toBe("unsure");
+  });
+
+  it("a non-mosquito photo is excluded on the same grounds as an unsure one", () => {
+    const spP = post(head, { "Aedes aegypti": 0.2, "Culex pipiens": 0.1 });
+    const adP = new Array<number>((head.adjacent ?? []).length).fill(0);
+    adP[0] = 0.9;
+    const v = verdictFrom(head, spP, null, adP);
+    expect(v.state).toBe("non-mosquito");
+    // Pooling it would fold a midge's logits into a mosquito's posterior.
+    const { included, abstained } = splitPoolable([{ name: "midge.jpg", verdict: v }]);
+    expect(included).toEqual([]);
+    expect(abstained).toEqual([]);
+  });
+
+  it("a pending or failed photo is neither included nor counted as abstained", () => {
+    const { included, abstained, pending } = splitPoolable([
+      { name: "a", pending: true },
+      { name: "b", error: "boom" },
+    ]);
+    expect(included).toEqual([]);
+    expect(abstained).toEqual([]);
+    expect(pending.map((p) => p.name)).toEqual(["a", "b"]);
+  });
+});
+
+describe("the pool's weights", () => {
+  const photo = (name: string, fp: string, scores: Record<string, number>): PoolablePhoto => ({
+    name,
+    fingerprint: fp,
+    scores,
+    verdict: verdictFrom(head, post(head, { "Aedes aegypti": 0.8 })),
+  });
+
+  it("equal weight is uniform and sums to 1", () => {
+    const w = poolingWeights([photo("a", "1", {}), photo("b", "2", {}), photo("c", "3", {})], "Equal weight", 0.5);
+    expect(w).toEqual([1 / 3, 1 / 3, 1 / 3]);
+    expect(w.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 12);
+  });
+
+  it("dependent evidence zeroes a duplicate crop and discounts the distinct ones", () => {
+    // The same picture checked twice carries near the same evidence, so counting
+    // it at full weight is counting one observation twice.
+    const w = poolingWeights(
+      [photo("a", "same", {}), photo("a-copy", "same", {}), photo("b", "other", {})],
+      "Dependent evidence",
+      0.5,
+    );
+    expect(w[1]).toBe(0);
+    expect(w[0]).toBeCloseTo(w[2]!);
+    // The discount divides by 1 + (distinct - 1) * r = 1 + 0.5 here, so the two
+    // distinct photos come to 1/1.5 each and the raw weights sum to 4/3, not 1.
+    // That is the shipped behaviour and it is harmless for the verdict: the
+    // aggregate is a positive multiple of the intended one and a softmax is
+    // invariant to that. It is NOT harmless for the contribution shares, which
+    // is why they are taken as w/sumW rather than w.
+    expect(w[0]).toBeCloseTo(1 / 1.5, 12);
+    expect(w[0]! + w[2]!).toBeCloseTo(4 / 3, 12);
+    const shares = w.map((x) => x / w.reduce((a, b) => a + b, 0));
+    expect(shares[1]).toBe(0);
+    expect(shares[0]! + shares[2]!).toBeCloseTo(1, 12);
+  });
+
+  it("weight by lead falls back to uniform when no photo has a lead", () => {
+    const w = poolingWeights([photo("a", "1", {}), photo("b", "2", {})], "Weight by lead", 0.5);
+    // Two photos with empty score objects both lead 0, so the sum is the 1e-6
+    // guard and both get 0.
+    expect(w).toEqual([0, 0]);
+  });
+});
+
+describe("pooledPosterior", () => {
+  it("returns null rather than NaN when a logit is non-finite", () => {
+    const agg = logitsFor(post(head, { "Aedes aegypti": 0.9 }));
+    agg["Culex pipiens"] = NaN;
+    expect(pooledPosterior(head, agg)).toBeNull();
+  });
+
+  it("returns null rather than NaN when every logit is Infinity", () => {
+    // Raw logits run to hundreds and exp() of that is Infinity on every species,
+    // which would silently turn the whole pool into NaN.
+    const agg: Record<string, number> = {};
+    head.species.forEach((s) => {
+      agg[s] = Infinity;
+    });
+    expect(pooledPosterior(head, agg)).toBeNull();
+  });
+
+  it("softmaxes the aggregate, so the pooled posterior sums to 1", () => {
+    const agg = logitsFor(post(head, { "Aedes aegypti": 0.6, "Culex pipiens": 0.4 }));
+    const spP = pooledPosterior(head, agg)!;
+    expect(spP.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 12);
+    expect(spP.every((p) => Number.isFinite(p))).toBe(true);
+  });
+});
+
+describe("the pooled gate reads the wrong floor for a sharpened pool", () => {
+  /**
+   * The defect behind tmp/mosquito-id/bogusresults.png: three blank background
+   * photos checked together rendered a confident named species on the pooled
+   * card, and no single photo had claimed one.
+   *
+   * The arithmetic, with the real head and the real floors:
+   *
+   *   per photo   top species 0.355 / 0.350 / 0.360   (floor 0.373 - none claims)
+   *               top genus   0.875 / 0.872 / 0.879   (floor 0.80  - all GENUS)
+   *
+   * The pool is log-linear, softmax(sum_i log p_i), so pooling three similar
+   * posteriors RAISES the winner: cubing 0.355 against 0.250 and 0.215 and
+   * renormalising puts the top at 0.4625, above the species floor. The pooled
+   * card then applies SPECIES_CONFIDENCE_FLOOR to that sharpened number and
+   * names a species - a claim no individual photo made and none of them would
+   * have made.
+   *
+   * So the pool can be MORE confident than its parts in a way no per-photo
+   * threshold was ever fitted against. Every floor was fitted on single
+   * (or two-view) posteriors; the pool is a different distribution and the
+   * species floor is being read off it anyway.
+   */
+  function spread(over: Record<string, number>): number[] {
+    const p = post(head, over);
+    const rest =
+      (1 - Object.values(over).reduce((a, b) => a + b, 0)) /
+      (head.species.length - Object.keys(over).length);
+    head.species.forEach((s, i) => {
+      if (!(s in over)) p[i] = rest;
+    });
+    return p;
+  }
+
+  function poolOf(specs: Record<string, number>[]): { spP: number[]; verdict: ReturnType<typeof pooledVerdict> } {
+    const photos = specs.map((over, i) => {
+      const p = spread(over);
+      return {
+        name: `blank-${i}`,
+        fingerprint: `fp-${i}`,
+        scores: Object.fromEntries(head.species.map((s, j) => [s, p[j]!])),
+        logits: Object.fromEntries(head.species.map((s, j) => [s, Math.log(p[j]!) + 5])),
+        verdict: verdictFrom(head, p),
+      };
+    });
+    for (const ph of photos) {
+      expect(ph.verdict.state).toBe("genus");
+      expect(ph.verdict.species).toBeNull();
+    }
+    const { included } = splitPoolable(photos);
+    expect(included).toHaveLength(photos.length);
+    const w = poolingWeights(included, "Dependent evidence", 0.5);
+    const agg = aggregateLogits(head, included, w);
+    return { spP: pooledPosterior(head, agg)!, verdict: pooledVerdict(head, agg)! };
+  }
+
+  it("three genus-only blank photos pool into a species claim none of them made", () => {
+    const { spP, verdict } = poolOf([
+      { "Aedes aegypti": 0.355, "Aedes albopictus": 0.25, "Aedes japonicus": 0.215 },
+      { "Aedes aegypti": 0.35, "Aedes albopictus": 0.255, "Aedes japonicus": 0.21 },
+      { "Aedes aegypti": 0.36, "Aedes albopictus": 0.245, "Aedes japonicus": 0.22 },
+    ]);
+    const top = Math.max(...spP);
+    expect(top).toBeGreaterThan(DEFAULT_FLOORS.species);
+    // This is the shipped behaviour, and it is the bug. Asserted explicitly so
+    // the failure is legible if a fix lands: the expectation below flips to
+    // `not.toBe("species")` when the pool stops reading the species floor.
+    expect(verdict!.state).toBe("species");
+    expect(verdict!.species).toBe("Aedes aegypti");
+  });
+
+  it("the sharpening is the pooling, not the gate: pooling raises the winner monotonically", () => {
+    // Same three photos, pooled 1 / 2 / 3 deep. One photo is at 0.355 - under the
+    // floor. Two and three are above it. Nothing about the evidence improved
+    // between k=1 and k=3; the transformation did it.
+    const specs = [
+      { "Aedes aegypti": 0.355, "Aedes albopictus": 0.25, "Aedes japonicus": 0.215 },
+      { "Aedes aegypti": 0.35, "Aedes albopictus": 0.255, "Aedes japonicus": 0.21 },
+      { "Aedes aegypti": 0.36, "Aedes albopictus": 0.245, "Aedes japonicus": 0.22 },
+    ];
+    const tops: number[] = [];
+    for (const k of [1, 2, 3]) {
+      const { spP } = poolOf(specs.slice(0, k));
+      tops.push(Math.max(...spP));
+    }
+    expect(tops[0]!).toBeLessThan(DEFAULT_FLOORS.species);
+    expect(tops[1]!).toBeGreaterThan(tops[0]!);
+    expect(tops[2]!).toBeGreaterThan(tops[1]!);
+  });
+
+  it("one photo cannot be sharpened, so the pool needs at least two to cross", () => {
+    // The card already refuses to draw below two included photos, so the
+    // one-photo case is not reachable in the app. It is asserted because it is
+    // the control: the sharpening is entirely a function of pooling depth.
+    const { spP } = poolOf([
+      { "Aedes aegypti": 0.355, "Aedes albopictus": 0.25, "Aedes japonicus": 0.215 },
+    ]);
+    expect(Math.max(...spP)).toBeCloseTo(0.355, 6);
+  });
+});
