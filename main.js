@@ -424,7 +424,7 @@ async function initEngine() {
 
   // Probe server /api/health
   try {
-    const res = await fetch("/api/health", { signal: AbortSignal.timeout(2000) });
+    const res = await fetch("api/health", { signal: AbortSignal.timeout(2000) });
     if (res.ok) {
       const data = await res.json();
       serverAvailable = true;
@@ -435,25 +435,12 @@ async function initEngine() {
     serverAvailable = false;
   }
 
-  // Preference: URL query param > localStorage > device default. fp16 is skipped
-  // while it is unavailable, so a stale saved choice falls through instead of 404ing.
-  //
-  // INT8 is never a default: onnxruntime-web has no int8 WebGPU kernels, so the
-  // session silently falls back to WASM CPU and runs an order of magnitude slower.
-  //
-  // Between the two GPU models, fp16 (1.25 GB) is the better classifier but a
-  // poor default on a phone, where the download alone dominates. Prefer B/16
-  // (172 MB) when the device asks to save data, reports a slow connection, has
-  // little memory, or is primarily touch-driven; fp16 everywhere else. An
-  // explicit choice in the dropdown or ?engine= always wins over this.
-  const prefersSmallModel = () => {
-    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-    if (conn && (conn.saveData || /^(slow-)?[23]g$/.test(conn.effectiveType || ""))) return true;
-    if (navigator.deviceMemory && navigator.deviceMemory <= 4) return true;
-    return window.matchMedia("(pointer: coarse)").matches &&
-           window.matchMedia("(max-width: 820px)").matches;
-  };
-  const defaultEngine = FP16_AVAILABLE && !prefersSmallModel() ? "webgpu-fp16" : "webgpu-b16";
+  // Preference: URL query param > localStorage > default. fp16 is skipped while
+  // it is unavailable, so a stale saved choice falls through instead of 404ing.
+  // fp16 is the default: it stays on the GPU and is the most accurate. INT8 is
+  // never the default - onnxruntime-web has no int8 WebGPU kernels, so the session
+  // silently falls back to WASM CPU and runs an order of magnitude slower.
+  const defaultEngine = "webgpu-fp16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
   const savedEngine = localStorage.getItem("mosquito_engine");
@@ -1210,11 +1197,7 @@ function renderActivePhoto() {
   const cropEmpty = document.getElementById("crop-empty");
   const zoomedActiveBox = document.getElementById("zoomed-active-crop-box");
 
-  // Draw whenever there is a context canvas. Reverting to the full photo sets
-  // cropBox = null and manual_full_photo = true while still populating
-  // contextCanvas with the whole image, so gating on cropBox showed the
-  // "full picture used" placeholder over an image that was available.
-  if (p.contextCanvas) {
+  if (p.cropBox && !p.fallback && !p.manual_full_photo && p.contextCanvas) {
     surfaceZoomed.style.width = "100%";
     surfaceZoomed.style.height = "100%";
     contextImg.src = p.contextCanvas.toDataURL("image/jpeg", 0.9);
@@ -1225,7 +1208,7 @@ function renderActivePhoto() {
     cropEmpty.style.display = "none";
 
     // Draw where the crop sits within the context region
-    if (zoomedActiveBox && p.contextBox && p.cropBox) {
+    if (zoomedActiveBox && p.contextBox) {
       const [cx1, cy1, cx2, cy2] = p.cropBox;
       const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
       const ctx_w = ctx_x2 - ctx_x1;
@@ -1242,10 +1225,6 @@ function renderActivePhoto() {
       zoomedActiveBox.style.width = `${w}%`;
       zoomedActiveBox.style.height = `${h}%`;
       zoomedActiveBox.style.display = "block";
-    } else if (zoomedActiveBox) {
-      // Showing the whole photo: no crop, so no box to outline. The else branch
-      // that used to hide it no longer runs for this case.
-      zoomedActiveBox.style.display = "none";
     }
   } else {
     contextImg.style.display = "none";
@@ -1266,11 +1245,13 @@ function renderActivePhoto() {
     const commonLabel = meta ? ` <span class="species-common">(${escapeHtml(meta.common)})</span>` : "";
     const vectorLabel = meta?.vectors ? `<span class="species-vectors">Vector: ${escapeHtml(meta.vectors)}</span>` : "";
     const wikiLink = meta?.wiki ? `<a href="${meta.wiki}" target="_blank" rel="noopener" class="species-wiki" title="Wikipedia">🔗</a>` : "";
-    // Species name links out to the standalone KB page for that species.
-    // Relative href so it survives the /mosquito-id/ subpath deployment.
+    // Species name links to the species guide, which is a route of this same
+    // document (#/species/<slug>) rather than a second page: the browser only
+    // changes the hash, so going back restores this photo, crop and score list
+    // untouched instead of re-running the model.
     const speciesSlug = name.toLowerCase().replace(/\s+/g, "-");
     const kbLink = meta
-      ? `<a class="species-kb-link" href="species.html?s=${encodeURIComponent(speciesSlug)}">${escapeHtml(name)}</a>`
+      ? `<a class="species-kb-link" href="#/species/${encodeURIComponent(speciesSlug)}">${escapeHtml(name)}</a>`
       : `<span>${escapeHtml(name)}</span>`;
     item.innerHTML = `
       <div class="score-item-header">
@@ -1758,9 +1739,57 @@ function escapeHtml(str) {
   }[s]));
 }
 
+// ---- Router ----
+//
+// Hash routes, not history.pushState with clean paths. The site is deployed at
+// /mosquito-id/ as plain static files on GitHub Pages, with no rewrite rules:
+// a clean path such as /mosquito-id/species/aedes-albopictus is a 404 on
+// refresh and for anyone the link is shared with, because Pages looks for a
+// file of that name. Everything the router needs is after the '#', which the
+// server never sees, so deep links and reloads work with no server config.
+//
+// The classifier's DOM is never rebuilt, only hidden. That is the whole of the
+// state preservation: previews[], selectedIndex, the crop boxes, the rendered
+// scores and the loaded ONNX sessions all keep living in memory and in the
+// document across a navigation, so nothing has to be serialised or restored.
+
+const CLASSIFIER_TITLE = document.title;
+
+function parseRoute() {
+  const hash = location.hash.replace(/^#/, "");
+  const m = hash.match(/^\/species(?:\/(.*))?$/);
+  if (!m) return { view: "classifier" };
+  return { view: "species", slug: m[1] ? decodeURIComponent(m[1]) : "" };
+}
+
+function showClassifier() {
+  document.querySelector(".app-container").classList.remove("route-off");
+  document.getElementById("kb-view").classList.add("route-off");
+  document.title = CLASSIFIER_TITLE;
+}
+
+function applyRoute() {
+  const route = parseRoute();
+  if (route.view === "classifier") {
+    showClassifier();
+    return;
+  }
+  const app = document.querySelector(".app-container");
+  const kb = document.getElementById("kb-view");
+  app.classList.add("route-off");
+  kb.classList.remove("route-off");
+  window.scrollTo(0, 0);
+  // species.js fetches species-data.json once and caches the promise, so
+  // repeated navigations cost nothing beyond the render.
+  window.SpeciesPage.render(route.slug, document.getElementById("kb-body"));
+}
+
 // ---- Initialization & Event Listeners ----
 window.addEventListener("DOMContentLoaded", () => {
   setupCropSurfaces();
+
+  window.addEventListener("hashchange", applyRoute);
+  applyRoute();
 
   const dropzone = document.getElementById("dropzone");
   const fileInput = document.getElementById("file-input");

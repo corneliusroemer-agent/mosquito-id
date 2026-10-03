@@ -4,76 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Species · Mosquito ID</title>
-<style>
-:root {
-    --color-accent: #f97316;
-    --color-accent-hover: #ea580c;
-    --color-accent-subdued: rgba(249, 115, 22, 0.15);
-    --body-text-color: #0f172a;
-    --body-text-color-subdued: #64748b;
-    --background-fill-primary: #ffffff;
-    --background-fill-secondary: #f8fafc;
-    --background-fill-tertiary: #f1f5f9;
-    --border-color-primary: #e2e8f0;
-    --radius-sm: 4px;
-    --radius-md: 8px;
-    --radius-lg: 12px;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --body-text-color: #f1f5f9;
-      --body-text-color-subdued: #94a3b8;
-      --background-fill-primary: #0b0f19;
-      --background-fill-secondary: #1e293b;
-      --background-fill-tertiary: #334155;
-      --border-color-primary: #334155;
-    }
-  }
-
-  
-  /* Species KB prototype. Self-contained: no build step, no framework, no
-     dependency on the classifier's JS. All content comes from
-     species-data.json, one file for all species. */
-    body { margin: 0; padding: 0;
-         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-         color: var(--body-text-color); background: var(--background-fill-primary);
-         line-height: 1.5; }
-  .kb { max-width: 720px; margin: 0 auto; padding: 32px 20px 80px; }
-  .kb-back { font-size: 14px; color: var(--color-accent); text-decoration: none; }
-  .kb-eyebrow { font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
-                color: var(--body-text-color-subdued); margin: 24px 0 2px; }
-  .kb-title { font-size: 32px; margin: 0 0 4px; font-style: italic; }
-  .kb-common { font-size: 17px; color: var(--body-text-color-subdued); margin: 0 0 18px; }
-  .kb-lead { font-size: 17px; line-height: 1.6; }
-  .kb-h { font-size: 13px; letter-spacing: .06em; text-transform: uppercase;
-          color: var(--body-text-color-subdued); margin: 28px 0 8px;
-          border-top: 1px solid var(--border-color-primary); padding-top: 12px; }
-  .kb-facts { display: grid; grid-template-columns: 130px 1fr; gap: 8px 16px;
-              font-size: 15px; margin: 0; }
-  .kb-facts dt { color: var(--body-text-color-subdued); }
-  .kb-facts dd { margin: 0; }
-  .kb-notes { font-style: italic; color: var(--body-text-color-subdued); }
-  .kb-viz { display: inline-block; padding: 2px 8px; border-radius: 999px;
-            font-size: 13px; font-weight: 600;
-            background: color-mix(in srgb, var(--color-accent) 14%, transparent);
-            color: var(--color-accent); }
-  .kb-viz.none { background: var(--border-color-primary); color: var(--body-text-color-subdued); }
-  .kb-local { font-size: 15px; line-height: 1.6; }
-  .kb-links a { margin-right: 14px; font-size: 14px; }
-  .kb-more { margin-top: 40px; }
-  .kb-more a { display: block; padding: 9px 12px; margin: 6px 0; border-radius: 6px;
-               text-decoration: none; color: inherit;
-               border: 1px solid var(--border-color-primary); }
-  .kb-more b { font-style: italic; font-weight: 600; }
-  .kb-more span { color: var(--body-text-color-subdued); font-size: 13px; }
-  .kb-error { color: #b45309; }
-</style>
+<meta http-equiv="refresh" content="0; url=index.html#/species/">
+<link rel="canonical" href="index.html#/species/">
 </head>
 <body>
-<div class="kb">
-  <a class="kb-back" href="index.html">&larr; Back to the classifier</a>
-  <main id="kb-body"><p class="kb-lead">Loading…</p></main>
-</div>
-<script src="species.js"></script>
+<!-- The species guide is a route of the classifier (#/species/<slug>), not a
+     page of its own, so that reading a species and going back keeps the photo,
+     the crop and the scores. This file stays only to carry old ?s= links:
+     every species.html?s=<slug> URL that was shared, bookmarked or cached
+     lands here and is replaced by the equivalent hash route. `replace`, not
+     `assign`, so the redirect does not become a history entry the user has to
+     press back through twice. -->
+<p>Redirecting to the <a href="index.html#/species/">species guide</a>&hellip;</p>
+<script>
+  (function () {
+    var slug = new URLSearchParams(location.search).get("s") || "";
+    // Relative to this file, which sits next to index.html - works unchanged
+    // under the /mosquito-id/ subpath.
+    var target = "index.html" + (slug ? "#/species/" + slug : "#/species");
+    // <noscript> users still get there via the meta refresh above.
+    location.replace(target);
+  })();
+</script>
 </body>
 </html>

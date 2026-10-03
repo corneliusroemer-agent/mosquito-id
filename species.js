@@ -1,22 +1,43 @@
-/* Species KB renderer — prototype.
+/* Species guide renderer.
  *
- * One page, one JSON file, for all species. Adding a species is a new object in
+ * A route of the classifier shell (#/species/<slug>), not a page of its own:
+ * main.js's router calls SpeciesPage.render(slug), and the container it writes
+ * into is hidden or shown rather than torn down. Keeping the classifier DOM
+ * alive across a navigation is what preserves the photo, the crop and the
+ * scores - nothing here reads or restores app state.
+ *
+ * One JSON file, one renderer, all species. Adding a species is a new object in
  * species-data.json (plus its SPECIES_META entry in main.js so the app can
- * classify to it) — there is no per-species file to generate and no step to run
+ * classify to it) - there is no per-species file to generate and no step to run
  * before the site is live.
  */
 (function () {
   "use strict";
 
-  // The classifier collapses several names onto one label (SPECIES_CANONICAL),
-  // so accept either the slug or the scientific name.
-  function requestedKey() {
-    var q = new URLSearchParams(location.search);
-    return q.get("s") || location.hash.replace(/^#/, "") || "";
+  // species-data.json is a static file that never changes without a deploy, so
+  // the fetch is made once per page load and shared by every later navigation.
+  // Re-fetching per route change would make each back-and-forth slower than
+  // loading the KB as its own page in the first place.
+  var docPromise = null;
+  function loadDoc() {
+    if (!docPromise) {
+      docPromise = fetch("species-data.json")
+        .then(function (r) {
+          if (!r.ok) throw new Error("species-data.json " + r.status);
+          return r.json();
+        })
+        .catch(function (err) {
+          docPromise = null; // let a later navigation retry a transient failure
+          throw err;
+        });
+    }
+    return docPromise;
   }
 
-  function slugify(name) {
-    return name.toLowerCase().replace(/\s+/g, "-");
+  // In-app route for a species. A bare fragment href needs no click handler:
+  // the browser sets location.hash and the router's hashchange listener runs.
+  function link(slug) {
+    return "#/species/" + slug;
   }
 
   function esc(s) {
@@ -78,38 +99,46 @@
     if (links.length) {
       h.push('<h2 class="kb-h">Compare with</h2><div class="kb-more">');
       links.forEach(function (x) {
-        h.push('<a href="species.html?s=' + esc(x.slug) + '"><b>' + esc(x.name) + "</b> <span>" + esc(x.common) + "</span></a>");
+        h.push('<a href="' + link(esc(x.slug)) + '"><b>' + esc(x.name) + "</b> <span>" + esc(x.common) + "</span></a>");
       });
       h.push("</div>");
     }
     return h.join("\n");
   }
 
-  function show(html, docTitle) {
-    document.getElementById("kb-body").innerHTML = html;
+  function indexHtml(all) {
+    var list = all.map(function (x) {
+      return '<a href="' + link(esc(x.slug)) + '">' + esc(x.name) + "</a>";
+    }).join(", ");
+    return '<h1 class="kb-title">Species guide</h1><p class="kb-lead">' + all.length +
+           " species have a page here. Pick one:</p><p>" + list + "</p>";
+  }
+
+  function show(container, html, docTitle) {
+    container.innerHTML = html;
     document.title = docTitle;
   }
 
-  fetch("species-data.json")
-    .then(function (r) {
-      if (!r.ok) throw new Error("species-data.json " + r.status);
-      return r.json();
-    })
-    .then(function (doc) {
+  /* key may be a slug or, because the classifier collapses several names onto
+     one label (SPECIES_CANONICAL), the scientific name itself. An empty or
+     unknown key renders the all-species index rather than a blank page. */
+  function render_(key, container) {
+    var target = container || document.getElementById("kb-body");
+    if (!target) return Promise.resolve();
+    return loadDoc().then(function (doc) {
       var all = doc.species;
-      var key = requestedKey();
       var sp = all.filter(function (x) { return x.slug === key || x.name === key; })[0];
       if (!sp) {
-        var list = all.map(function (x) { return '<a href="species.html?s=' + esc(x.slug) + '">' + esc(x.name) + "</a>"; }).join(", ");
-        show('<h1 class="kb-title">Species guide</h1><p class="kb-lead">' + all.length +
-             " species have a page here. Pick one:</p><p>" + list + "</p>", "Species guide · Mosquito ID");
+        show(target, indexHtml(all), "Species guide · Mosquito ID");
         return;
       }
-      show(render(sp, all), sp.name + " (" + sp.common + ") · Mosquito ID");
-    })
-    .catch(function (err) {
-      show('<h1 class="kb-title">Species guide</h1><p class="kb-lead kb-error">Could not load ' +
+      show(target, render(sp, all), sp.name + " (" + sp.common + ") · Mosquito ID");
+    }).catch(function (err) {
+      show(target, '<h1 class="kb-title">Species guide</h1><p class="kb-lead kb-error">Could not load ' +
            "species-data.json (" + esc(err.message) + ").</p>",
            "Species guide · Mosquito ID");
     });
+  }
+
+  window.SpeciesPage = { render: render_, link: link };
 })();
