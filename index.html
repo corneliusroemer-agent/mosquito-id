@@ -234,24 +234,15 @@
   .btn-primary:hover { background: var(--color-accent-hover); }
   .btn-sm { padding: 4px 12px; font-size: 12px; }
 
-/* The bulk actions sit beside the strip rather than above it, so the strip
-     keeps its full width and the row never changes height when the buttons
-     appear. */
-  .strip-toolbar {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    min-width: 0;
-  }
-  .strip-toolbar .thumbnail-strip { flex: 1 1 auto; min-width: 0; }
+/* The bulk actions live in the header row beside the paging arrows, not in the
+     strip's own row. In the strip's row they took horizontal space from the one
+     element that needs it - they narrowed the strip until its tiles scrolled out
+     of sight. The strip's row now holds nothing but the strip, and takes the
+     card's full width. */
   .strip-actions {
     display: flex;
-    flex: 0 0 auto;
     flex-wrap: wrap;
     gap: 6px;
-  }
-  @media (max-width: 640px) {
-    .strip-toolbar { flex-direction: column; align-items: stretch; }
   }
   /* Combined result panel */
   .combined-card {
@@ -354,15 +345,30 @@
   .data-table th { color: var(--body-text-color-subdued); font-weight: 500; }
 
   /* Gallery section */
+  /* Wraps rather than overflowing: at a narrow viewport the bulk actions and the
+     arrows drop to a second line of the header rather than pushing the card's
+     contents sideways. The wrap is allowed only when the row genuinely cannot
+     fit - at every width where it can, the header is one line. */
   .gallery-nav {
     display: flex;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 8px 12px;
     align-items: center;
     margin-bottom: 10px;
     font-size: 14px;
   }
   .gallery-nav span { color: var(--body-text-color-subdued); }
-  .gallery-arrows { margin-left: auto; display: flex; gap: 6px; }
+  /* The actions and the arrows travel together, so a wrap takes both to the
+     second line and never strands the arrows on their own. */
+  .gallery-nav-actions {
+    margin-left: auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+  .gallery-arrows { display: flex; gap: 6px; }
 
   .thumbnail-strip {
     display: flex;
@@ -1110,20 +1116,20 @@
     <div class="gallery-nav">
       <strong>Photos</strong>
       <span id="gallery-counter">1 / 10</span>
-      <div class="gallery-arrows">
-        <button id="btn-prev" class="btn btn-sm" aria-label="Previous photo">←</button>
-        <button id="btn-next" class="btn btn-sm" aria-label="Next photo">→</button>
+      <div class="gallery-nav-actions">
+        <div class="strip-actions">
+          <button id="btn-select-all" class="btn btn-sm" type="button" aria-label="Check all photos that can be pooled">Select all</button>
+          <button id="btn-select-none" class="btn btn-sm" type="button" aria-label="Uncheck all photos">Select none</button>
+          <button id="btn-delete-all" class="btn btn-sm" type="button" aria-label="Delete all photos">Delete all</button>
+        </div>
+        <div class="gallery-arrows">
+          <button id="btn-prev" class="btn btn-sm" aria-label="Previous photo">←</button>
+          <button id="btn-next" class="btn btn-sm" aria-label="Next photo">→</button>
+        </div>
       </div>
     </div>
-    
-    <div class="strip-toolbar">
-      <div id="thumbnail-strip" class="thumbnail-strip"></div>
-      <div class="strip-actions">
-        <button id="btn-select-all" class="btn btn-sm" type="button" aria-label="Check all photos that can be pooled">Select all</button>
-        <button id="btn-select-none" class="btn btn-sm" type="button" aria-label="Uncheck all photos">Select none</button>
-        <button id="btn-delete-all" class="btn btn-sm" type="button" aria-label="Delete all photos">Delete all</button>
-      </div>
-    </div>
+
+    <div id="thumbnail-strip" class="thumbnail-strip"></div>
     <p class="hint">Select a photo to inspect it. Check photos of the same mosquito to combine their results.</p>
 
     <div class="viewer-grid">
