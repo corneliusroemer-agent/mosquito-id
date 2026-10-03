@@ -48,6 +48,33 @@ const PORT = Number(
   process.env.MOSQ_E2E_PORT ??
     CORS_LOCAL_PORTS[process.cwd().length % CORS_LOCAL_PORTS.length],
 );
+// An unlisted port fails as an apparent hang rather than an error, so it is
+// rejected at config load where the message can be read.
+if (!CORS_LOCAL_PORTS.includes(PORT as (typeof CORS_LOCAL_PORTS)[number])) {
+  throw new Error(
+    `MOSQ_E2E_PORT=${PORT} is not on the model bucket's CORS allowlist ` +
+      `(${CORS_LOCAL_PORTS.join(", ")}). Every model fetch would be blocked and ` +
+      `tier 2 would hang rather than fail. Adding a port needs the Cloudflare ` +
+      `token and Cornelius's go-ahead.`,
+  );
+}
+// 127.0.0.1, not localhost: the allowlist distinguishes the two hosts, and an
+// unlisted host gets no CORS header at all.
+const HOST = "127.0.0.1";
+
+// Point the suite at a deployed build instead of a local one. The deployed origin
+// is on the model's CORS allowlist, so tier 2 works against it with no proxy - and
+// it is the only run that exercises what users actually get, rather than the same
+// bundle behind local headers.
+//
+// The local webServer is switched off entirely in this mode rather than started
+// and ignored: `reuseExistingServer: false` means a stale `dist/` would otherwise
+// be a live alternative, and a test pointed at the deployed URL must not be able
+// to fall back to it.
+const BASE_URL = process.env.MOSQ_E2E_BASE_URL;
+if (BASE_URL && !/^https?:\/\//.test(BASE_URL)) {
+  throw new Error(`MOSQ_E2E_BASE_URL must be an http(s) URL, got "${BASE_URL}"`);
+}
 
 // Headless chromium on this box has a SwiftShader WebGPU adapter with no
 // `shader-f16`. All three registered engines ship FP16 or INT8 weights, so every
@@ -103,15 +130,17 @@ export default defineConfig({
   timeout: 45_000,
   expect: { timeout: 10_000 },
   use: {
-    baseURL: `http://localhost:${PORT}`,
+    baseURL: BASE_URL ?? `http://${HOST}:${PORT}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   projects,
-  webServer: {
-    command: `npm run build && npx vite preview --port ${PORT} --strictPort`,
-    url: `http://localhost:${PORT}`,
-    reuseExistingServer: false,
-    timeout: 180_000,
-  },
+  webServer: BASE_URL
+    ? undefined
+    : {
+        command: `npm run build && npx vite preview --host ${HOST} --port ${PORT} --strictPort`,
+        url: `http://${HOST}:${PORT}`,
+        reuseExistingServer: false,
+        timeout: 180_000,
+      },
 });

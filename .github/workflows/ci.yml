@@ -1,0 +1,62 @@
+name: CI
+
+# The deploy workflow (`pages.yml`) builds and uploads on every push to main. It
+# runs no test, so a merge that broke the app shipped silently - and a
+# YAML indentation error once made that deploy exit in 0s, which is the failure
+# `actionlint` below exists to catch before it can reach the workflow at all.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Lints every workflow file, not just this one. A malformed step in a
+      # workflow that runs on main is a deploy that fails in seconds with no
+      # explanation, so it is checked before anything is merged.
+      - name: Lint the workflow files
+        uses: docker://rhysd/actionlint:1.7.7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` first so the lockfile decides the versions: a test that passed
+      # against one tree and not another is worse than no test.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      # Tier 1. `test:e2e` excludes `strip-index-stability.spec.ts`, which is
+      # committed RED as the reproduction for the wrong-tile bug recorded in
+      # docs/THUMBNAIL-STRIP-SPEC.md R5. A known failure with a known cause, not
+      # a flaky one.
+      - name: Install the browser
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E, tier 1 (the fast contract)
+        run: npm run test:e2e
+
+      # Tier 2 is NOT run here. It downloads ~180 MB and needs the model host to
+      # allow the runner's origin, which it currently does not - see
+      # e2e/tier2/README.md for the two measured blockers and how to run it:
+      #     npm run test:e2e:model
