@@ -57,7 +57,10 @@ const serverViewScale = () => _serverViewScale(EMB);
 const adjacentNames = () => _adjacentNames(EMB);
 const genusScores = (spP) => _genusScores(EMB, spP);
 const fuseViews = (viewResults) => _fuseViews(EMB, viewResults);
-const verdictFrom = (spP, agreement, adP) => _verdictFrom(EMB, spP, agreement, adP);
+// `nuP` is forwarded because the non-mosquito gate reads the nuisance block, not
+// only the adjacent one: without it this adapter silently drops the evidence for
+// "this photo is a wall", which is the case the gate exists to catch.
+const verdictFrom = (spP, agreement, adP, nuP) => _verdictFrom(EMB, spP, agreement, adP, undefined, nuP);
 const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
 const pooledVerdictOf = (aggLogits, included, aggAdjLogits) => _pooledVerdictOf(EMB, aggLogits, included, aggAdjLogits);
 

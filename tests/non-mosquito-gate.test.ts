@@ -175,12 +175,12 @@ describe("the fix does not make the app abstain from everything", () => {
 
 describe("the extracted gate", () => {
   it("is a pure function of the two blocks and the floors", () => {
-    const g = nonMosquitoGate(head, adjPost(head, { 3: 0.9 }), nuPost(head, { 2: 0.01 }), DEFAULT_FLOORS);
+    const g = nonMosquitoGate(head, adjPost(head, { 3: 0.9 }), nuPost(head, { 2: 0.01 }), DEFAULT_FLOORS)!;
     expect(g.kind).toBe("adjacent");
     expect(g.name).toBe(head.adjacent![3]);
     expect(g.p).toBeCloseTo(0.9, 9);
 
-    const n = nonMosquitoGate(head, adjPost(head, { 3: 0.01 }), nuPost(head, { 2: 0.9 }), DEFAULT_FLOORS);
+    const n = nonMosquitoGate(head, adjPost(head, { 3: 0.01 }), nuPost(head, { 2: 0.9 }), DEFAULT_FLOORS)!;
     expect(n.kind).toBe("nuisance");
     expect(n.name).toBe(head.nuisance![2]);
 
@@ -194,8 +194,8 @@ describe("the extracted gate", () => {
     // its own number for that reason; this pins that the two are independent.
     expect(DEFAULT_FLOORS.nuisance).not.toBe(DEFAULT_FLOORS.nonMosquito);
     const loose = { ...DEFAULT_FLOORS, nonMosquito: 0.05 };
-    const adHigh = nonMosquitoGate(head, adjPost(head, { 0: 0.9 }), [], loose);
-    expect(adHigh!.kind).toBe("adjacent");
+    const adHigh = nonMosquitoGate(head, adjPost(head, { 0: 0.9 }), [], loose)!;
+    expect(adHigh.kind).toBe("adjacent");
     // Raising only the nuisance floor cannot affect an adjacent-only verdict.
     const tight = { ...DEFAULT_FLOORS, nuisance: 0.99 };
     expect(nonMosquitoGate(head, adjPost(head, { 0: 0.9 }), [], tight)!.kind).toBe("adjacent");
