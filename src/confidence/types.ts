@@ -74,6 +74,17 @@ export interface Verdict {
   topSpeciesP: number;
   /** Siblings of `genus`, descending. Empty whenever no genus is named. */
   runnersUp: RunnerUp[];
+  /**
+   * The most likely species within `genus`, set whenever a genus is named -
+   * including when `species` is null.
+   *
+   * `species` is the CLAIM: it is null in the genus state because no species
+   * cleared its floor. `topSpecies` is the LEADER, and the genus sentence needs
+   * it: `runnersUp` holds every sibling except the winner, so a sentence built
+   * from `runnersUp` names the second and third place and never the most likely
+   * species, which reads as though the top three were a tie.
+   */
+  topSpecies?: string;
   /** Adjacent class name, in the non-mosquito state only. */
   adjacent?: string;
   /** Plain-language adjacent name, in the non-mosquito state only. */
