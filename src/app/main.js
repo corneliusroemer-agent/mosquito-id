@@ -24,7 +24,20 @@ import { verdictFrom as _verdictFrom, verdictSentence } from "../confidence/verd
 import { pooledPosterior as _pooledPosterior,
          splitPoolable, poolingWeights, aggregateLogits, aggregateAdjacent,
          pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
-import { render as renderSpeciesPage } from "./speciesPage";
+import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
+import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
+         FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, resolveModelUrl } from "./modelConfig";
+import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
+import { createLogger } from "./telemetry";
+import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
+import { decodeDets, letterbox, selectDetection } from "./detector";
+import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
+         fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
+import { downloadCSV, renderResultsTable } from "./resultsTable";
+import { fetchWithCache } from "./modelFetch";
+import { loadSamplePhotos, prefetchSamples } from "./samples";
+import { initRouter } from "./router";
+import { updatePooling } from "./poolingPanel";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -43,12 +56,6 @@ const verdictFrom = (spP, agreement, adP) => _verdictFrom(EMB, spP, agreement, a
 const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
 const pooledVerdictOf = (aggLogits, included, aggAdjLogits) => _pooledVerdictOf(EMB, aggLogits, included, aggAdjLogits);
 
-const DET_SIZE = 640;
-const CLIP_SIZE = 224;
-const DET_CONF = 0.70;
-const NMS_IOU = 0.70;
-const CROP_PAD = 0.10;
-const CACHE_NAME = "mosquito-models-v1";
 
 // ---- Confidence gating ----
 //
@@ -149,152 +156,8 @@ const CACHE_NAME = "mosquito-models-v1";
 // measured threshold. Until then, treat a "not a mosquito" result as a
 // well-founded guess and the FLOOR as a guess inside it.
 
-// Models live on Cloudflare R2, reached through the bucket's public development
-// URL. Objects sit at the root of that host - the dev URL serves the one bucket
-// directly, with no bucket-name path segment.
-//
-// Two hosts were ruled out first. GitHub Releases serve no
-// Access-Control-Allow-Origin on either redirect hop, so a browser cannot fetch
-// them cross-origin at all. HuggingFace works, but a free account caps at 1 GB
-// per repository and bioclip_2_5_fp16.onnx is 1207 MB, so it cannot hold the
-// full set however the models are split across repos.
-const MODEL_BASE_URL =
-  "https://pub-2bbf73b4e93d40c9af925724fbd48d51.r2.dev/";
-const FP16_AVAILABLE = true;
 
-const SPECIES_META = {
-  "Aedes albopictus": {
-    common: "Asian tiger mosquito", wiki: "https://en.wikipedia.org/wiki/Aedes_albopictus",
-    vectors: "Dengue, Chikungunya, Zika",
-    range: "Originally East Asia; now globally invasive in tropical and temperate regions",
-    activity: "Aggressive daytime biter, peak at dawn and dusk",
-    hosts: "Primarily humans, also birds and other mammals",
-    notes: "Black-and-white striped legs. Key invasive species spreading through global trade."
-  },
-  "Aedes aegypti": {
-    common: "Yellow fever mosquito", wiki: "https://en.wikipedia.org/wiki/Aedes_aegypti",
-    vectors: "Dengue, Zika, Yellow fever, Chikungunya",
-    range: "Tropical and subtropical regions worldwide, originated in Africa",
-    activity: "Daytime biter, breeds in small artificial containers",
-    hosts: "Strongly anthropophilic (prefers humans)",
-    notes: "Lyre-shaped white markings on thorax. Primary vector for urban dengue and Zika."
-  },
-  "Aedes japonicus": {
-    common: "Asian bush mosquito", wiki: "https://en.wikipedia.org/wiki/Aedes_japonicus",
-    vectors: "West Nile virus, Japanese encephalitis (potential)",
-    range: "Native to East Asia; invasive in Europe and North America",
-    activity: "Daytime biter, breeds in rock pools and artificial containers",
-    hosts: "Mammals and birds",
-    notes: "Large dark mosquito with golden-brown scaling. Tolerates cooler climates than most Aedes."
-  },
-  "Aedes koreicus": {
-    common: "Korean mosquito", wiki: "https://en.wikipedia.org/wiki/Aedes_koreicus",
-    vectors: "Japanese encephalitis, Dirofilaria (potential)",
-    range: "Native to Korea/Japan; invasive in parts of Europe",
-    activity: "Daytime biter, similar ecology to Ae. japonicus",
-    hosts: "Mammals",
-    notes: "Very similar to Ae. japonicus — reliably distinguished only by molecular methods."
-  },
-  "Aedes vexans": {
-    common: "Inland floodwater mosquito", wiki: "https://en.wikipedia.org/wiki/Aedes_vexans",
-    vectors: "Rift Valley fever, encephalitides (minor)",
-    range: "Cosmopolitan — one of the most widespread mosquitoes globally",
-    activity: "Aggressive crepuscular and nocturnal biter after flooding",
-    hosts: "Mammals including humans, cattle, horses",
-    notes: "Eggs survive desiccation for years. Mass emergence after floods or heavy rain."
-  },
-  "Aedes geniculatus": {
-    common: "Tree-hole mosquito", wiki: "https://en.wikipedia.org/wiki/Aedes_geniculatus",
-    vectors: "Potential Zika and Chikungunya vector (lab competence)",
-    range: "Europe and parts of western Asia, forest-dwelling",
-    activity: "Daytime biter in shaded woodland areas",
-    hosts: "Mammals in forested habitats",
-    notes: "Breeds in tree holes and natural containers. Large, dark species with banded legs."
-  },
-  "Aedes cinereus": {
-    common: "Woodland mosquito", wiki: "https://en.wikipedia.org/wiki/Aedes_cinereus",
-    vectors: "Tularemia, arboviruses (minor)",
-    range: "Northern Europe, Asia, and North America",
-    activity: "Crepuscular biter in marshy woodland areas",
-    hosts: "Mammals and birds",
-    notes: "Common in northern latitudes. Breeds in temporary woodland pools in spring."
-  },
-  "Culex pipiens": {
-    common: "Northern house mosquito", wiki: "https://en.wikipedia.org/wiki/Culex_pipiens",
-    vectors: "West Nile virus, Usutu virus, lymphatic filariasis",
-    range: "Temperate regions worldwide, highly urban-adapted",
-    activity: "Nocturnal biter, overwinters as mated females",
-    hosts: "Primarily birds (bridge vector to humans for West Nile virus)",
-    notes: "Most common mosquito in temperate urban areas. Key bridge vector for West Nile virus."
-  },
-  "Culex torrentium": {
-    common: "Woodland Culex", wiki: "https://en.wikipedia.org/wiki/Culex_torrentium",
-    vectors: "West Nile virus, Sindbis virus",
-    range: "Europe and parts of Asia",
-    activity: "Nocturnal, similar ecology to Cx. pipiens",
-    hosts: "Primarily birds",
-    notes: "Nearly identical to Cx. pipiens — reliably distinguished only by molecular methods."
-  },
-  "Culex quinquefasciatus": {
-    common: "Southern house mosquito", wiki: "https://en.wikipedia.org/wiki/Culex_quinquefasciatus",
-    vectors: "West Nile virus, St. Louis encephalitis, lymphatic filariasis",
-    range: "Tropical and subtropical regions worldwide",
-    activity: "Nocturnal biter, breeds in polluted water",
-    hosts: "Birds and mammals including humans",
-    notes: "Major nuisance mosquito in the tropics. Tolerates highly polluted water."
-  },
-  "Culiseta annulata": {
-    common: "Banded mosquito", wiki: "https://en.wikipedia.org/wiki/Culiseta_annulata",
-    vectors: "Minor vector for avian malaria",
-    range: "Europe, North Africa, western Asia",
-    activity: "Year-round in mild climates, bites at dusk/dawn",
-    hosts: "Birds and mammals including humans (painful bite)",
-    notes: "One of the largest European mosquitoes. Distinctive banded legs and spotted wings."
-  },
-  "Culiseta morsitans": {
-    common: "Northern Culiseta", wiki: "https://en.wikipedia.org/wiki/Culiseta_morsitans",
-    vectors: "Eastern equine encephalitis virus (in North America)",
-    range: "Northern Europe and North America",
-    activity: "Crepuscular, breeds in semi-permanent woodland pools",
-    hosts: "Primarily birds and larger mammals",
-    notes: "Large mosquito in forested and rural habitats. Early-season species."
-  },
-  "Culiseta longiareolata": {
-    common: "Mediterranean Culiseta", wiki: "https://en.wikipedia.org/wiki/Culiseta_longiareolata",
-    vectors: "Not a significant disease vector",
-    range: "Mediterranean region, Africa, Middle East, South Asia",
-    activity: "Breeds in containers, rarely bites humans",
-    hosts: "Primarily birds; very rarely bites mammals",
-    notes: "Very common in Mediterranean countries. Often found in neglected swimming pools."
-  },
-  "Anopheles maculipennis": {
-    common: "European malaria mosquito", wiki: "https://en.wikipedia.org/wiki/Anopheles_maculipennis",
-    vectors: "Malaria (historical primary vector in Europe)",
-    range: "Europe and western Asia",
-    activity: "Nocturnal biter, breeds in clean sunlit water",
-    hosts: "Mammals including humans and cattle",
-    notes: "Species complex of ~11 siblings. Historically responsible for European malaria."
-  },
-  "Anopheles claviger": {
-    common: "European Anopheles", wiki: "https://en.wikipedia.org/wiki/Anopheles_claviger",
-    vectors: "Malaria (potential, minor historical role)",
-    range: "Europe and western Asia",
-    activity: "Nocturnal, breeds in shaded vegetated water",
-    hosts: "Mammals",
-    notes: "Prefers cooler, shaded habitats unlike An. maculipennis."
-  },
-  "Anopheles plumbeus": {
-    common: "Tree-hole Anopheles", wiki: "https://en.wikipedia.org/wiki/Anopheles_plumbeus",
-    vectors: "Malaria (confirmed autochthonous cases in Germany, Netherlands)",
-    range: "Europe, from UK to Mediterranean",
-    activity: "Aggressive day and night biter near forests",
-    hosts: "Mammals including humans",
-    notes: "Breeds exclusively in tree holes. Responsible for rare autochthonous malaria in Europe."
-  }
-};
 
-const CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073];
-const CLIP_STD = [0.26862954, 0.26130258, 0.27577711];
 
 let currentEngine = "webgpu-fp16";
 let serverAvailable = false;
@@ -313,6 +176,15 @@ let previews = [];
 let includedIndices = new Set();
 let selectedIndex = 0;
 let isProcessingBatch = false;
+
+// Bound here rather than at each call site: `currentEngine`, `serverAvailable`
+// and the selection are all read at event time, so the logger takes them as
+// thunks and stays correct across an engine switch mid-session.
+const sendLog = createLogger({
+  engine: () => currentEngine,
+  photo: () => previews[selectedIndex]?.name || null,
+  serverAvailable: () => serverAvailable
+});
 
 // ---- Crop: displayed state vs. computed state ----
 //
@@ -352,8 +224,8 @@ const ASYNC = (window.__mosqAsync = {
   // them would not be measuring it.
   renderThumbnails,
   renderActivePhoto,
-  updatePooling,
-  renderResultsTable
+  updatePooling: () => updatePooling(EMB, previews, includedIndices),
+  renderResultsTable: () => renderResultsTable(previews)
 });
 (function countFrames() {
   requestAnimationFrame(() => { ASYNC.frames++; countFrames(); });
@@ -423,260 +295,13 @@ function markComputeFailed(p, err) {
 // can tell "nothing to do" from "the model failed".
 class Superseded extends Error {}
 
-// ---- Telemetry Logging ----
-function sendLog(action, data = {}) {
-  const payload = {
-    action,
-    engine: currentEngine,
-    photo: previews[selectedIndex]?.name || null,
-    timestamp: new Date().toISOString(),
-    ...data
-  };
-  console.log(`[CLIENT LOG] ${action}:`, payload);
-  // Only the Cloud GPU deployment has an /api/log endpoint. Posting to it from
-  // the static site just produces a failed request, which the browser reports as
-  // a console error no matter how the promise is handled.
-  if (!serverAvailable) return;
-  fetch("/api/log", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  }).catch(() => {});
-}
-
-// A canvas -> data: URL memo, keyed on the canvas object.
-//
-// Every render re-encodes the same canvases: `renderThumbnails` runs after each
-// photo lands and encodes every tile's crop, and `renderActivePhoto` encodes the
-// selected photo's full and context canvases. `toDataURL` is a synchronous
-// JPEG encode of a full-resolution frame - tens of milliseconds each - on the
-// thread that also has to paint. With ten photos that is over a second of
-// blocking work per render, spread across the batch, which is what a frozen UI
-// during classification actually is.
-//
-// The cache is keyed on the canvas identity rather than the photo, because a
-// photo's canvas is *replaced* whenever its pixels change (a new decode, a crop
-// release, a manual re-crop). A fresh canvas is a fresh cache entry, so a stale
-// encode cannot outlive the pixels it was made from - the invalidation is
-// structural rather than something a call site has to remember to do. Entries
-// die with their canvas.
-const canvasUrlCache = new WeakMap();
-function canvasUrl(cv, quality) {
-  if (!cv) return null;
-  const key = quality;
-  let byQuality = canvasUrlCache.get(cv);
-  if (!byQuality) {
-    byQuality = new Map();
-    canvasUrlCache.set(cv, byQuality);
-  }
-  let url = byQuality.get(key);
-  if (url === undefined) {
-    url = cv.toDataURL("image/jpeg", quality);
-    byQuality.set(key, url);
-  }
-  return url;
-}
-
-// Setting an <img>'s src to the value it already holds is cheap to write and
-// not free to run: the element drops the decoded frame and re-decodes. The
-// caches above make the encode free, but only skipping the assignment makes the
-// *decode* free, so the same-string check is what actually keeps a re-render
-// from costing anything.
-function setImgSrc(img, url) {
-  if (url && img.getAttribute("src") === url) return;
-  if (url) img.setAttribute("src", url);
-  else img.removeAttribute("src");
-}
-
-function dataUrlToCanvas(dataUrl) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const cv = document.createElement("canvas");
-      cv.width = img.naturalWidth || img.width;
-      cv.height = img.naturalHeight || img.height;
-      const ctx = cv.getContext("2d");
-      ctx.drawImage(img, 0, 0);
-      resolve(cv);
-    };
-    img.onerror = reject;
-    img.src = dataUrl;
-  });
-}
 
 
-// Resolve a model path: prefix with MODEL_BASE_URL for remote hosting
-function resolveModelUrl(path) {
-  if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  return MODEL_BASE_URL + path;
-}
 
-// ---- Shared progress slot ----
-// #progress-slot is in the DOM from first paint at a constant height, so these
-// are the only things that change: its visibility, the message, the bar. Model
-// loading and photo processing both draw here rather than each owning a box
-// that had to be hidden and shown - a box appearing or disappearing is what
-// pushed the rest of the page around. Ownership keeps a late model-load
-// completion from clearing a batch that is still running.
-let progressOwner = null;
 
-// `text` is deliberately ignored. Progress is shown by the bar alone: a
-// sentence describing what the app is currently doing is not information about
-// the photo, and it was asked to go. Only a failure is worth a sentence, and
-// that goes through setProgressError.
-//
-// `meter` is the exception, and it is not a sentence: it is the transfer
-// measurement - bytes arrived and time remaining - which is the number the user
-// needs to decide whether to wait. It goes to its own element so that no
-// caller can turn the slot back into a status line by accident.
-function setProgress(owner, text, pct, meter) {
-  const slot = document.getElementById("progress-slot");
-  if (!slot) return;
-  progressOwner = owner;
-  const msg = document.getElementById("progress-msg");
-  const meterEl = document.getElementById("progress-meter");
-  const fill = document.getElementById("progress-fill");
-  if (msg) msg.textContent = "";
-  if (meterEl) meterEl.textContent = meter || "";
-  if (fill) {
-    slot.classList.toggle("indeterminate", pct === null || pct === undefined);
-    fill.style.width = `${Math.max(0, Math.min(100, pct || 0))}%`;
-  }
-  slot.style.visibility = "visible";
-  const cancel = document.getElementById("btn-cancel-batch");
-  if (cancel) cancel.disabled = owner !== "batch";
-}
 
-// A failure is worth a sentence: unlike "loading" it describes something the
-// user has to act on.
-function setProgressError(text) {
-  const msg = document.getElementById("progress-msg");
-  if (msg) msg.textContent = text;
-}
-
-function clearProgress(owner) {
-  if (owner !== undefined && owner !== progressOwner) return;
-  const slot = document.getElementById("progress-slot");
-  if (!slot) return;
-  progressOwner = null;
-  slot.style.visibility = "hidden";
-  slot.classList.remove("indeterminate");
-  const fill = document.getElementById("progress-fill");
-  if (fill) fill.style.width = "0%";
-  const meterEl = document.getElementById("progress-meter");
-  if (meterEl) meterEl.textContent = "";
-  const cancel = document.getElementById("btn-cancel-batch");
-  if (cancel) { cancel.disabled = true; cancel.onclick = null; }
-}
-
-// Bytes moved so far, the total when the server sent one, and the time the
-// transfer started - enough for a rate, and from a rate an ETA.
-function makeTransferProgress(label) {
-  const start = performance.now();
-  let lastAt = start;
-  let lastGot = 0;
-  // `done` bypasses the throttle: a cache hit reports completion exactly once,
-  // and throttling a single sample is what left a returning user watching a
-  // bar that never left 0%.
-  return (got, total, done) => {
-    const now = performance.now();
-    if (!done && now - lastAt < 500) return;   // rate needs a window, not a sample
-    const rate = done ? 0 : ((got - lastGot) / (now - lastAt)) * 1000;
-    lastAt = now;
-    lastGot = got;
-    const known = total > 0;
-    const mb = (x) => (x / 1048576).toFixed(0);
-    let text = known ? `${label}: ${mb(got)} / ${mb(total)} MB` : label;
-    if (done) {
-      text += " · ready";
-    } else if (rate > 0) {
-      text += ` · ${mb(rate)} MB/s`;
-      if (known) {
-        const secs = Math.round((total - got) / rate);
-        text += secs > 0 ? ` · ${secs}s left` : " · done";
-      }
-    }
-    setProgress("model", text, known ? (100 * got) / total : null, text);
-  };
-}
-
-// ---- Model Loading with Persistent CacheStorage ----
-async function fetchWithProgress(url, onBytes) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
-  const total = Number(resp.headers.get("content-length")) || 0;
-  const reader = resp.body.getReader();
-  const chunks = [];
-  let got = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    got += value.length;
-    if (onBytes) onBytes(got, total);
-  }
-  const out = new Uint8Array(got);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  if (onBytes) onBytes(got, total || got, true);   // final sample: the bar reaches 100%
-  return out.buffer;
-}
-
-async function fetchWithCache(url, onBytes) {
-  if ("caches" in window) {
-    try {
-      const cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(url);
-      if (cached) {
-        console.log(`[CacheStorage] HIT for ${url}`);
-        sendLog("cache_hit", { url });
-        const size = Number(cached.headers.get("content-length")) || 0;
-        if (onBytes) onBytes(size || 1, size || 1, true);
-        return await cached.arrayBuffer();
-      }
-      console.log(`[CacheStorage] MISS for ${url}, fetching from network...`);
-      sendLog("cache_miss", { url });
-      const buf = await fetchWithProgress(url, onBytes);
-      const toStore = new Response(buf.slice(0), {
-        headers: { "Content-Type": "application/octet-stream", "Content-Length": String(buf.byteLength) }
-      });
-      await cache.put(url, toStore);
-      return buf;
-    } catch (err) {
-      console.warn("CacheStorage read/write warning:", err);
-    }
-  }
-  return await fetchWithProgress(url, onBytes);
-}
 
 const embedsCache = {};
-
-const WEBGPU_MODELS = {
-  "webgpu-b16": {
-    path: "bioclip_visual_b16_fp16.onnx",
-    embedsPath: "text_embeds_b16.json",
-    label: "BioCLIP B/16 (FP16 · 172 MB)",
-    name: "BioCLIP B/16 FP16",
-    size: 172725427
-  },
-  "webgpu-fp16": {
-    path: "bioclip_2_5_fp16.onnx",
-    embedsPath: "text_embeds.json",
-    label: "BioCLIP 2.5 H/14 (FP16 · 1.2 GB)",
-    name: "BioCLIP 2.5 H/14 FP16",
-    size: 1259593728
-  },
-  "webgpu-int8": {
-    path: "bioclip_2_5_int8.onnx",
-    embedsPath: "text_embeds.json",
-    label: "BioCLIP 2.5 H/14 (INT8 · 609 MB)",
-    name: "BioCLIP 2.5 H/14 INT8",
-    size: 638205897
-  }
-};
 
 async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   window.modelsReady = false;
@@ -706,7 +331,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   if (!sessDet) {
     setProgress("model", "Loading detector (YOLO11n)…", 0);
     const detPath = resolveModelUrl("yolo11n-mosquito-det-640.onnx");
-    const detBuf = await fetchWithCache(detPath, makeTransferProgress("Detector (YOLO11n)"));
+    const detBuf = await fetchWithCache(detPath, makeTransferProgress("Detector (YOLO11n)"), sendLog);
     try {
       sessDet = await ort.InferenceSession.create(detBuf, { executionProviders: ["webgpu"] });
       detEP = "webgpu";
@@ -724,7 +349,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     clipEP = clipSessions[engineKey].ep;
   } else {
     setProgress("model", `Loading ${clipCfg.name}…`, 0);
-    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), makeTransferProgress(clipCfg.name));
+    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), makeTransferProgress(clipCfg.name), sendLog);
 
     let sess = null;
     let ep = "wasm";
@@ -846,97 +471,6 @@ async function initEngine() {
 
 const loadModels = () => initEngine();
 
-// ---- Client-Side Inference Helpers ----
-function chwFromCanvas(cv) {
-  const d = cv.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, cv.width, cv.height).data;
-  const n = cv.width * cv.height;
-  const out = new Float32Array(3 * n);
-  for (let i = 0; i < n; i++) {
-    out[i] = d[4 * i] / 255;
-    out[n + i] = d[4 * i + 1] / 255;
-    out[2 * n + i] = d[4 * i + 2] / 255;
-  }
-  return out;
-}
-
-function letterbox(imgCv) {
-  const w = imgCv.width;
-  const h = imgCv.height;
-  const r = Math.min(DET_SIZE / w, DET_SIZE / h);
-  const dw = Math.round(w * r);
-  const dh = Math.round(h * r);
-  const dx = (DET_SIZE - dw) / 2;
-  const dy = (DET_SIZE - dh) / 2;
-
-  const cv = document.createElement("canvas");
-  cv.width = DET_SIZE;
-  cv.height = DET_SIZE;
-  const cx = cv.getContext("2d");
-  cx.fillStyle = "#727272";
-  cx.fillRect(0, 0, DET_SIZE, DET_SIZE);
-  cx.drawImage(imgCv, 0, 0, w, h, Math.round(dx), Math.round(dy), dw, dh);
-
-  return { tensor: new ort.Tensor("float32", chwFromCanvas(cv), [1, 3, DET_SIZE, DET_SIZE]), r, dx, dy };
-}
-
-function decodeDets(outTensor, r, dx, dy) {
-  const data = outTensor.data;
-  const dims = outTensor.dims;
-  const nc = dims[1] - 4;
-  const N = dims[2];
-  const cand = [];
-
-  for (let i = 0; i < N; i++) {
-    let best = -1;
-    let bc = 0;
-    for (let c = 0; c < nc; c++) {
-      const s = data[(4 + c) * N + i];
-      if (s > bc) { bc = s; best = c; }
-    }
-    if (bc < DET_CONF) continue;
-    const cx = data[i];
-    const cy = data[N + i];
-    const w = data[2 * N + i];
-    const h = data[3 * N + i];
-    cand.push({
-      cls: best,
-      conf: bc,
-      box: [(cx - w / 2 - dx) / r, (cy - h / 2 - dy) / r, (cx + w / 2 - dx) / r, (cy + h / 2 - dy) / r]
-    });
-  }
-  cand.sort((a, b) => b.conf - a.conf);
-  const kept = [];
-  for (const c of cand) {
-    if (kept.length >= 300) break;
-    if (kept.every((k) => k.cls !== c.cls || iou(k.box, c.box) <= NMS_IOU)) kept.push(c);
-  }
-  return kept;
-}
-
-function iou(a, b) {
-  const ix1 = Math.max(a[0], b[0]), iy1 = Math.max(a[1], b[1]);
-  const ix2 = Math.min(a[2], b[2]), iy2 = Math.min(a[3], b[3]);
-  const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
-  const aa = (a[2] - a[0]) * (a[3] - a[1]);
-  const bb = (b[2] - b[0]) * (b[3] - b[1]);
-  return inter / (aa + bb - inter);
-}
-
-function selectDetection(dets) {
-  if (!dets || !dets.length) return null;
-  const best = dets[0];
-  const [x1, y1, x2, y2] = best.box;
-  const area = Math.max(1, (x2 - x1) * (y2 - y1));
-  const surrounding = [];
-  for (const candidate of dets) {
-    const [a, b, c, d] = candidate.box;
-    const overlap = Math.max(0, Math.min(x2, c) - Math.max(x1, a)) * Math.max(0, Math.min(y2, d) - Math.max(y1, b));
-    if (overlap / area >= 0.9 && (c - a) * (d - b) >= 2 * area) {
-      surrounding.push(candidate);
-    }
-  }
-  return surrounding.length ? surrounding.reduce((m, c) => (c.conf > m.conf ? c : m), surrounding[0]) : best;
-}
 
 async function clipEmbed(sourceCanvas) {
   const cw = sourceCanvas.width;
@@ -983,14 +517,6 @@ async function clipEmbed(sourceCanvas) {
 // cuts NLL by a third and roughly halves ECE, and leaves top-1 unchanged
 // because it is monotone, so this buys honesty rather than accuracy.
 //
-// Hand-set, deliberately. Fitting the temperature by cross-validation at this
-// sample size is actively harmful: each fold independently chose T~8.7 and
-// held-out NLL got *worse* (2.172 vs 0.966 at T=1). The optimum is not
-// identifiable at n=112. Do not "improve" this by fitting it at runtime.
-//
-// Module scope, not local to softmaxJoint, because multi-view fusion has to put
-// two views on this same scale before it can pool them.
-const TEMPERATURE = 2.5;
 
 // The scale each path turns a cosine into a logit at. Local scoring applies the
 // temperature; the server does not, so its posteriors are on a different scale
@@ -1096,245 +622,6 @@ const TEMPERATURE = 2.5;
 // The sentence the score panel leads with. It is a claim about the photograph,
 // never about our machinery: there is deliberately no "analysing" state here.
 
-// Whether there is a crop to draw, and where it sits in each panel, answered in
-// one place. Both panels used to gate the outline on their own independent
-// conditions, so a state could satisfy one and not the other and show the crop
-// on only one panel - the reported "zoom has a crop, the full photo does not".
-// Two guards that must agree is the defect; a third caller would reintroduce it.
-//
-// A crop is real when the photo was classified on a sub-region of itself. A
-// fallback, or a photo the user reverted to whole, was classified on the whole
-// frame, so drawing an outline over it would claim a crop that was never made.
-// `pending` is deliberately not a gate: a recompute in flight still has the
-// previous crop on screen, and both panels should keep showing it, dimmed on
-// the scores, rather than one panel blanking while the other holds.
-function hasCropBox(p) {
-  return Boolean(p && p.cropBox && !p.fallback && !p.manual_full_photo);
-}
-
-// The same p.cropBox expressed as fractions of each panel's surface. Both take
-// p.cropBox in full-image pixels; each panel shows a different image through a
-// different object-fit, so each needs its own map. The full panel fits with
-// contain (the whole photo, letterboxed) and the zoom panel with cover (a
-// deliberate crop), so the two panels disagree by construction and each has to
-// ask for its own. Returns null when the panel cannot place the box (no image,
-// or no context region).
-function cropBoxInFullSurface(p) {
-  if (!hasCropBox(p) || !p.fullCanvas) return null;
-  const surfaceFull = document.getElementById("crop-surface-full");
-  const { kx, ox, ky, oy } = fitMapping(surfaceFull, p.fullCanvas, "contain");
-  const [bx1, by1, bx2, by2] = p.cropBox;
-  const l = (bx1 / p.fullCanvas.width - ox) / kx;
-  const t = (by1 / p.fullCanvas.height - oy) / ky;
-  return {
-    left: l * 100,
-    top: t * 100,
-    width: ((bx2 / p.fullCanvas.width - ox) / kx - l) * 100,
-    height: ((by2 / p.fullCanvas.height - oy) / ky - t) * 100,
-  };
-}
-
-// The zoom panel shows the context region, not the whole photo, so the box has
-// to be expressed relative to that region before it goes through the cover map.
-// With no context region the panel shows the whole photo instead (zoomSource
-// falls back the same way), so the whole photo is the coordinate frame here too
-// - which keeps a real crop drawable on both panels in every state.
-function cropBoxInZoomSurface(p) {
-  if (!hasCropBox(p)) return null;
-  const surfaceZoomed = document.getElementById("crop-surface-zoomed");
-  const [cx1, cy1, cx2, cy2] = p.cropBox;
-  const ctx_x1 = p.contextBox ? p.contextBox[0] : 0;
-  const ctx_y1 = p.contextBox ? p.contextBox[1] : 0;
-  const ctx_x2 = p.contextBox ? p.contextBox[2] : p.fullCanvas.width;
-  const ctx_y2 = p.contextBox ? p.contextBox[3] : p.fullCanvas.height;
-  const ctx_w = ctx_x2 - ctx_x1;
-  const ctx_h = ctx_y2 - ctx_y1;
-  if (!(ctx_w > 0) || !(ctx_h > 0)) return null;
-  const { kx, ox, ky, oy } = fitMapping(surfaceZoomed, p.contextCanvas || p.fullCanvas, "cover");
-  const l = ((cx1 - ctx_x1) / ctx_w - ox) / kx;
-  const t = ((cy1 - ctx_y1) / ctx_h - oy) / ky;
-  return {
-    left: l * 100,
-    top: t * 100,
-    width: (((cx2 - ctx_x1) / ctx_w - ox) / kx - l) * 100,
-    height: (((cy2 - ctx_y1) / ctx_h - oy) / ky - t) * 100,
-  };
-}
-
-// Place a box returned by one of the helpers above, or hide it.
-function applyBox(el, box) {
-  if (!el) return;
-  if (!box) {
-    el.style.display = "none";
-    return;
-  }
-  el.style.left = `${box.left}%`;
-  el.style.top = `${box.top}%`;
-  el.style.width = `${box.width}%`;
-  el.style.height = `${box.height}%`;
-  el.style.display = "block";
-}
-
-// The affine map between a surface and the photo painted in it, as
-// imageFraction = k * surfaceFraction + o, per axis. The crop-box overlay
-// (image -> surface) and the drag handlers (surface -> image) both run through
-// this, so the two directions cannot drift apart.
-//
-// `fit` is the CSS object-fit in force on that panel and decides which side of
-// 1 k falls on. Both fits scale the photo by the same factor; they differ in
-// what happens to the leftover room:
-//
-//   cover   - the photo always fills the surface, so k < 1 on one axis is the
-//             part of the image that survives the window, centred.
-//   contain - the whole photo is shown, so k < 1 on the other axis is the
-//             margin the surface adds around it, also centred.
-//
-// k is per-axis because each fit pads or crops on exactly one axis and leaves
-// the other at 1. A single scalar for both axes stretched whichever axis was
-// not cropped, so a crop outline drawn on the photo came out a different shape
-// from the same crop drawn in the other panel - the reported "one panel's shape
-// is more square, the other's more rectangular".
-//
-// For any image and any surface this is the identity when the two aspects
-// match, which is the normal case the two panels agree in.
-function fitMapping(surface, img, fit) {
-  const identity = { kx: 1, ox: 0, ky: 1, oy: 0 };
-  if (!surface || !img) return identity;
-  const b = surface.getBoundingClientRect();
-  if (b.width <= 0 || b.height <= 0) return identity;
-  const boxAspect = b.width / b.height;
-  const imgAspect = img.width / img.height;
-  if (!imgAspect) return identity;
-  // cover keeps the axis where the image overflows; contain keeps the axis
-  // where the surface overflows. Same k, opposite choice of axis.
-  const pick = fit === "contain" ? Math.max : Math.min;
-  const kx = pick(1, boxAspect / imgAspect);
-  const ky = pick(1, imgAspect / boxAspect);
-  return { kx, ox: (1 - kx) / 2, ky, oy: (1 - ky) / 2 };
-}
-
-function zoomedSurfaceMapping() {
-  const p = previews[selectedIndex];
-  return fitMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas, "cover");
-}
-
-function fullSurfaceMapping(p) {
-  return fitMapping(document.getElementById("crop-surface-full"), p?.fullCanvas, "contain");
-}
-
-// Aspect ratio (w/h) of the zoomed panel's container, i.e. the box the context
-// canvas is displayed in. The container lives inside #gallery-section, which is
-// display:none until the first photo has been classified, so on the very first
-// photo its clientWidth/clientHeight both read 0 and any aspect measured from it
-// is the 1/0 fallback. Measure against real layout instead: give the gallery
-// layout for one synchronous read, then restore it. Both style writes land in
-// the same frame, so the hidden gallery is never painted.
-let cachedViewerAspect = null;
-
-// The cache is only read while #gallery-section is display:none, i.e. before the
-// first photo is classified. A rotate or a window resize changes the panel's
-// shape, and a context region cut for the old shape is wider or taller than the
-// panel it is shown in, so drop it and let the next photo measure afresh.
-window.addEventListener("resize", () => { cachedViewerAspect = null; });
-window.addEventListener("orientationchange", () => { cachedViewerAspect = null; });
-
-function measureViewerAspect() {
-  const container = document.getElementById("crop-surface-zoomed")?.parentElement;
-  if (container && container.clientWidth > 0 && container.clientHeight > 0) {
-    return container.clientWidth / container.clientHeight;
-  }
-  if (cachedViewerAspect) return cachedViewerAspect;
-
-  const gallery = document.getElementById("gallery-section");
-  if (gallery && container) {
-    const prevDisplay = gallery.style.display;
-    const prevVisibility = gallery.style.visibility;
-    gallery.style.display = "block";
-    gallery.style.visibility = "hidden";
-    const w = container.clientWidth;
-    const h = container.clientHeight;
-    gallery.style.display = prevDisplay;
-    gallery.style.visibility = prevVisibility;
-    if (w > 0 && h > 0) {
-      cachedViewerAspect = w / h;
-      return cachedViewerAspect;
-    }
-  }
-  return null;
-}
-
-// Compute context crop matching viewer container aspect ratio with 75% border fit along narrower dimension
-function extractContextCrop(fullCv, cropBox, targetAspect = null) {
-  if (!cropBox) {
-    return { contextCanvas: fullCv, contextBox: [0, 0, fullCv.width, fullCv.height] };
-  }
-  const [bx1, by1, bx2, by2] = cropBox;
-  const cw = Math.max(1, bx2 - bx1);
-  const ch = Math.max(1, by2 - by1);
-  const cx = (bx1 + bx2) / 2;
-  const cy = (by1 + by2) / 2;
-
-  // Determine viewer container aspect ratio (width / height)
-  if (!targetAspect) {
-    targetAspect = measureViewerAspect() ?? 400 / 320;
-  }
-
-  // 75% to border along narrower dimension relative to container
-  let ctx_w, ctx_h;
-  if ((cw / targetAspect) >= ch) {
-    ctx_w = cw / 0.75;
-    ctx_h = ctx_w / targetAspect;
-  } else {
-    ctx_h = ch / 0.75;
-    ctx_w = ctx_h * targetAspect;
-  }
-
-  if (ctx_w > fullCv.width) {
-    ctx_w = fullCv.width;
-    ctx_h = ctx_w / targetAspect;
-  }
-  if (ctx_h > fullCv.height) {
-    ctx_h = fullCv.height;
-    ctx_w = ctx_h * targetAspect;
-  }
-
-  let x1 = cx - ctx_w / 2;
-  let y1 = cy - ctx_h / 2;
-  let x2 = cx + ctx_w / 2;
-  let y2 = cy + ctx_h / 2;
-
-  if (x1 < 0) {
-    x2 -= x1;
-    x1 = 0;
-  }
-  if (y1 < 0) {
-    y2 -= y1;
-    y1 = 0;
-  }
-  if (x2 > fullCv.width) {
-    x1 -= (x2 - fullCv.width);
-    x2 = fullCv.width;
-  }
-  if (y2 > fullCv.height) {
-    y1 -= (y2 - fullCv.height);
-    y2 = fullCv.height;
-  }
-
-  x1 = Math.max(0, Math.round(x1));
-  y1 = Math.max(0, Math.round(y1));
-  x2 = Math.min(fullCv.width, Math.round(x2));
-  y2 = Math.min(fullCv.height, Math.round(y2));
-
-  const finalW = Math.max(1, x2 - x1);
-  const finalH = Math.max(1, y2 - y1);
-
-  const ctxCv = document.createElement("canvas");
-  ctxCv.width = finalW;
-  ctxCv.height = finalH;
-  ctxCv.getContext("2d").drawImage(fullCv, x1, y1, finalW, finalH, 0, 0, finalW, finalH);
-
-  return { contextCanvas: ctxCv, contextBox: [x1, y1, x2, y2] };
-}
 
 // Client-Side Photo Classification Pipeline
 //
@@ -1583,8 +870,8 @@ async function processFiles(fileList) {
   document.getElementById("results-table-section").style.display = "block";
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
-  renderResultsTable();
+  updatePooling(EMB, previews, includedIndices);
+  renderResultsTable(previews);
 
   // Decode with bounded concurrency, inference effectively serial. Decoding a
   // JPEG is independent per file and releases the GIL-free browser work queue, so
@@ -1695,8 +982,8 @@ async function processFiles(fileList) {
     setProgress("batch", `Analyzed ${processed} of ${imageFiles.length} photos…`, (100 * processed) / imageFiles.length);
     renderThumbnails();
     renderActivePhoto();
-    updatePooling();
-    renderResultsTable();
+    updatePooling(EMB, previews, includedIndices);
+    renderResultsTable(previews);
   }
 
   // Inference, one photo at a time, each result painted as it lands.
@@ -1716,8 +1003,8 @@ async function processFiles(fileList) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
-  renderResultsTable();
+  updatePooling(EMB, previews, includedIndices);
+  renderResultsTable(previews);
   sendLog("process_files_completed", { added: slots.length, total: previews.length });
 
   // Anything dropped or queued while this batch ran goes next, before the
@@ -1770,12 +1057,12 @@ function deletePhoto(idx) {
   if (previews.length === 0) {
     document.getElementById("gallery-section").style.display = "none";
     document.getElementById("results-table-section").style.display = "none";
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
   } else {
     renderThumbnails();
     renderActivePhoto();
-    updatePooling();
-    renderResultsTable();
+    updatePooling(EMB, previews, includedIndices);
+    renderResultsTable(previews);
   }
 }
 
@@ -1839,7 +1126,7 @@ function buildTile(idx) {
     if (e.target.checked) includedIndices.add(idx);
     else includedIndices.delete(idx);
     renderThumbnails();
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
   };
   label.appendChild(chk);
   tile.appendChild(label);
@@ -1929,7 +1216,7 @@ function setAllSelected(on) {
     else includedIndices.delete(i);
   });
   renderThumbnails();
-  updatePooling();
+  updatePooling(EMB, previews, includedIndices);
   updateStripActions();
 }
 
@@ -1950,8 +1237,8 @@ function deleteAllPhotos() {
   document.getElementById("gallery-section").style.display = "none";
   document.getElementById("results-table-section").style.display = "none";
   // The combined card is not hidden: hiding it shifts the layout under the
-  // strip. updatePooling() decides what it shows.
-  updatePooling();
+  // strip. updatePooling(EMB, previews, includedIndices) decides what it shows.
+  updatePooling(EMB, previews, includedIndices);
 }
 
 // Nothing to select, deselect or delete without photos, so the buttons say so
@@ -2330,7 +1617,7 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
   // Surface fractions -> image fractions, through the object-fit:cover window,
   // so a fine-tune drag lands where the user pointed even if the context canvas
   // and the surface no longer share an aspect (e.g. after a window resize).
-  const { kx, ox, ky, oy } = zoomedSurfaceMapping();
+  const { kx, ox, ky, oy } = zoomedSurfaceMapping(p);
   const r = [kx * rect[0] + ox, ky * rect[1] + oy, kx * rect[2] + ox, ky * rect[3] + oy];
 
   const x1 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + r[0] * ctx_w)));
@@ -2434,8 +1721,8 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
     applyViews(p, landed, views.length);
     renderThumbnails();
     renderActivePhoto();
-    updatePooling();
-    renderResultsTable();
+    updatePooling(EMB, previews, includedIndices);
+    renderResultsTable(previews);
   }
 
   if (dropped) {
@@ -2505,8 +1792,8 @@ async function executeCrop(p, idx, cropBox, t0) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
-  renderResultsTable();
+  updatePooling(EMB, previews, includedIndices);
+  renderResultsTable(previews);
 
   const rec = {
     what: "crop", cropBox, cw, ch, rev,
@@ -2560,8 +1847,8 @@ async function executeCrop(p, idx, cropBox, t0) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
-  renderResultsTable();
+  updatePooling(EMB, previews, includedIndices);
+  renderResultsTable(previews);
   sendLog("crop_executed", {
     engine: currentEngine, cropBox, cw, ch,
     topSpecies: Object.keys(p.scores)[0] || null
@@ -2587,8 +1874,8 @@ async function revertToFullPhoto(idx) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
-  renderResultsTable();
+  updatePooling(EMB, previews, includedIndices);
+  renderResultsTable(previews);
 
   const rec = {
     what: "revert", rev,
@@ -2631,380 +1918,33 @@ async function revertToFullPhoto(idx) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
-  renderResultsTable();
+  updatePooling(EMB, previews, includedIndices);
+  renderResultsTable(previews);
 }
 
-// ---- Pooling / Evidence Aggregation ----
-function updatePooling() {
-  const poolScores = document.getElementById("combined-scores");
-  const contribTable = document.getElementById("contribution-table").querySelector("tbody");
 
-  const checked = Array.from(includedIndices).map(i => previews[i]).filter(Boolean);
-  // A photo whose crop is being re-classified, or whose classification failed,
-  // has no verdict that matches its pixels. Pooling it would fold the previous
-  // crop's evidence into the combined result, so it is left out. Its own row in
-  // the results table stays empty until it has a verdict, which is where the
-  // card's header count and the table agree with each other.
-  // A photo the classifier is not confident about at all - neither a species
-  // nor a genus - is LEFT OUT of the pooled combination entirely. Its fused
-  // logits are still a real posterior, and summing them in is what made the
-  // earlier parked abstention work a regression: the pooled card would fold in
-  // a species the app had just declined to name, which is worse than not
-  // gating at all. A photo that reached only the genus state does still
-  // contribute, because its evidence is sound and only its resolution is
-  // coarser; it is marked as such below rather than dropped.
-  // A photo the gate called NOT a mosquito is left out on the same grounds as one
-  // it could not name: its evidence is about a different subject, so pooling it
-  // would fold a midge's logits into a mosquito's posterior. Anything other than a
-  // species or genus verdict is therefore excluded, which is what makes the
-  // non-mosquito state safe to introduce without a second filter here.
-  const { included, abstained } = splitPoolable(checked);
-  if (included.length <= 1) {
-    // The card is permanent, so the empty case is drawn rather than hidden:
-    // hiding it resized the whole row above the gallery, and zooming re-pools,
-    // so it flickered out whenever the transient selection changed.
-    poolScores.innerHTML =
-      '<p class="hint" style="margin:0;">Check two or more photos of the same mosquito to combine their results.</p>';
-    contribTable.innerHTML = "";
-    return;
-  }
 
-  const selectedMethod = document.querySelector('input[name="pooling-method"]:checked')?.value || "Dependent evidence";
-  const r = parseFloat(document.getElementById("corr-slider").value) || 0.5;
 
-  const weights = poolingWeights(included, selectedMethod, r);
 
-  const aggLogits = aggregateLogits(EMB, included, weights);
-
-  // The same sum for the adjacent (non-mosquito) classes, so the pooled card can
-  // say "this is not a mosquito" instead of being structurally unable to ask.
-  const aggAdjLogits = aggregateAdjacent(EMB, included, weights);
-
-  // Relative Log Scores (Axis: -20 to 0)
-  const candidates = pooledCandidates(EMB, aggLogits);
-
-  // The pooled genus headline. Derived from the POOLED posterior - the softmax of
-  // the aggregated logits - and gated by the same verdictFrom/verdictSentence the
-  // per-photo line uses, so "confident enough" means one thing in the app.
-  //
-  // Softmax of the aggregate, not a mean of per-photo verdicts: the logits already
-  // are the per-photo log-probabilities up to a constant (a photo's logits are
-  // scale*cos, and log p = scale*cos - logZ), so softmax(aggLogits) is the pooled
-  // posterior exactly, and one pooled gate on it is the pooled claim. Averaging
-  // per-photo verdicts instead would let two confident photos averaging to a
-  // confident mean outvote a third that pooled with them says nobody knows.
-  //
-  // A per-photo `unsure` photo is already excluded from `included` above, so it
-  // is absent from this aggregate as well - the pooled headline cannot name a
-  // genus the pool itself refused to name.
-  //
-  // `included` is passed so the pool can also gate its SPECIES claim on the
-  // photos rather than on its own sharpened posterior: see pooledVerdict().
-  const pooledVerdict = pooledVerdictOf(aggLogits, included, aggAdjLogits);
-  const pooledLine = pooledVerdict ? verdictSentence(pooledVerdict) : "";
-
-  poolScores.innerHTML = "";
-  // A species-state verdict renders an empty sentence on purpose: the ranking
-  // below already leads with the binomial, and a headline that repeated it added
-  // nothing. So the line appears only when the pooled gate has something coarser
-  // to say, and is absent entirely when the pool is a confident species.
-  if (pooledLine) {
-    const head = document.createElement("div");
-    head.className = "combined-genus-headline" + (pooledVerdict.state === "genus" ? " is-genus" : "");
-    // Full text in the tooltip; the box is one line tall whatever the genus is.
-    head.textContent = pooledLine;
-    head.title = pooledLine;
-    poolScores.appendChild(head);
-  }
-  candidates.slice(0, 10).forEach(c => {
-    const row = document.createElement("div");
-    row.className = "combined-candidate";
-    // Same non-finite guard as the single-photo score list above.
-    const relFinite = Number.isFinite(c.relScore);
-    const widthPct = relFinite ? Math.max(0, Math.min(100, ((c.relScore + 20) / 20) * 100)) : 0;
-    row.innerHTML = `
-      <div class="combined-score-row">
-        <span class="species-name-wrap">${speciesLabelHtml(c.name)}</span>
-        <span>${relFinite ? c.relScore.toFixed(1) : ""}</span>
-      </div>
-      <div class="combined-bar-track">
-        <div class="combined-bar" style="width: ${widthPct}%"></div>
-      </div>
-    `;
-    poolScores.appendChild(row);
-  });
-
-  // Contribution Table
-  contribTable.innerHTML = "";
-  const sumW = weights.reduce((a, b) => a + b, 0) || 1e-6;
-  included.forEach((p, idx) => {
-    const tr = document.createElement("tr");
-    const share = ((weights[idx] / sumW) * 100).toFixed(1);
-    // A genus-state photo is in the sum, so it says which claim it brought.
-    const note = p.verdict?.state === "genus"
-      ? `<br><span class="contrib-note">genus only: ${escapeHtml(p.verdict.genus)}</span>` : "";
-    tr.innerHTML = `<td>${escapeHtml(p.name)}${note}</td><td style="text-align:right">${share}%</td>`;
-    contribTable.appendChild(tr);
-  });
-  // Photos left out of the sum are listed too, with the reason. A checked photo
-  // that silently contributes nothing reads as a bug in the app; one that is
-  // listed as excluded reads as what it is.
-  abstained.forEach((p) => {
-    const tr = document.createElement("tr");
-    tr.className = "row-excluded";
-    tr.innerHTML = `<td>${escapeHtml(p.name)}<br><span class="contrib-note">excluded - not confident enough to name a genus</span></td><td style="text-align:right">-</td>`;
-    contribTable.appendChild(tr);
-  });
-}
-
-// ---- Results Table & CSV Export ----
-function renderResultsTable() {
-  const tbody = document.getElementById("results-table").querySelector("tbody");
-  tbody.innerHTML = "";
-  document.getElementById("table-summary").textContent = `Processed ${previews.length} images.`;
-
-  previews.forEach(p => {
-    const tr = document.createElement("tr");
-    // Every row is five cells wide, whatever state its photo is in. A pending
-    // or failed row leaves the four unknown cells empty rather than filling
-    // them with a word: a colspan here changed the table's column widths, and
-    // the replaced text changed the row's height, so the row below it moved
-    // twice over as each photo finished. The photo's own state is already
-    // visible as its tile and its entry in the score panel; a third copy of it
-    // in this table was the layout cost of saying it again.
-    if (p.pending || p.error) {
-      tr.className = "row-pending";
-      tr.innerHTML = `
-        <td title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
-        <td></td>
-        <td></td>
-        <td></td>
-        <td></td>
-      `;
-      tbody.appendChild(tr);
-      return;
-    }
-    const sortedGenus = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
-    const topGenus = sortedGenus[0] || ["-", 0];
-    const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
-    const topSpec = sortedSpec[0] || ["-", 0];
-
-    // What the app would claim about the photo. It is a coarser claim than the
-    // ranking when the species gate abstains, never a fabricated one: a photo
-    // the classifier cannot place shows the genus it did place, or nothing.
-    const v = p.verdict || { state: "species" };
-    const topCell = v.state === "species" ? String(topSpec[0])
-      : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
-    const specPct = (topSpec[1] || 0) * 100;
-    tr.innerHTML = `
-      <td title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
-      <td title="${escapeHtml(topGenus[0])}">${escapeHtml(topGenus[0])}</td>
-      <td style="text-align:right">${(topGenus[1] * 100).toFixed(1)}%</td>
-      <td title="${escapeHtml(String(topCell))}">${escapeHtml(String(topCell))}</td>
-      <td style="text-align:right">${specPct.toFixed(1)}%</td>
-    `;
-    tbody.appendChild(tr);
-  });
-}
-
-function downloadCSV() {
-  if (!previews.length) return;
-  sendLog("download_csv");
-  let csv = "Filename,Status,Cropped,Top Genus,Genus Score (%),Top Species,Species Score (%)\n";
-  previews.forEach(p => {
-    if (p.pending || p.error) {
-      // Exporting the previous crop's numbers under the new crop's name would be
-      // a wrong result, not a stale one.
-      csv += `"${p.name}","${(p.error || "classifying").replace(/"/g, "'")}",${p.is_cropped},"-","-","-","-"\n`;
-      return;
-    }
-    const sortedGenus = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
-    const topGenus = sortedGenus[0] || ["-", 0];
-    const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
-    const topSpec = sortedSpec[0] || ["-", 0];
-    // Same rule as the results table: the export carries the claim the app made,
-    // so a photo the app would not name cannot leave the machine looking named.
-    const v = p.verdict || { state: "species" };
-    const claim = v.state === "species" ? String(topSpec[0])
-      : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
-    const specPct = ((topSpec[1] || 0) * 100).toFixed(1);
-    csv += `"${p.name}","${p.status}",${p.is_cropped},"${topGenus[0]}",${(topGenus[1] * 100).toFixed(1)},"${claim}",${specPct}\n`;
-  });
-
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `mosquito_identification_${Date.now()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-// Sample Photos Loader
-const SAMPLE_NAMES = [
-  "IMG-20261002-WA0007.jpeg",
-  "PXL_20261002_182523087.jpg",
-  "PXL_20261002_182614990.jpg",
-  "PXL_20261002_182628741.jpg",
-  "PXL_20261002_182632161.jpg",
-  "PXL_20261002_182639488.jpg",
-  "PXL_20261002_182720758.jpg",
-  "PXL_20261002_182737596.jpg",
-  "PXL_20261002_182741226.jpg",
-  "PXL_20261002_182754446.jpg"
-];
-
-// One sample, as a File. Kept separate so the preload below can populate the
-// cache and the click below can read it, without fetching twice.
-async function fetchSampleFile(name) {
-  const resp = await fetch(`samples/${name}`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const blob = await resp.blob();
-  return new File([blob], name, { type: blob.type || "image/jpeg" });
-}
-
-const sampleFileCache = new Map();
-async function getSampleFile(name) {
-  if (!sampleFileCache.has(name)) {
-    sampleFileCache.set(name, fetchSampleFile(name));
-  }
-  return sampleFileCache.get(name);
-}
-
-// All ten at once, bounded so a cold cache on a phone does not open ten
-// connections for images nobody asked for.
-//
-// The sequential version paid ten round trips back to back, and the wait was
-// visible: the button did nothing until the last download landed.
-const SAMPLE_PREFETCH_CONCURRENCY = 5;
-async function prefetchSamples() {
-  const names = SAMPLE_NAMES.slice();
-  let i = 0;
-  await Promise.all(Array.from({ length: Math.min(SAMPLE_PREFETCH_CONCURRENCY, names.length) }, async () => {
-    for (;;) {
-      const idx = i++;
-      if (idx >= names.length) return;
-      try {
-        await getSampleFile(names[idx]);
-      } catch (e) {
-        // A sample that will not prefetch must not poison the cache: drop it so
-        // the click retries rather than replaying this failure forever.
-        sampleFileCache.delete(names[idx]);
-        console.warn("Could not prefetch sample:", names[idx], e);
-      }
-    }
-  }));
-}
-
-async function loadSamplePhotos() {
-  sendLog("sample_photos_clicked");
-  setProgress("samples", "Fetching sample photos…", null);
-  const results = await Promise.allSettled(SAMPLE_NAMES.map(getSampleFile));
-  clearProgress("samples");
-  const files = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
-  for (let i = 0; i < results.length; i++) {
-    if (results[i].status === "rejected") {
-      sampleFileCache.delete(SAMPLE_NAMES[i]);
-      console.warn("Could not fetch sample:", SAMPLE_NAMES[i], results[i].reason);
-    }
-  }
-  if (files.length) {
-    processFiles(files);
-  } else {
-    setProgressError("Could not load the sample photos.");
-  }
-}
-
-// One species label, used everywhere a species is named.
-//
-// This existed as two divergent copies: the per-photo score list rendered the
-// guide link and the common name, the pooled card rendered a bare <strong> of
-// the binomial - so the same species read differently depending on which panel
-// it appeared in. Anything added to a species label from here on (a vector
-// status, a thumbnail, a range note) has to be added once.
-//
-// The guide link is a hash route of this same document, so following it and
-// coming back preserves the photo, the crop and the scores instead of re-running
-// the model.
-function speciesLabelHtml(name) {
-  const meta = SPECIES_META[name];
-  const wikiLink = meta?.wiki
-    ? `<a href="${meta.wiki}" target="_blank" rel="noopener" class="species-wiki" title="Wikipedia">\u{1F517}</a>`
-    : "";
-  const nameHtml = meta
-    ? `<a class="species-kb-link" href="#/species/${encodeURIComponent(speciesSlug(name))}">${escapeHtml(name)}</a>`
-    : `<span>${escapeHtml(name)}</span>`;
-  const common = meta?.common ? ` <span class="species-common">(${escapeHtml(meta.common)})</span>` : "";
-  return `${wikiLink}${nameHtml}${common}`;
-}
-
-function speciesSlug(name) {
-  return name.toLowerCase().replace(/\s+/g, "-");
-}
-
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, s => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  }[s]));
-}
-
-// ---- Router ----
-//
-// Hash routes, not history.pushState with clean paths. The site is deployed at
-// /mosquito-id/ as plain static files on GitHub Pages, with no rewrite rules:
-// a clean path such as /mosquito-id/species/aedes-albopictus is a 404 on
-// refresh and for anyone the link is shared with, because Pages looks for a
-// file of that name. Everything the router needs is after the '#', which the
-// server never sees, so deep links and reloads work with no server config.
-//
-// The classifier's DOM is never rebuilt, only hidden. That is the whole of the
-// state preservation: previews[], selectedIndex, the crop boxes, the rendered
-// scores and the loaded ONNX sessions all keep living in memory and in the
-// document across a navigation, so nothing has to be serialised or restored.
-
-const CLASSIFIER_TITLE = document.title;
-
-function parseRoute() {
-  const hash = location.hash.replace(/^#/, "");
-  const m = hash.match(/^\/species(?:\/(.*))?$/);
-  if (!m) return { view: "classifier" };
-  return { view: "species", slug: m[1] ? decodeURIComponent(m[1]) : "" };
-}
-
-function showClassifier() {
-  document.querySelector(".app-container").classList.remove("route-off");
-  document.getElementById("kb-view").classList.add("route-off");
-  document.title = CLASSIFIER_TITLE;
-}
-
-function applyRoute() {
-  const route = parseRoute();
-  if (route.view === "classifier") {
-    showClassifier();
-    return;
-  }
-  const app = document.querySelector(".app-container");
-  const kb = document.getElementById("kb-view");
-  app.classList.add("route-off");
-  kb.classList.remove("route-off");
-  window.scrollTo(0, 0);
-  // species.js fetches species-data.json once and caches the promise, so
-  // repeated navigations cost nothing beyond the render.
-  renderSpeciesPage(route.slug, document.getElementById("kb-body"));
-}
 
 // ---- Initialization & Event Listeners ----
 window.addEventListener("DOMContentLoaded", () => {
   setupCropSurfaces();
   wireStripActions();
 
-  window.addEventListener("hashchange", applyRoute);
-  applyRoute();
+  // The viewer-aspect cache lives in the crop geometry module; these listeners
+  // are wired here because they belong to the page's lifetime, not to that
+  // module's, and a module that attached them at import time would make
+  // importing it an act with a side effect.
+  window.addEventListener("resize", invalidateViewerAspectCache);
+  window.addEventListener("orientationchange", invalidateViewerAspectCache);
+
+  // initRouter captures the classifier's own title once and returns the handler
+  // that applies a route against it, so both the initial render and every
+  // subsequent hashchange go through the same function.
+  const onRouteChange = initRouter();
+  window.addEventListener("hashchange", onRouteChange);
+  onRouteChange();
 
   const dropzone = document.getElementById("dropzone");
   const fileInput = document.getElementById("file-input");
@@ -3059,10 +1999,10 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   // Buttons & Controls
-  document.getElementById("btn-samples").onclick = loadSamplePhotos;
+  document.getElementById("btn-samples").onclick = () => loadSamplePhotos({ processFiles, sendLog });
   document.getElementById("btn-prev").onclick = () => selectPhoto(selectedIndex - 1);
   document.getElementById("btn-next").onclick = () => selectPhoto(selectedIndex + 1);
-  document.getElementById("btn-csv").onclick = downloadCSV;
+  document.getElementById("btn-csv").onclick = () => downloadCSV(previews, sendLog);
 
   const savedPooling = localStorage.getItem("mosquito_pooling");
   if (savedPooling) {
@@ -3072,7 +2012,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll('input[name="pooling-method"]').forEach(r => {
     r.onchange = (e) => {
       localStorage.setItem("mosquito_pooling", e.target.value);
-      updatePooling();
+      updatePooling(EMB, previews, includedIndices);
     };
   });
 
@@ -3085,7 +2025,7 @@ window.addEventListener("DOMContentLoaded", () => {
   corrSlider.oninput = (e) => {
     localStorage.setItem("mosquito_corr", e.target.value);
     document.getElementById("corr-val").textContent = parseFloat(e.target.value).toFixed(2);
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
   };
 
   // Arrow Key Navigation
