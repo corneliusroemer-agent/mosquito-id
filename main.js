@@ -238,6 +238,12 @@ function beginRecompute(p) {
   p.rev = (p.rev || 0) + 1;
   p.pending = true;
   p.error = null;
+  // The agreement on screen described the previous crop's views. It goes with
+  // them, rather than sitting there next to a pending recompute claiming to be
+  // about the crop now being drawn.
+  p.agreement = null;
+  p.viewsLanded = 0;
+  p.viewsTotal = 0;
   return p.rev;
 }
 
@@ -249,7 +255,8 @@ function ownsRecompute(p, idx, rev) {
 }
 
 // Everything a finished computation commits, in one place, so the local and
-// server paths cannot drift apart in what they mark current.
+// server paths cannot drift apart in what they mark current. The multi-view
+// paths go through applyViews, which layers the per-view bookkeeping on top.
 function commitScores(p, r) {
   p.scores = r.labels;
   p.detail = r.detail;
@@ -698,22 +705,43 @@ async function clipEmbed(sourceCanvas) {
   return e;
 }
 
+// Temperature 2.5, applied by dividing the logit scale. Measured on the 112-image
+// Mosquito Alert benchmark: as shipped (T=1) the softmax reports 0.940 mean
+// confidence against 0.848 true accuracy — overconfident by ~9 points. T=2.5
+// cuts NLL by a third and roughly halves ECE, and leaves top-1 unchanged
+// because it is monotone, so this buys honesty rather than accuracy.
+//
+// Hand-set, deliberately. Fitting the temperature by cross-validation at this
+// sample size is actively harmful: each fold independently chose T~8.7 and
+// held-out NLL got *worse* (2.172 vs 0.966 at T=1). The optimum is not
+// identifiable at n=112. Do not "improve" this by fitting it at runtime.
+//
+// Module scope, not local to softmaxJoint, because multi-view fusion has to put
+// two views on this same scale before it can pool them.
+const TEMPERATURE = 2.5;
+
+// The scale each path turns a cosine into a logit at. Local scoring applies the
+// temperature; the server does not, so its posteriors are on a different scale
+// and pooling one of each would be arithmetic on incomparable numbers.
+//
+// Both views of a photo always come from the same path, so this cannot mismatch
+// within a fusion in practice - but the scale is attached to each view when it
+// is scored rather than read from the current engine at fuse time, because the
+// engine can be switched while a photo's second view is still in flight, and
+// the fused result must describe the views that actually produced it.
+function localViewScale() {
+  return EMB.logit_scale / TEMPERATURE;
+}
+
+function serverViewScale() {
+  return EMB.logit_scale;
+}
+
 function softmaxJoint(emb) {
   const S = EMB.species.length;
   const N = EMB.nuisance.length;
   const D = EMB.dim;
-  // Temperature 2.5, applied by dividing the logit scale. Measured on the 112-image
-  // Mosquito Alert benchmark: as shipped (T=1) the softmax reports 0.940 mean
-  // confidence against 0.848 true accuracy — overconfident by ~9 points. T=2.5
-  // cuts NLL by a third and roughly halves ECE, and leaves top-1 unchanged
-  // because it is monotone, so this buys honesty rather than accuracy.
-  //
-  // Hand-set, deliberately. Fitting the temperature by cross-validation at this
-  // sample size is actively harmful: each fold independently chose T~8.7 and
-  // held-out NLL got *worse* (2.172 vs 0.966 at T=1). The optimum is not
-  // identifiable at n=112. Do not "improve" this by fitting it at runtime.
-  const TEMPERATURE = 2.5;
-  const scale = EMB.logit_scale / TEMPERATURE;
+  const scale = localViewScale();
   const spCos = [];
   const nuCos = [];
 
@@ -772,6 +800,142 @@ function complexScores(spP, spCos) {
     return { labels: { [demotedLabel]: val, ...labels }, demoted: true };
   }
   return { labels, demoted: false };
+}
+
+// ---- Multi-view fusion ----
+//
+// One crop is one opinion about what is in the frame, and it is a fallible one:
+// a slightly-off box puts background in the picture, or clips the wing pattern
+// the classifier actually reads. Classifying the same photo twice - once on the
+// detector's crop, once on the whole frame - and combining the two is worth
+// +4.5 points of top-1 on the 112-image Mosquito Alert benchmark (84.8% ->
+// 89.3%), the largest single win measured in that investigation.
+//
+// The pooling rule is equal-weight log-linear: log p ∝ Σ_v log p_v. A view that
+// is undecided contributes a flat distribution and moves the sum a little; a
+// view that is sure moves it a lot. Both views count the same however sure
+// either is, which is what "equal weight" means here and is the rule the +4.5
+// was measured with. Averaging the probabilities instead would let one confident
+// view swamp the other rather than being outvoted by it.
+//
+// Every view's posteriors come out of the same scoring path at the same 2.5
+// temperature, which is what makes them poolable at all: two views scored at
+// different temperatures are two different scales, and their sum would be
+// arithmetic on incomparable numbers. Each view carries the scale it was scored
+// at, and fuseViews refuses to pool across two different ones.
+//
+// Fusion pools the species posteriors and the nuisance classes separately, then
+// normalises once over the two together. The nuisance classes only ever enter as
+// their combined mass, never individually: softmaxJoint's nuisance gate has
+// already used them per view to decide whether a crop is worth classifying, and
+// letting eight nuisance classes vote on which species this is would mix that
+// decision into the species verdict. Pooling the mass separately keeps the fused
+// species posteriors on the same scale as a single view's - they sum to less than
+// 1, by however much the nuisance took - which is what lets one photo's fused
+// score be read next to another's un-fused one, and next to the pooled-across-
+// photos score.
+//
+// Every view must carry the same `scale`. The pool itself does not need it - it
+// works on probabilities, which are already on whatever scale produced them, and
+// two views from the same path always do share a scale. It is needed to recover
+// cosines and logits from the fused posterior below.
+//
+// With one view this is algebraically identical to that view's own softmax, so
+// there is no separate single-view path to keep in step.
+function fuseViews(viewResults) {
+  const S = EMB.species.length;
+  const names = EMB.species;
+  const V = viewResults.length;
+  if (!V) return null;
+
+  const scale = viewResults[0].scale;
+  if (viewResults.some((v) => v.scale !== scale)) {
+    // Views on different scales cannot be pooled meaningfully, and rather than
+    // produce a number that looks like a fused score but is not one, say so.
+    console.warn("fuseViews: views on different scales, not pooling", viewResults.map((v) => v.scale));
+    return fuseViews([viewResults[0]]);
+  }
+
+  const logSum = new Array(S).fill(0);
+  let logNu = 0;
+  for (const v of viewResults) {
+    for (let i = 0; i < S; i++) logSum[i] += Math.log(Math.max(v.spP[i], 1e-12));
+    logNu += Math.log(Math.max(v.nuTotal, 1e-12));
+  }
+  const mx = Math.max(logNu, ...logSum);
+  const ex = logSum.map((l) => Math.exp(l - mx));
+  const nu = Math.exp(logNu - mx);
+  const sum = ex.reduce((a, b) => a + b, 0) + nu;
+  const spP = ex.map((e) => e / sum);
+  const nuP = [nu / sum];
+
+  // complexScores needs cosine similarities to apply COMPLEX_MARGIN, and
+  // updatePooling needs logits. Recovering both from the fused posterior is not
+  // an approximation: log p_i = scale * cos_i - logZ, so
+  // (log p_i - log p_best) / scale is exactly cos_i - cos_best, and every
+  // consumer of these two quantities (COMPLEX_MARGIN's difference, the pooling
+  // card's max-relative score) takes differences. The recovered cosines are
+  // therefore shifted by a constant - best species at 0 - which no consumer can
+  // see, and are otherwise the fused view's real ones.
+  const lp = spP.map((p) => Math.log(Math.max(p, 1e-12)));
+  const best = Math.max(...lp);
+  const spCos = lp.map((l) => (l - best) / scale);
+
+  const detail = {};
+  const logits = {};
+  names.forEach((n, i) => {
+    detail[n] = spP[i];
+    logits[n] = lp[i] * scale;
+  });
+
+  const c = complexScores(spP, spCos);
+  return { labels: c.labels, detail, logits, demoted: c.demoted, spP, nuP, spCos, nViews: V };
+}
+
+// Do the views of this photo agree on the species, and if not, by how much do
+// the fused top two sit apart? Measured on the benchmark: when the views agree
+// the fused answer is right 94.3% of the time, when they disagree 50.0% - so
+// this is worth showing, and worth more than the fused number alone.
+//
+// `views` is the list of per-view spP arrays; `fusedSpP` the pooled posterior.
+function viewAgreement(views, fusedSpP) {
+  if (!views || views.length < 2) return null;
+  const S = EMB.species.length;
+  const argmax = (p) => {
+    let b = 0;
+    for (let i = 1; i < S; i++) if (p[i] > p[b]) b = i;
+    return b;
+  };
+  const winners = views.map(argmax);
+  const top = argmax(fusedSpP);
+  const ranked = [...fusedSpP].sort((a, b) => b - a);
+  // Margin between the fused top two, in percentage points. Below this the
+  // photo is not really decidable from the classifier's own output, whatever it
+  // reports as its top score.
+  const marginPts = views.length >= 2 ? (ranked[0] - ranked[1]) * 100 : 0;
+
+  return {
+    agree: winners.every((w) => w === top),
+    topSpecies: EMB.species[top],
+    runnersUp: EMB.species.filter((_, i) => winners.includes(i) && i !== top),
+    marginPts,
+    fusedTop: fusedSpP[top]
+  };
+}
+
+// One-line plain-English rendering of the agreement signal, for the UI. Plain
+// because it is a statement about the photograph, not about the model: it says
+// what the two views of this picture disagree about and how close the call is.
+function agreementSentence(a) {
+  if (!a) return "";
+  if (a.agree) {
+    return `Both views of this photo pick ${a.topSpecies} — the close-up and the whole picture agree.`;
+  }
+  const other = a.runnersUp.length ? a.runnersUp[0] : null;
+  const gap = other
+    ? `, with ${other} close behind`
+    : "";
+  return `The close-up and the whole picture disagree${gap}. The two leading species are within ${a.marginPts.toFixed(1)} points, so treat this one as undecided.`;
 }
 
 // Whether there is a crop to draw, and where it sits in each panel, answered in
@@ -985,6 +1149,11 @@ function extractContextCrop(fullCv, cropBox, targetAspect = null) {
 }
 
 // Client-Side Photo Classification Pipeline
+//
+// Two views of the photo are classified and pooled: the detector's crop and the
+// whole frame. Both inferences are done before this returns, so the batch commits
+// one result per photo; the crop-release path, where the views run one at a time,
+// paints each as it lands.
 async function classifyImage(imgBitmap, filename) {
   const t0 = performance.now();
   const fullCv = document.createElement("canvas");
@@ -1021,28 +1190,37 @@ async function classifyImage(imgBitmap, filename) {
 
   // 2. Classification Stage
   const tClip0 = performance.now();
-  let emb = await clipEmbed(cropCv);
-  let { spP, nuP, spCos, logits } = softmaxJoint(emb);
 
+  // Score the crop first, because the nuisance gate is a statement about the
+  // crop: if the best species on it loses to the best nuisance class, this crop
+  // is not a mosquito worth a second opinion, and the photo falls back to the
+  // whole frame exactly as before. Only a crop that passes the gate is pooled
+  // with the whole-frame view.
+  let cropView = null;
   let fallback = false;
-  if (best && Math.max(...spP) < Math.max(...nuP)) {
-    cropCv = fullCv;
-    cropBox = null;
-    emb = await clipEmbed(cropCv);
-    const retry = softmaxJoint(emb);
-    spP = retry.spP;
-    nuP = retry.nuP;
-    spCos = retry.spCos;
-    logits = retry.logits;
-    best = null;
-    fallback = true;
+  if (best) {
+    const emb = await clipEmbed(cropCv);
+    const j = softmaxJoint(emb);
+    if (Math.max(...j.spP) >= Math.max(...j.nuP)) {
+      cropView = { spP: j.spP, nuTotal: j.nuP.reduce((a, b) => a + b, 0), scale: localViewScale() };
+    } else {
+      cropCv = fullCv;
+      cropBox = null;
+      best = null;
+      fallback = true;
+    }
   }
+
+  const views = [];
+  if (cropView) views.push(cropView);
+  // The whole frame is always a view: either the second opinion on a crop that
+  // passed the gate, or the only view there is.
+  const wholeEmb = await clipEmbed(fullCv);
+  const wholeJ = softmaxJoint(wholeEmb);
+  views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0), scale: localViewScale() });
+
   const clipTime = Math.round(performance.now() - tClip0);
   const totalTime = Math.round(performance.now() - t0);
-
-  const { labels, demoted } = complexScores(spP, spCos);
-  const detail = {};
-  EMB.species.forEach((name, i) => { detail[name] = spP[i]; });
 
   const status = best
     ? `detector: ${dets.length} box(es), best ${best.conf.toFixed(2)}`
@@ -1051,33 +1229,41 @@ async function classifyImage(imgBitmap, filename) {
   const is_cropped = Boolean(best && !fallback);
   const { contextCanvas, contextBox } = extractContextCrop(fullCv, cropBox);
 
-  const epLabel = clipEP === "webgpu" ? "WEBGPU" : "WASM CPU";
-  const devText = `inference: ${WEBGPU_MODELS[currentEngine]?.name || "WebGPU"} (${epLabel}) · ${totalTime}ms/photo (crop: ${detTime}ms · analyze: ${clipTime}ms)`;
-  const devElem = document.getElementById("footer-device");
-  if (devElem) devElem.textContent = devText;
-
-  return {
+  const base = {
     name: filename,
     fullCanvas: fullCv,
     cropCanvas: cropCv,
     contextCanvas,
     cropBox,
     contextBox,
-    scores: labels,
-    detail,
-    logits,
     status,
     fallback,
     is_cropped,
-    demoted,
     rev: 0,
-    pending: false,
     error: null,
     fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
     manual_full_photo: !best,
     detTime,
     clipTime,
     totalTime
+  };
+
+  const epLabel = clipEP === "webgpu" ? "WEBGPU" : "WASM CPU";
+  const devText = `inference: ${WEBGPU_MODELS[currentEngine]?.name || "WebGPU"} (${epLabel}) · ${totalTime}ms/photo (crop: ${detTime}ms · analyze: ${clipTime}ms)`;
+  const devElem = document.getElementById("footer-device");
+  if (devElem) devElem.textContent = devText;
+
+  const fused = fuseViews(views);
+  return {
+    ...base,
+    scores: fused.labels,
+    detail: fused.detail,
+    logits: fused.logits,
+    demoted: fused.demoted,
+    agreement: viewAgreement(views.map((v) => v.spP), fused.spP),
+    viewsLanded: views.length,
+    viewsTotal: views.length,
+    pending: false
   };
 }
 
@@ -1151,6 +1337,7 @@ async function processFiles(fileList) {
     status: "queued…", fallback: false, is_cropped: false, demoted: false,
     manual_full_photo: false, fingerprint: null,
     rev: 0, pending: true, error: null,
+    agreement: null, viewsLanded: 0, viewsTotal: 0,
     detTime: null, clipTime: null, totalTime: null
   }));
   previews = [...slots, ...previews];
@@ -1223,12 +1410,31 @@ async function processFiles(fileList) {
         const fullCv = await dataUrlToCanvas(data.fullDataUrl);
         const cropCv = await dataUrlToCanvas(data.cropDataUrl);
         const contextCv = await dataUrlToCanvas(data.contextDataUrl);
+
+        // Second view over the same contract, no server change needed: the
+        // endpoint already classifies whatever box it is given, so the whole
+        // frame is one more request with crop_box spanning it. Skipped when the
+        // server's own detection found nothing and it classified the whole frame
+        // anyway - then there is only one view to have.
+        const views = [serverView(data)];
+        if (data.is_cropped) {
+          const fd2 = new FormData();
+          fd2.append("file", slot.file);
+          fd2.append("crop_box", JSON.stringify([0, 0, data.fullWidth, data.fullHeight]));
+          const res2 = await fetch("/api/predict", { method: "POST", body: fd2 });
+          if (!res2.ok) throw new Error("Server inference error " + res2.status);
+          views.push(serverView(await res2.json()));
+        }
+        const fused = fuseViews(views);
+
         commitBatchSlot(slots[i], {
           name: data.filename, fullCanvas: fullCv, cropCanvas: cropCv, contextCanvas: contextCv,
-          cropBox: data.cropBox, contextBox: data.contextBox, scores: data.labels,
-          detail: data.detail, logits: data.logits, status: data.status, fallback: data.fallback,
+          cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
+          detail: fused.detail, logits: fused.logits, status: data.status, fallback: data.fallback,
           is_cropped: data.is_cropped,
-          demoted: Boolean(Object.keys(data.labels)[0]?.includes("low confidence")),
+          demoted: fused.demoted,
+          agreement: viewAgreement(views.map((v) => v.spP), fused.spP),
+          viewsLanded: views.length, viewsTotal: views.length,
           fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
           manual_full_photo: !data.is_cropped,
           detTime: data.detTime, clipTime: data.clipTime, totalTime: data.totalTime
@@ -1536,6 +1742,20 @@ function renderActivePhoto() {
     // tooltip rather than being cut off at the panel's edge.
     scoreNotice.title = noticeText;
   }
+
+  // Whether the photo's two views back each other up. Shown whenever there is
+  // something to say and hidden otherwise, in a box that is always the same
+  // height, so its arrival seconds into a photo's classification moves nothing.
+  const agreeBox = document.getElementById("view-agreement");
+  if (agreeBox) {
+    const a = p.agreement;
+    // While a second view is still to come, the scores below are one view's
+    // alone, so there is no agreement to report yet.
+    const text = (a && !p.pending) ? agreementSentence(a) : "";
+    agreeBox.textContent = text;
+    agreeBox.className = `pending-notice${text ? " shown" : ""}${text && !a.agree ? " disagree" : ""}`;
+    agreeBox.title = text;
+  }
   const sortedScores = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
   for (const [name, score] of sortedScores) {
     const item = document.createElement("div");
@@ -1711,15 +1931,29 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
   return executeCrop(p, idx, [x1, y1, x2, y2], t0);
 }
 
-// Classify one canvas locally. Split out of executeCrop/revertToFullPhoto so
-// both paths compute exactly the same numbers from a canvas.
-async function classifyCanvasLocal(cropCv) {
-  const emb = await clipEmbed(cropCv);
-  const { spP, spCos, logits } = softmaxJoint(emb);
-  const { labels, demoted } = complexScores(spP, spCos);
-  const detail = {};
-  EMB.species.forEach((name, i) => { detail[name] = spP[i]; });
-  return { labels, detail, logits, demoted };
+// One view of one photo, scored. Returns the pieces fusion needs (the species
+// posteriors and the nuisance mass they were normalised against) rather than a
+// finished verdict, because the verdict is the fused one.
+async function classifyViewLocal(canvas) {
+  const emb = await clipEmbed(canvas);
+  const { spP, nuP } = softmaxJoint(emb);
+  return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), scale: localViewScale() };
+}
+
+// The server's answer for one crop box, in the same shape. `detail` is the
+// species posterior already normalised against the nuisance classes by the
+// server's own joint softmax, so the nuisance mass is whatever the species did
+// not take.
+async function classifyViewServer(p, cropBox) {
+  return serverView(await classifyCanvasServer(p, cropBox));
+}
+
+// The same conversion from a /api/predict response, for the batch path which
+// holds the response rather than a canvas.
+function serverView(data) {
+  const spP = EMB.species.map((name) => data.detail[name] || 0);
+  const speciesMass = spP.reduce((a, b) => a + b, 0);
+  return { spP, nuTotal: Math.max(1 - speciesMass, 1e-12), scale: serverViewScale() };
 }
 
 // Server path: the server owns no geometry decision we need for display, only
@@ -1743,6 +1977,75 @@ async function classifyCanvasServer(p, cropBox) {
     logits: data.logits,
     demoted: Boolean(Object.keys(data.labels)[0]?.includes("low confidence"))
   };
+}
+
+// The views of one photo that get classified and pooled: the crop on screen and
+// the whole frame. Two views of the same specimen, because one view of it is
+// fallible - see fuseViews for what the second buy is worth.
+//
+// A photo already showing the whole frame has only one view to offer, and
+// running the same pixels through the model twice would fuse a view with itself.
+// That covers both a photo the detector found nothing in and one the user
+// reverted to whole. Each view carries its crop box because the server path
+// takes a box where the local path takes the already-cut pixels.
+function viewsFor(p, cropCv, cropBox) {
+  const whole = { canvas: p.fullCanvas, box: [0, 0, p.fullCanvas.width, p.fullCanvas.height] };
+  if (!cropCv || cropCv === p.fullCanvas) return [whole];
+  return [{ canvas: cropCv, box: cropBox }, whole];
+}
+
+// Classify every view of one photo and commit the fused verdict, once per view
+// as each lands so a photo shows progress rather than sitting blank until its
+// last inference is done.
+//
+// The rev guard is the same one a single-view commit used, checked before and
+// after every view: a photo deleted mid-flight, or superseded by a newer crop
+// release, must not be painted by an inference that started before either. With
+// two views per photo that check runs twice as often, which is the point - the
+// second view has strictly more opportunity to arrive late and stale.
+async function classifyViews(p, idx, rev, cropCv, cropBox) {
+  const views = viewsFor(p, cropCv, cropBox);
+  const landed = [];
+  let dropped = false;
+
+  for (const view of views) {
+    await afterNextPaint();
+    if (!ownsRecompute(p, idx, rev)) { dropped = true; break; }
+    const v = currentEngine === "server-gpu"
+      ? await classifyViewServer(p, view.box)
+      : await classifyViewLocal(view.canvas);
+    if (!ownsRecompute(p, idx, rev)) { dropped = true; break; }
+    landed.push(v);
+    // Paint what is known so far. The fused verdict is recomputed from the views
+    // that have landed, so the first view's paint is that view's own softmax
+    // unchanged, and the second replaces it with the pool of the two.
+    applyViews(p, landed, views.length);
+    renderThumbnails();
+    renderActivePhoto();
+    updatePooling();
+    renderResultsTable();
+  }
+
+  if (dropped) {
+    sendLog("views_superseded", { name: p.name, rev, currentRev: p.rev, landed: landed.length });
+    return { dropped: true };
+  }
+  sendLog("views_fused", { name: p.name, rev, views: landed.length });
+  return { dropped: false };
+}
+
+// Write the fused verdict for the views that have landed: commitScores for the
+// verdict itself, then the multi-view bookkeeping on top. The photo stays
+// pending until every view is in, so a tile is never shown as settled on a
+// partial pool that is about to be replaced by the full one.
+function applyViews(p, landed, total) {
+  const fused = fuseViews(landed);
+  commitScores(p, fused);
+  p.agreement = viewAgreement(landed.map((v) => v.spP), fused.spP);
+  p.viewsLanded = landed.length;
+  p.viewsTotal = total;
+  p.pending = landed.length < total;
+  return fused;
 }
 
 // Hand the thread back to the browser for one painted frame before the model
@@ -1811,19 +2114,15 @@ async function executeCrop(p, idx, cropBox, t0) {
   });
   sendLog("crop_released", { engine: currentEngine, cropBox, cw, ch, rev });
 
-  // Phase two: the model, off the critical path.
+  // Phase two: the model, off the critical path. Both views of the photo - the
+  // crop just drawn and the whole frame - are classified and pooled.
   try {
-    await afterNextPaint();
-    if (!ownsRecompute(p, idx, rev)) throw new Superseded();
-    const r = currentEngine === "server-gpu"
-      ? await classifyCanvasServer(p, cropBox)
-      : await classifyCanvasLocal(cropCv);
-    if (!ownsRecompute(p, idx, rev)) {
+    const r = await classifyViews(p, idx, rev, cropCv, cropBox);
+    if (r.dropped) {
       rec.dropped = true;
       sendLog("crop_superseded", { name: p.name, rev, currentRev: p.rev });
       return;
     }
-    commitScores(p, r);
     p.status = `manual crop: ${cw}x${ch}px`;
     rec.scoresMs = Math.round(performance.now() - started);
     rec.topSpecies = Object.keys(p.scores)[0];
@@ -1894,17 +2193,15 @@ async function revertToFullPhoto(idx) {
   });
 
   try {
-    await afterNextPaint();
-    if (!ownsRecompute(p, idx, rev)) throw new Superseded();
-    const r = currentEngine === "server-gpu"
-      ? await classifyCanvasServer(p, [0, 0, fullCv.width, fullCv.height])
-      : await classifyCanvasLocal(fullCv);
-    if (!ownsRecompute(p, idx, rev)) {
+    // Reverting shows the whole frame, which is the one view there is: the crop
+    // the user just gave up is not a second opinion on this photo any more, it is
+    // a different picture of it.
+    const r = await classifyViews(p, idx, rev, fullCv, null);
+    if (r.dropped) {
       rec.dropped = true;
       sendLog("revert_superseded", { name: p.name, rev, currentRev: p.rev });
       return;
     }
-    commitScores(p, r);
     p.status = "manual full photo";
     rec.scoresMs = Math.round(performance.now() - started);
     rec.topSpecies = Object.keys(p.scores)[0];

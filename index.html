@@ -744,6 +744,28 @@
     text-overflow: ellipsis;
   }
   #score-pending.shown { visibility: visible; }
+  /* Where the photo's two views agree or disagree. Same reserved box as the
+     notice above it, and for the same reason: it appears once the second view
+     has landed, which for a large photo is seconds after the first, and a box
+     that grew then would push every score below it down the panel. Two lines
+     reserved, ellipsis beyond that, full sentence in the tooltip. */
+  #view-agreement {
+    visibility: hidden;
+    min-height: 50px;
+    max-height: 50px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  #view-agreement.shown { visibility: visible; }
+  /* Disagreement is the case worth noticing: two views of one photo naming
+     different species is right about half the time, against 94% when they
+     agree. Amber, not red - the photo is undecided, not wrong. */
+  #view-agreement.disagree {
+    color: #b45309;
+    background: #fffbeb;
+    border-color: #fde68a;
+  }
   .pending-notice.error {
     color: #b91c1c;
     background: #fef2f2;
@@ -902,6 +924,7 @@
         <div class="scores-header">Species scores</div>
         <p id="score-uncertain" class="uncertain" style="display:none;"></p>
         <p id="score-pending" class="pending-notice"></p>
+        <p id="view-agreement" class="pending-notice"></p>
         <div id="score-list" class="score-list"></div>
       </div>
     </div>
