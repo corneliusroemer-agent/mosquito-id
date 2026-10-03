@@ -204,6 +204,28 @@ describe("softmaxJoint applies the offsets before the scaling multiply", () => {
     expect(after.spP[2]!).toBeLessThan(before.spP[2]!);
   });
 
+  it("applies the offset before the scaling multiply, not after", () => {
+    // The single most dangerous edit to this file. softmaxJoint is a bare
+    // `scale * dot` with no bias term, and adding the offset to the SCALED logit
+    // instead of the raw cosine multiplies it by logit_scale - 100.0 for the B/16
+    // head. Nothing about the result looks wrong: the posteriors still sum to 1
+    // and the winner is usually still right, it is just confidently wrong by two
+    // orders of magnitude. So the assertion is on the exact logits, not on the
+    // argmax.
+    const r = softmaxJoint(head, PROBE);
+    const scale = head.logit_scale / DEFAULT_FLOORS.temperature;
+    const OFF = PER_GENUS_COSINE_OFFSET;
+    // The offset's contribution is offset * scale. On the wrong side of the
+    // multiply it would be `scale * 0.6 + offset`, i.e. 24 + 0.022 rather than
+    // 40 * (0.6 + 0.022) = 24.883...
+    expect(r.logits["Anopheles gambiae"]).toBeCloseTo(
+      scale * (0.6 + OFF["Anopheles"]!),
+      9,
+    );
+    expect(Math.abs(r.logits["Anopheles gambiae"]! - (scale * 0.6 + OFF["Anopheles"]!)))
+      .toBeGreaterThan(0.5);
+  });
+
   it("scales the offset with the view's scale rather than being a fixed logit", () => {
     // Written in cosine units on purpose: at a doubled logit_scale the
     // correction doubles with it. A version hardcoded as logit constants would

@@ -18,11 +18,28 @@
 // additive to them rather than a renegotiation of them - no floor and no
 // temperature is refitted alongside it.
 //
-// COSINE units, not logit units. Added before the scaling multiply, so its
-// contribution to a logit is offset * logit_scale / temperature = ~0.86 logits
-// at the shipped 98.86/2.5. Writing it this way rather than as a logit constant
-// makes it travel with a change of temperature or of model instead of silently
-// changing size, but it also means these values are only calibrated at T = 2.5.
+// COSINE units, not logit units, and added on the RAW COSINE side of
+// softmaxJoint's scaling multiply:
+//
+//   logit_s = (cos_s + offset(genus_s)) * scale,   scale = logit_scale / temperature
+//
+// so the offset's contribution is offset * logit_scale / temperature = ~0.86
+// logits at the shipped 98.86/2.5. This is NOT interchangeable with adding it to
+// the scaled logit, and moving it across the multiply is not a tidy-up: it
+// multiplies the offset by logit_scale (100.0 for the B/16 head), a silent 100x.
+// It is on the cosine side so the calibration travels with a change of
+// temperature or of model rather than being pinned to one logit_scale - at the
+// cost of these values being calibrated at T = 2.5 and no other temperature.
+//
+// Nor is this a bias/intercept term. softmaxJoint is a bare `scale * dot`, with
+// no bias anywhere, and a per-GENUS offset is a different object from the
+// per-CLASS intercept sklearn's trained probe carries: a probe's intercept is a
+// property of a fitted readout, whereas these four are a correction to a
+// zero-shot head's prompts. (The culico rollout put a trained probe's intercept
+// on the last column of a constant 1.0 coordinate appended to the model's output,
+// which is the right shape for a scalar the model produces.) If a bias term is
+// ever added to softmaxJoint, these stay where they are - folding them into it
+// would change their size by logit_scale and invalidate the fit.
 //
 // DELIBERATELY CENTRED (mean 0). Softmax is shift-invariant, but the app's
 // pipeline is not: the same vector carried through a per-genus *vector scaling*

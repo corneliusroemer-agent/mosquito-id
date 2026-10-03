@@ -68,10 +68,11 @@ export function softmaxJoint(
   // per-species logits. Nothing outside this function reads them.
   //
   // The species cosines carry the fitted per-genus calibration (see
-  // ./calibration) added before the scaling multiply, so it reaches both the
-  // softmax and the reported logits through this one array. Offsetting the cosines
-  // and not the scaled values keeps the correction proportional to whatever scale
-  // this view is scored at.
+  // ./calibration), added HERE - to the raw cosine, before the scaling multiply
+  // below - so it reaches both the softmax and the reported logits through this
+  // one array. Moving the offset to the scaled side is not equivalent and not a
+  // tidy-up: it multiplies it by logit_scale, which is 100.0 for the B/16 head.
+  // Read ./calibration before changing the line below.
   const spCos: number[] = [];
   for (let i = 0; i < S; i++) {
     spCos.push(dotAt(head.species_emb, i) + offsetFor(genusOf(head.species[i]!)));
