@@ -119,6 +119,8 @@ export interface ClassifiedPhoto extends Preview {
   is_cropped?: boolean;
   pending?: boolean;
   error?: string | null;
+  /** Set when the photo is deleted, so in-flight inference drops its result. */
+  removed?: boolean;
 }
 
 /**
