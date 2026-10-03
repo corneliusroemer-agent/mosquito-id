@@ -317,9 +317,10 @@ describe("the non-mosquito state", () => {
   });
 });
 
-describe("the pooled card is not corrupted by an abstaining photo", () => {
-  it("pooling filters state 'unsure' out and keeps the genus-only photo in", async () => {
-    const { splitPoolable } = await import("../src/confidence/pooling");
+describe("the pooled card is not corrupted by an unsure photo", () => {
+  it("keeps the genus-only photo at full weight and the unsure one below it", async () => {
+    const { splitPoolable, unsurePoolWeight, UNSURE_POOL_WEIGHT_CAP } =
+      await import("../src/confidence/pooling");
     const keep = verdictFrom(head, post(head, { "Aedes aegypti": 0.8 }), null, []);
     const coarse = verdictFrom(
       head,
@@ -329,16 +330,25 @@ null, []);
       head,
       post(head, { "Aedes aegypti": 0.1, "Culex pipiens": 0.2, "Culiseta annulata": 0.15 }),
     null, []);
-    const { included, abstained } = splitPoolable([
+    const { included, excluded } = splitPoolable([
       { name: "a", verdict: keep },
       { name: "b", verdict: coarse },
       { name: "c", verdict: drop },
     ]);
-    expect(included.map((p) => p.verdict!.state)).toEqual(["species", "genus"]);
-    expect(abstained.map((p) => p.verdict!.state)).toEqual(["unsure"]);
-    // An abstaining photo must never be in the sum - that is the regression the
-    // gate has to avoid reintroducing.
-    expect(included.some((p) => p.verdict === drop)).toBe(false);
+    expect(included.map((p) => p.verdict!.state)).toEqual(["species", "genus", "unsure"]);
+    expect(excluded).toEqual([]);
+    // The unsure photo is in the sum, but only up to the top posterior it
+    // reached - 0.2 here, and never more than a photo that just missed naming.
+    const unsure = included.find((p) => p.name === "c")!;
+    expect(unsure.poolWeight).toBeCloseTo(0.2, 12);
+    expect(unsure.poolWeight).toBeLessThan(UNSURE_POOL_WEIGHT_CAP);
+    expect(unsurePoolWeight({ verdict: drop })).toBeCloseTo(0.2, 12);
+    // It is the pool's SPECIES claim that it can never support: pooledVerdict
+    // requires every photo in the pool to have claimed a species, so its
+    // presence caps the claim at a genus. The claim the app had already
+    // declined to make is not made by pooling.
+    expect(included.some((p) => p.verdict === drop)).toBe(true);
+    expect(included.filter((p) => p.verdict!.state === "species")).not.toContain(unsure);
   });
 });
 

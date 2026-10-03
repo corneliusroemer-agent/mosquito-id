@@ -25,6 +25,38 @@ export interface PoolablePhoto {
 }
 
 /**
+ * Why a checked photo contributes nothing to the pooled sum.
+ *
+ * Only a photo that was pooled and then dropped lands here. A photo still
+ * classifying or failed is in `pending` instead, and a photo with no verdict at
+ * all - nothing has classified it, or the verdict is missing - is
+ * `no-verdict`, which is a different failure from a photo the gate actively
+ * answered.
+ */
+export type PoolExclusion = "non-mosquito" | "no-verdict";
+
+/**
+ * A photo together with the weight the pooling rule gave it.
+ *
+ * The rule that decides *whether* a photo enters the sum and the weight it
+ * carries are one decision, so they are one object: `splitPoolable` attaches
+ * `poolWeight` here and `poolingWeights` reads it, and no photo can be in the
+ * sum at the wrong weight because nothing sets the two in different places.
+ *
+ * Structurally a `PoolablePhoto`, so the aggregating functions take it
+ * unchanged.
+ */
+export type PoolMember = PoolablePhoto & {
+  /**
+   * This photo's share of a fully-trusted photo. 1 for a photo the gate could
+   * name, `unsurePoolWeight` for one it could not, 0 for anything excluded.
+   */
+  poolWeight: number;
+  /** Why this photo contributes nothing, or null when it contributes. */
+  excludedBecause: PoolExclusion | null;
+};
+
+/**
  * The species posterior a set of aggregated logits describes, or null if the
  * aggregate carries no usable signal.
  *
@@ -45,47 +77,116 @@ export function pooledPosterior(head: Head, aggLogits: Record<string, number>): 
 }
 
 export interface PoolSplit {
-  /** Photos whose evidence enters the aggregate. */
-  included: PoolablePhoto[];
-  /** Photos left out because the gate would not name a genus on them. */
-  abstained: PoolablePhoto[];
+  /** Photos whose evidence enters the aggregate, each with the weight it carries. */
+  included: PoolMember[];
+  /** Checked photos that contribute nothing, each with the reason. */
+  excluded: PoolMember[];
   /**
-   * Checked photos that are neither: still classifying, or failed. They
-   * contribute nothing and are listed as neither included nor abstained, so a
-   * row in the contribution table always means something.
+   * Checked photos with no verdict yet: still classifying, or failed. Separate
+   * from `excluded` because their verdict is not a decision about the photo -
+   * there is simply nothing to pool - and the contribution table says which of
+   * the two happened.
    */
-  pending: PoolablePhoto[];
+  pending: PoolMember[];
 }
 
 /**
- * Which photos may enter the pooled aggregate.
+ * The ceiling on an `unsure` photo's share of a fully-trusted photo, and the
+ * species floor it is bound to rather than fitted as a number of its own.
  *
- * Only a species or genus verdict contributes. Three reasons, each a different
- * kind of wrong:
- *
- *  - `unsure`: the photo's logits are a real posterior, and summing them in is
- *    what made an earlier parked abstention work a regression - the pooled card
- *    would fold in a species the app had just declined to name, which is worse
- *    than not gating at all.
- *  - `non-mosquito`: its evidence is about a different subject, so pooling it
- *    would fold a midge's logits into a mosquito's posterior.
- *  - pending or failed: it has no verdict that matches its pixels, so the
- *    aggregate would be folding in the previous crop's evidence.
- *
- * This is the whole predicate. updatePooling() must not grow a second one: the
- * gate's job is to decide what may be pooled, and a rendering function is not
- * where that belongs. `tests/pooling.test.ts` holds the corpus-level check -
- * three photos of nothing in particular must not pool into a named species.
+ * An unsure photo is one the gate declined to name a species on. The most
+ * weight such a photo can be worth is the weight of the photo that would
+ * just barely have been named, so the floor that decides naming is also the cap
+ * on its influence. That is what makes the cap checkable against evidence
+ * rather than a constant chosen to look reasonable: this codebase has already
+ * been bitten by a pooled constant fitted where it could not be validated
+ * (`floors.nonMosquito`), and reusing the species floor adds no new number that
+ * can be wrong in a new way.
  */
-export function splitPoolable(checked: PoolablePhoto[]): PoolSplit {
-  const settled = checked.filter((p) => !p.pending && !p.error);
-  return {
-    included: settled.filter(
-      (p) => p.verdict?.state === "species" || p.verdict?.state === "genus",
-    ),
-    abstained: settled.filter((p) => p.verdict?.state === "unsure"),
-    pending: checked.filter((p) => p.pending || p.error),
-  };
+export const UNSURE_POOL_WEIGHT_CAP = DEFAULT_FLOORS.species;
+
+/**
+ * What one `unsure` photo's evidence is worth in the pooled sum: its own top
+ * species posterior, capped at `UNSURE_POOL_WEIGHT_CAP`.
+ *
+ * Self-scaling, so there is no tuned constant. A photo that peaked at 0.12 -
+ * the app has no idea what this is - counts for an eighth of a named photo and
+ * cannot move a result that three named photos agree on. A photo that peaked at
+ * 0.36, one step below naming, counts for almost as much as a named photo,
+ * because it is nearly as good evidence: dropping it wholesale discarded a
+ * useful corroboration, which is the bug this replaces.
+ *
+ * `1 - maxPosterior` is the other flatness measure available and is the wrong
+ * way round: it gives a nearly-flat posterior a weight near 1 and a peaked one a
+ * weight near 0, so the least informative photo would count most.
+ */
+export function unsurePoolWeight(
+  p: PoolablePhoto,
+  floors: Floors = DEFAULT_FLOORS,
+): number {
+  const cap = floors.species;
+  const top =
+    p.verdict?.topSpeciesP ??
+    Math.max(...Object.values(p.scores ?? { })) ??
+    0;
+  if (!Number.isFinite(top) || top <= 0) return 0;
+  return Math.min(top, cap);
+}
+
+const asMember = (p: PoolablePhoto, poolWeight: number, excludedBecause: PoolExclusion | null): PoolMember =>
+  ({ ...p, poolWeight, excludedBecause });
+
+/**
+ * Which photos enter the pooled aggregate, and at what weight.
+ *
+ * This is the whole inclusion rule, and the weight is part of it rather than a
+ * second pass over the same list, so the two cannot disagree about a photo.
+ *
+ *  - `species` / `genus`: in at full weight. The gate named something on it and
+ *    its evidence is sound, whether the resolution was species or coarser.
+ *  - `unsure`: in, down-weighted by `unsurePoolWeight`. Its logits are a real
+ *    posterior and a user who ticked the box asked for it to be counted, so it
+ *    corroborates a pool that agrees without being able to overrule one. What it
+ *    cannot do is name a species: `pooledVerdict` still requires every photo in
+ *    the pool to have claimed one, so checking an unsure photo caps the pooled
+ *    claim at a genus. That is the honest reading - the pool now contains a
+ *    photo that cannot name a species, so the pool does not either.
+ *  - `non-mosquito`: out. "This is not a mosquito" is not weak evidence for any
+ *    species, it is evidence against all of them, so there is no smaller weight
+ *    that carries the same meaning - a photograph of a wall folded in at 0.1
+ *    would dilute a real identification with evidence about a different subject,
+ *    which is the one thing the pool exists to avoid. Its evidence belongs in
+ *    the non-mosquito comparison (`aggregateAdjacent`), which is where the app
+ *    reads it, not in the species sum.
+ *  - pending, failed, or no verdict at all: out, because the aggregate would be
+ *    folding in evidence that does not match the pixels on screen.
+ *
+ * updatePooling() must not grow a second copy of this predicate: the gate's job
+ * is to decide what may be pooled, and a rendering function is not where that
+ * belongs.
+ */
+export function splitPoolable(
+  checked: PoolablePhoto[],
+  floors: Floors = DEFAULT_FLOORS,
+): PoolSplit {
+  const included: PoolMember[] = [];
+  const excluded: PoolMember[] = [];
+  const pending: PoolMember[] = [];
+  for (const photo of checked) {
+    if (photo.pending || photo.error) {
+      pending.push(asMember(photo, 0, null));
+      continue;
+    }
+    const state = photo.verdict?.state;
+    if (state === "species" || state === "genus") {
+      included.push(asMember(photo, 1, null));
+    } else if (state === "unsure") {
+      included.push(asMember(photo, unsurePoolWeight(photo, floors), null));
+    } else {
+      excluded.push(asMember(photo, 0, state === "non-mosquito" ? "non-mosquito" : "no-verdict"));
+    }
+  }
+  return { included, excluded, pending };
 }
 
 /** How the pooled card's per-species weights are computed. */
@@ -103,6 +204,18 @@ export type PoolingMethod =
  * picture carry near the same evidence, so counting them at full weight is
  * counting one observation several times. A duplicate still gets weight 0, so
  * the discount is on the distinct photos, not on all of them.
+ *
+ * The method's weights are then scaled by the `poolWeight` `splitPoolable`
+ * attached to each photo, and the result is rescaled to the same total, so the
+ * down-weighting moves weight BETWEEN photos rather than shrinking the sum. A
+ * pool of three named photos and one unsure one is as sharp as the three; it
+ * simply carries the unsure one's share, which is what "weighted appropriately"
+ * has to mean - rescaling by the method's own total is also what keeps a photo
+ * added to the pool from sharpening or flattening the claim for reasons that
+ * have nothing to do with the evidence.
+ *
+ * A photo with no `poolWeight` counts as full: `splitPoolable` is what assigns
+ * them, and a caller passing a bare literal is pooling a photo the gate named.
  */
 export function poolingWeights(
   included: PoolablePhoto[],
@@ -111,6 +224,31 @@ export function poolingWeights(
 ): number[] {
   const N = included.length;
   if (!N) return [];
+  const base = methodWeights(included, method, r);
+  const pool = included.map((p) => {
+    const w = (p as PoolMember).poolWeight;
+    return typeof w === "number" && Number.isFinite(w) && w > 0 ? w : 0;
+  });
+  // Every photo fully trusted: the method's answer, bit for bit.
+  if (pool.every((w) => w === 1)) return base;
+  // LOAD-BEARING, and it reads like redundant normalisation. Deleting
+  // `keepTotal` makes the pool sum to less than the method asked for, and since
+  // softmax is sensitive to the scale of its input, every pooled posterior
+  // flattens - because a photo was CHECKED, not because anything was learned.
+  // With it, the down-weight moves weight between photos and the pool stays
+  // exactly as sharp as its fully-trusted photos alone.
+  //
+  // The denominator is what the weights sum to AFTER scaling, not the pool
+  // weights alone: the two differ wherever a method's weights are not uniform,
+  // which is exactly what "Weight by lead" is for.
+  const after = base.reduce((a, b, i) => a + b * pool[i]!, 0);
+  if (!(after > 0)) return base;
+  const keepTotal = base.reduce((a, b) => a + b, 0) / after;
+  return base.map((b, i) => b * pool[i]! * keepTotal);
+}
+
+function methodWeights(included: PoolablePhoto[], method: PoolingMethod, r: number): number[] {
+  const N = included.length;
   if (method === "Equal weight") return included.map(() => 1 / N);
 
   if (method === "Weight by lead") {
@@ -336,11 +474,22 @@ function renormalizedPooledPosterior(
  * alone. Three photos at 0.355 / 0.350 / 0.360 - none of which would have named
  * a species - pool to 0.4625 and did.
  *
- * So the pool is gated on the PHOTOS, not on its own posterior: it may reach a
- * species claim only when every photo contributing to it reached one. Pooling
- * exists to gather more evidence for a claim, never to manufacture resolution
- * the individual classifications did not have. The pooled posterior still
- * decides the genus, and a pool of genus-only photos reports a genus.
+ * So the pool is gated on the PHOTOS, not on its own posterior: its resolution is
+ * the coarsest resolution any photo in it reached. A species claim needs every
+ * photo to have claimed a species; a genus claim needs every photo to have
+ * reached a genus. Pooling exists to gather more evidence for a claim, never to
+ * manufacture resolution the individual classifications did not have. The
+ * pooled posterior still decides the genus, and a pool of genus-only photos
+ * reports a genus.
+ *
+ * This matters more since an `unsure` photo entered the pool rather than being
+ * dropped. Three flat photos - three photographs of a blank wall - pool to a
+ * genus posterior above the 0.80 genus floor, so with a species-only gate the
+ * pooled card answered the original bug's question at one resolution down: the
+ * blank walls are announced as a genus. An unsure photo therefore caps the pool
+ * at nothing rather than at a genus. It still contributes its evidence to the
+ * ranking and the contribution table; what it withholds is a claim, and the pool
+ * cannot claim what one of the photos the user checked would not claim itself.
  */
 export function pooledVerdict(
   head: Head,
@@ -360,13 +509,30 @@ export function pooledVerdict(
   // is there to make visible: the branch cannot fire, rather than firing on a
   // default.
   const v = verdictFrom(head, spP, null, adjP, floors);
-  if (v.state !== "species") return v;
+  // "Not a mosquito" is a claim about every photo in the pool at once, and it
+  // outranks a species claim rather than competing with one, so the photo gate
+  // below does not apply to it. Neither does `unsure`: there is nothing to
+  // gate, the floors already said no.
+  if (v.state !== "species" && v.state !== "genus") return v;
+  const claimed = included.map((p) => p.verdict?.state);
   // A photo with no verdict at all is not evidence that the pool may sharpen
-  // past the species floor, so it blocks the claim rather than being ignored.
-  const everyPhotoClaimed = included.length > 0 && included.every((p) => p.verdict?.state === "species");
+  // past what its photos reached, so it blocks the claim rather than being
+  // ignored.
+  const everyPhotoClaimed = claimed.length > 0 && claimed.every((s) => s === "species");
   if (everyPhotoClaimed) return v;
-  // Demote into the genus branch rather than past it: the pooled posterior
-  // genuinely does carry genus-level mass, so the genus floor is still the
-  // thing that decides whether the pool names one at all.
-  return { ...v, state: "genus", species: null };
+  // One level down: a genus claim needs every photo to have reached a genus.
+  // An `unsure` photo is pooled now, so the pool routinely contains one, and
+  // three flat photos pool to a genus posterior above the 0.80 floor - three
+  // photographs of a blank wall would otherwise be announced as a genus, which
+  // is the claim this gate exists to prevent, just one resolution down.
+  //
+  // THE PRODUCT DECISION IS HERE, and it is reversible. Checking one blurry
+  // photo alongside three confident ones now costs the pool its headline: it
+  // reports "not confident enough to name a genus" where it used to name the
+  // species. To weaken it, delete this gate and let the species-only gate above
+  // demote instead - a one-line change that brings the blank-wall regression
+  // back, which `tests/regressions.test.ts` is written to catch.
+  const everyPhotoResolvedToGenus = claimed.length > 0 && claimed.every((s) => s === "species" || s === "genus");
+  if (everyPhotoResolvedToGenus) return v.state === "species" ? { ...v, state: "genus", species: null } : v;
+  return { state: "unsure", genus: null, species: null, topGenusP: v.topGenusP, topSpeciesP: v.topSpeciesP, runnersUp: v.runnersUp };
 }

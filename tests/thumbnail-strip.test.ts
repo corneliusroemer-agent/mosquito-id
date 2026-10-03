@@ -124,9 +124,21 @@ describe("contributesToPool (spec §1.1)", () => {
     expect(contributesToPool(fb)).toBe(false);
   });
 
-  it("leaves an unsure photo checkable: deciding not to trust it is the user's call", () => {
+  it("leaves an unsure photo checkable, and pools what the user checks", () => {
+    // Checking it used to mean it appeared ticked beside the gallery and
+    // contributed nothing to the sum. It is pooled now, down-weighted by its own
+    // posterior; `tests/pooling.test.ts` pins the weight.
     expect(contributesToPool(photo({ verdict: verdict("unsure") }))).toBe(true);
-    expect(entersPooledSum(photo({ verdict: verdict("unsure") }))).toBe(false);
+    expect(entersPooledSum(photo({ verdict: verdict("unsure") }))).toBe(true);
+  });
+
+  it("still refuses to pool a non-mosquito photo the checkbox lets the user see", () => {
+    // The distinction the strip draws: `contributesToPool` is a permission,
+    // `entersPooledSum` is the arithmetic. "Not a mosquito" is evidence against
+    // every species, so there is no weight small enough to fold it in at.
+    const midge = photo({ verdict: verdict("non-mosquito") });
+    expect(canView(midge)).toBe(true);
+    expect(entersPooledSum(midge)).toBe(false);
   });
 
   it("leaves checkable a photo with no verdict that nothing has excluded", () => {
@@ -145,14 +157,16 @@ describe("entersPooledSum agrees with splitPoolable (spec §1.1)", () => {
 
   it("routes every checkable photo that has a verdict to exactly one of the two lists", () => {
     // A checked photo that is neither pooled nor listed with a reason is the
-    // silent drop. It is reachable only for a photo with no verdict at all,
-    // which splitPoolable deliberately does not classify.
+    // silent drop. It used to be reachable for a photo with no verdict at all,
+    // which splitPoolable deliberately did not classify; it now files those as
+    // `excluded` with the reason `no-verdict`, so there is no third bucket left
+    // for a photo to disappear into.
     for (const c of COMBINATIONS) {
       if (!c.verdict) continue;
       const p = photo(c);
       if (!contributesToPool(p)) continue;
-      const { included, abstained } = splitPoolable([poolable(p)]);
-      expect(included.length + abstained.length, JSON.stringify(c)).toBe(1);
+      const { included, excluded } = splitPoolable([poolable(p)]);
+      expect(included.length + excluded.length, JSON.stringify(c)).toBe(1);
     }
   });
 
