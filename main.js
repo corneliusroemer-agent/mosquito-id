@@ -9,7 +9,10 @@ const CLIP_SIZE = 224;
 const DET_CONF = 0.70;
 const NMS_IOU = 0.70;
 const CROP_PAD = 0.10;
-const COMPLEX_MARGIN = 0.02;
+// The cosine gap below which a top genus is reported as low confidence: below
+// it the classifier has not really separated the winner from the runner-up,
+// whatever the numbers say.
+const GENUS_MARGIN = 0.02;
 const CACHE_NAME = "mosquito-models-v1";
 
 // Models live on Cloudflare R2, reached through the bucket's public development
@@ -24,26 +27,6 @@ const CACHE_NAME = "mosquito-models-v1";
 const MODEL_BASE_URL =
   "https://pub-2bbf73b4e93d40c9af925724fbd48d51.r2.dev/";
 const FP16_AVAILABLE = true;
-
-const COMPLEX_OF = {
-  "Aedes albopictus": "Aedes albopictus",
-  "Aedes aegypti": "Aedes aegypti",
-  "Aedes japonicus": "Aedes japonicus/koreicus",
-  "Aedes koreicus": "Aedes japonicus/koreicus",
-  "Culex pipiens": "Culex pipiens/torrentium",
-  "Culex torrentium": "Culex pipiens/torrentium",
-  "Culex quinquefasciatus": "Culex pipiens/torrentium",
-  "Culiseta annulata": "Culiseta annulata/morsitans",
-  "Culiseta morsitans": "Culiseta annulata/morsitans",
-  "Anopheles maculipennis": "Anopheles maculipennis complex",
-  "Anopheles claviger": "Anopheles maculipennis complex",
-  "Aedes vexans": "Other Aedes",
-  "Aedes geniculatus": "Other Aedes",
-  "Aedes cinereus": "Other Aedes",
-  "Culiseta longiareolata": "Culiseta longiareolata",
-  "Anopheles plumbeus": "Anopheles plumbeus",
-};
-
 
 const SPECIES_META = {
   "Aedes albopictus": {
@@ -832,30 +815,49 @@ function softmaxJoint(emb) {
   return { spP: p.slice(0, S), nuP: p.slice(S), spCos, logits };
 }
 
-function complexScores(spP, spCos) {
+// Group the species posteriors by genus - the first whitespace-delimited word of
+// the label - and report the summed posterior per genus.
+//
+// The split is on whitespace, not on the second word, because the label set
+// carries compound names ("Culiseta annulata/morsitans",
+// "Aedes japonicus/koreicus") where the slash joins two epithets inside one
+// genus. Splitting anywhere else would put half of Culiseta under Culiseta and
+// half under "annulata/morsitans".
+//
+// This replaced a species-complex grouping, which reported the same number twice
+// whenever a complex held a single species - the common case, since most of the
+// label set is one species per complex - and offered no column that said
+// anything the species column did not.
+function genusOf(name) {
+  return name.split(/\s+/)[0];
+}
+
+function genusScores(spP, spCos) {
   const comp = {};
   EMB.species.forEach((name, i) => {
-    const k = COMPLEX_OF[name] || name;
+    const k = genusOf(name);
     comp[k] = (comp[k] || 0) + spP[i];
   });
   const ranked = Object.entries(comp).sort((a, b) => b[1] - a[1]);
 
-  const topComplex = ranked[0][0];
-  const secondComplex = ranked.length > 1 ? ranked[1][0] : null;
+  const topGenus = ranked[0][0];
+  const secondGenus = ranked.length > 1 ? ranked[1][0] : null;
   let topCos = -Infinity;
   let secCos = -Infinity;
   EMB.species.forEach((name, i) => {
-    const k = COMPLEX_OF[name] || name;
-    if (k === topComplex && spCos[i] > topCos) topCos = spCos[i];
-    else if (k === secondComplex && spCos[i] > secCos) secCos = spCos[i];
+    const k = genusOf(name);
+    if (k === topGenus && spCos[i] > topCos) topCos = spCos[i];
+    else if (k === secondGenus && spCos[i] > secCos) secCos = spCos[i];
   });
 
-  const demoted = secondComplex !== null && topCos - secCos < COMPLEX_MARGIN;
+  const demoted = secondGenus !== null && topCos - secCos < GENUS_MARGIN;
   const labels = {};
   ranked.forEach(([k, v]) => { labels[k] = v; });
   if (demoted) {
     const winner = ranked[0][0];
-    const demotedLabel = winner + " - low confidence, genus-level only";
+    // The reported label is already a genus, so the hedge is a plain
+    // confidence note rather than a drop to genus level.
+    const demotedLabel = winner + " - low confidence";
     const val = labels[winner];
     delete labels[winner];
     return { labels: { [demotedLabel]: val, ...labels }, demoted: true };
@@ -930,14 +932,19 @@ function fuseViews(viewResults) {
   const spP = ex.map((e) => e / sum);
   const nuP = [nu / sum];
 
-  // complexScores needs cosine similarities to apply COMPLEX_MARGIN, and
+  // genusScores needs cosine similarities to apply GENUS_MARGIN, and
   // updatePooling needs logits. Recovering both from the fused posterior is not
   // an approximation: log p_i = scale * cos_i - logZ, so
   // (log p_i - log p_best) / scale is exactly cos_i - cos_best, and every
-  // consumer of these two quantities (COMPLEX_MARGIN's difference, the pooling
+  // consumer of these two quantities (GENUS_MARGIN's difference, the pooling
   // card's max-relative score) takes differences. The recovered cosines are
   // therefore shifted by a constant - best species at 0 - which no consumer can
   // see, and are otherwise the fused view's real ones.
+  //
+  // The logits below are built from spCos, not from lp: lp is a log-probability
+  // and multiplying one by the logit scale gives numbers ~100x the axis they are
+  // plotted on. scale * spCos is the single-view path's own logit, so a fused
+  // photo's score is on the same scale as an un-fused one's.
   const lp = spP.map((p) => Math.log(Math.max(p, 1e-12)));
   const best = Math.max(...lp);
   const spCos = lp.map((l) => (l - best) / scale);
@@ -946,10 +953,10 @@ function fuseViews(viewResults) {
   const logits = {};
   names.forEach((n, i) => {
     detail[n] = spP[i];
-    logits[n] = lp[i] * scale;
+    logits[n] = scale * spCos[i];
   });
 
-  const c = complexScores(spP, spCos);
+  const c = genusScores(spP, spCos);
   return { labels: c.labels, detail, logits, demoted: c.demoted, spP, nuP, spCos, nViews: V };
 }
 
@@ -2445,7 +2452,7 @@ function updatePooling() {
   const maxLogit = Math.max(...Object.values(aggLogits));
   const candidates = EMB.species.map(sp => ({
     name: sp,
-    complex: COMPLEX_OF[sp] || sp,
+    genus: genusOf(sp),
     relScore: aggLogits[sp] - maxLogit
   })).sort((a, b) => b.relScore - a.relScore);
 
@@ -2504,17 +2511,21 @@ function renderResultsTable() {
       tbody.appendChild(tr);
       return;
     }
-    const sortedComp = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
-    const topComp = sortedComp[0] || ["-", 0];
+    const sortedGenus = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
+    const topGenus = sortedGenus[0] || ["-", 0];
     const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
-    const topSpec = sortedSpec[0] || ["-", 0];
+    // A demoted photo has no species verdict - the classifier separated the top
+    // two genera by less than GENUS_MARGIN - so the genus is reported alone
+    // rather than topped up with a species name the evidence does not support.
+    const specName = p.demoted ? "not determined" : (sortedSpec[0] || ["-", 0])[0];
+    const specPct = p.demoted ? null : ((sortedSpec[0] || ["-", 0])[1] || 0) * 100;
 
     tr.innerHTML = `
       <td title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
-      <td title="${escapeHtml(topComp[0])}">${escapeHtml(topComp[0])}</td>
-      <td style="text-align:right">${(topComp[1] * 100).toFixed(1)}%</td>
-      <td title="${escapeHtml(topSpec[0])}">${escapeHtml(topSpec[0])}</td>
-      <td style="text-align:right">${(topSpec[1] * 100).toFixed(1)}%</td>
+      <td title="${escapeHtml(topGenus[0])}">${escapeHtml(topGenus[0])}</td>
+      <td style="text-align:right">${(topGenus[1] * 100).toFixed(1)}%</td>
+      <td title="${escapeHtml(specName)}">${escapeHtml(specName)}</td>
+      <td style="text-align:right">${specPct === null ? "-" : specPct.toFixed(1) + "%"}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -2523,7 +2534,7 @@ function renderResultsTable() {
 function downloadCSV() {
   if (!previews.length) return;
   sendLog("download_csv");
-  let csv = "Filename,Status,Cropped,Top Complex,Complex Score (%),Top Species,Species Score (%)\n";
+  let csv = "Filename,Status,Cropped,Top Genus,Genus Score (%),Top Species,Species Score (%)\n";
   previews.forEach(p => {
     if (p.pending || p.error) {
       // Exporting the previous crop's numbers under the new crop's name would be
@@ -2531,11 +2542,12 @@ function downloadCSV() {
       csv += `"${p.name}","${(p.error || "classifying").replace(/"/g, "'")}",${p.is_cropped},"-","-","-","-"\n`;
       return;
     }
-    const sortedComp = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
-    const topComp = sortedComp[0] || ["-", 0];
+    const sortedGenus = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
+    const topGenus = sortedGenus[0] || ["-", 0];
     const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
-    const topSpec = sortedSpec[0] || ["-", 0];
-    csv += `"${p.name}","${p.status}",${p.is_cropped},"${topComp[0]}",${(topComp[1] * 100).toFixed(1)},"${topSpec[0]}",${(topSpec[1] * 100).toFixed(1)}\n`;
+    const specName = p.demoted ? "not determined" : (sortedSpec[0] || ["-", 0])[0];
+    const specPct = p.demoted ? "-" : (((sortedSpec[0] || ["-", 0])[1] || 0) * 100).toFixed(1);
+    csv += `"${p.name}","${p.status}",${p.is_cropped},"${topGenus[0]}",${(topGenus[1] * 100).toFixed(1)},"${specName}",${specPct}\n`;
   });
 
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
