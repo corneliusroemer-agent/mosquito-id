@@ -330,6 +330,8 @@ const ASYNC = (window.__mosqAsync = {
   get sessClip() { return sessClip; },
   get sessDet() { return sessDet; },
   get selectedIndex() { return selectedIndex; },
+  set selectedIndex(v) { selectedIndex = v; },
+  get includedIndices() { return includedIndices; },
   // Test seam. EMB is otherwise only assigned once a classifier session has been
   // built, so a layout test cannot reach the pooled card without downloading the
   // 1.26 GB model. Production never writes it.
@@ -343,7 +345,15 @@ const ASYNC = (window.__mosqAsync = {
   verdictSentence,
   selectPhoto,
   processFiles,
-  deletePhoto
+  deletePhoto,
+  // The render entry points, so a probe can time and inspect a render with the
+  // same functions the app calls rather than a re-implementation of them. These
+  // are the functions the encode cache exists for, so a probe that did not call
+  // them would not be measuring it.
+  renderThumbnails,
+  renderActivePhoto,
+  updatePooling,
+  renderResultsTable
 });
 (function countFrames() {
   requestAnimationFrame(() => { ASYNC.frames++; countFrames(); });

@@ -17,7 +17,11 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = path.resolve(import.meta.dirname, "..");
+// The BUILT site, not the checkout: index.html loads a Vite bundle from
+// /src/app/main.js, so serving the repo root 404s on the entry script. This
+// probe needs the build to be current - run `npm run build` first, which is also
+// why a stale bundle would give a false pass here.
+const ROOT = path.resolve(import.meta.dirname, "..", "dist");
 const MIME = {
   ".html": "text/html", ".js": "text/javascript", ".json": "application/json",
   ".css": "text/css", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -40,15 +44,21 @@ const browser = await chromium.launch({ args: ["--no-sandbox"] });
 const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage();
 await page.route("**/*.onnx", (r) => r.abort());
 await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });
-await page.waitForTimeout(1200);
+// The app's own test seam. The render path is module-scoped, so the probe cannot
+// reach these by bare name the way it could when main.js was a classic script -
+// and it must not eval them out of the bundle, or it would be measuring a
+// different copy of the code than the one that ships.
+await page.waitForFunction(() => window.__mosqAsync?.renderThumbnails);
 
 // Photos at the size a phone actually produces. The cost of the thing being
 // measured is proportional to pixel count, so a small canvas would measure the
 // mechanism rather than the problem.
-const result = await page.evaluate(async (base) => {
-  const emb = await fetch(`${base}/text_embeds.json`).then((r) => r.json());
-  EMB = emb;
-  for (const k of ["species_emb", "nuisance_emb"]) EMB[k] = Float32Array.from(EMB[k]);
+const result = await page.evaluate(async () => {
+  const A = window.__mosqAsync;
+  const emb = await fetch("text_embeds.json").then((r) => r.json());
+  for (const k of ["species_emb", "nuisance_emb"]) emb[k] = Float32Array.from(emb[k]);
+  A.embeds = emb;
+  const EMB = emb;
 
   const canvas = (w, h, colour) => {
     const cv = document.createElement("canvas");
@@ -74,35 +84,36 @@ const result = await page.evaluate(async (base) => {
     };
   };
 
-  previews = []; includedIndices.clear();
-  for (let i = 0; i < 10; i++) { previews.push(photo(i)); includedIndices.add(i); }
-  selectedIndex = 0;
+  A.previews.length = 0;
+  A.includedIndices.clear();
+  for (let i = 0; i < 10; i++) { A.previews.push(photo(i)); A.includedIndices.add(i); }
+  A.selectedIndex = 0;
   document.getElementById("gallery-section").style.display = "block";
   document.getElementById("results-table-section").style.display = "block";
-  renderThumbnails(); renderActivePhoto(); updatePooling(); renderResultsTable();
+  A.renderThumbnails(); A.renderActivePhoto(); A.updatePooling(); A.renderResultsTable();
   await new Promise((r) => setTimeout(r, 400));
 
   // What a batch does: re-render after every photo that lands.
   const time = (fn, n) => { const t0 = performance.now(); for (let k = 0; k < n; k++) fn(); return (performance.now() - t0) / n; };
-  const renderMs = time(() => { renderThumbnails(); renderActivePhoto(); }, 10);
+  const renderMs = time(() => { A.renderThumbnails(); A.renderActivePhoto(); }, 10);
 
   // Tile identity across a re-render: the mechanism the cost saving rests on.
   const strip = document.getElementById("thumbnail-strip");
   const before = strip.children[0];
-  renderThumbnails();
+  A.renderThumbnails();
   const reused = strip.children[0] === before;
 
   // Behaviour. Every one of these passed before the change and must still.
   const strip3 = strip.children[2].querySelector(".tile-btn");
   strip3.click();
   await new Promise((r) => setTimeout(r, 200));
-  const selection = { selected: selectedIndex, active: strip.children[2].className.includes("active") };
+  const selection = { selected: A.selectedIndex, active: strip.children[2].className.includes("active") };
 
   const chk = strip.children[0].querySelector(".thumb-optin");
-  const wasIn = includedIndices.has(0);
+  const wasIn = A.includedIndices.has(0);
   chk.click();
   await new Promise((r) => setTimeout(r, 200));
-  const checkbox = { flipped: includedIndices.has(0) !== wasIn, excluded: strip.children[0].className.includes("excluded") };
+  const checkbox = { flipped: A.includedIndices.has(0) !== wasIn, excluded: strip.children[0].className.includes("excluded") };
   chk.click();
   await new Promise((r) => setTimeout(r, 200));
 
@@ -111,15 +122,15 @@ const result = await page.evaluate(async (base) => {
   strip.children[1].querySelector(".tile-delete-btn").click();
   await new Promise((r) => setTimeout(r, 250));
   const afterDelete = {
-    names: previews.map((p) => p.name).join(","),
+    names: A.previews.map((p) => p.name).join(","),
     numbers: [...strip.querySelectorAll(".number")].map((n) => n.textContent).join(","),
     labels: strip.children[0].querySelector(".tile-btn").getAttribute("aria-label"),
     tiles: strip.children.length,
-    previews: previews.length,
+    previews: A.previews.length,
   };
 
   return { renderMs: +renderMs.toFixed(2), reused, selection, checkbox, afterDelete };
-}, BASE);
+});
 
 const failures = [];
 const check = (name, ok, detail) => {
