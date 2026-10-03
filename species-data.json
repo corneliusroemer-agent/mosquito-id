@@ -12,7 +12,7 @@
       "activity": "Daytime biter, breeds in small artificial containers",
       "hosts": "Strongly anthropophilic (prefers humans)",
       "notes": "Lyre-shaped white markings on thorax. Primary vector for urban dengue and Zika.",
-      "blurb": "",
+      "blurb": "The mosquito of urban dengue. It needs no natural wetland at all — a water butt in a courtyard is enough — which is why it can drive transmission through a city in the tropics, and why removing small containers around a house is the control measure that matters.",
       "images": [
         {
           "src": "aedes-aegypti/01-88aee629.jpg",
@@ -66,8 +66,8 @@
           "source_title": "File:Aedes aegypti mosquito.jpg"
         }
       ],
-      "distinguish": "",
-      "lookFor": "",
+      "distinguish": "The only white-marked Aedes likely to be confused with it is Ae. albopictus, and the two separate on two characters. The thorax: Ae. aegypti carries a silvery lyre-shaped mark, a curved central stripe hooked at each end, while Ae. albopictus carries a single straight white stripe running front to back. The legs: Ae. aegypti bands only the fore- and midlegs and leaves the hind legs plain, whereas Ae. albopictus bands all three pairs. Ae. albopictus also reads as more sharply black-and-white overall and sits at the temperate end of the two species' ranges.",
+      "lookFor": "Small water-holding containers in and around homes — flowerpot saucers, water butts, tyre stacks, cisterns, a forgotten bucket — which is why it can sustain transmission through a city with no natural standing water at all. It bites through the daylight hours, hardest in the morning and again in mid-afternoon, and rests indoors on walls and furniture out of the sun.",
       "local": null,
       "seeAlso": []
     },
@@ -155,9 +155,9 @@
       "activity": "Crepuscular biter in marshy woodland areas",
       "hosts": "Mammals and birds",
       "notes": "Common in northern latitudes. Breeds in temporary woodland pools in spring.",
-      "blurb": "",
-      "distinguish": "",
-      "lookFor": "",
+      "blurb": "A quiet, unremarkable-looking woodland mosquito that spends most of its year as an egg, waiting for the spring pools it breeds in. It rarely bites people and rarely makes headlines, and it is as easy to overlook as it is to identify.",
+      "distinguish": "A bland, unpatterned brown-grey Aedes, which is much of why it is overlooked: there is no lyre and no stripe on the thorax, and no bright leg banding. That absence of banding and of thoracic markings separates it from every ornamented Aedes on the list. Against Ae. vexans, which shares both the plain brown build and the woodland habitat, separation rests on thoracic scale pattern and the form of the male terminalia rather than on anything obvious in a hand-held specimen.",
+      "lookFor": "Shallow, sunlit pools that form in woodland floor litter in early spring — wheel ruts, hoof-prints, depressions at tree bases holding a few weeks of meltwater — which is why it shows up in a narrow early window each year. Adults rest in the understorey and take blood around dusk and dawn.",
       "local": null,
       "seeAlso": []
     },
@@ -172,7 +172,7 @@
       "activity": "Daytime biter in shaded woodland areas",
       "hosts": "Mammals in forested habitats",
       "notes": "Breeds in tree holes and natural containers. Large, dark species with banded legs.",
-      "blurb": "",
+      "blurb": "A tree-hole mosquito in the strict sense: it breeds in water held in cavities in living trees, which ties it to mature woodland. Dark, strongly banded-legged, and it bites by day in the shade rather than at dusk.",
       "images": [
         {
           "src": "aedes-geniculatus/01-715647a0.jpg",
@@ -199,8 +199,8 @@
           "source_title": "File:Aedes geniculatus - Buckinghamshire - 52618541463.jpg"
         }
       ],
-      "distinguish": "",
-      "lookFor": "",
+      "distinguish": "Dark, nearly black, with no ornament on the thorax and conspicuous pale bands around the leg joints — broad whitish rings on the tibiae that stand out against the dark body. An unmarked thorax combined with strongly banded legs separates it from every other European Aedes on this list. Its close look-alike is Ae. triseriatus of North America, to which it is very nearly identical; within Europe it has no serious rival.",
+      "lookFor": "Water held in tree cavities, so the search goes upward as much as down: old birch, maple, ash and willow with a hollow that holds rain water through the summer. Adults are in the same woodland, resting on trunks and vegetation and biting in daylight, often a couple of metres above the ground.",
       "local": null,
       "seeAlso": []
     },
@@ -215,7 +215,7 @@
       "activity": "Daytime biter, breeds in rock pools and artificial containers",
       "hosts": "Mammals and birds",
       "notes": "Large dark mosquito with golden-brown scaling. Tolerates cooler climates than most Aedes.",
-      "blurb": "",
+      "blurb": "The northernmost Aedes, and the reason container control matters well beyond the tropics — it tolerates cool, shaded conditions that leave Ae. albopictus dormant, so records from northern Europe in an early or cool season are less surprising than they look.",
       "images": [
         {
           "src": "aedes-japonicus/01-a46496be.jpg",
@@ -266,8 +266,8 @@
           "source_title": "File:Asian Rock Pool Mosquito - Ochlerotatus japonicus, Woodbridge, Virginia.jpg"
         }
       ],
-      "distinguish": "",
-      "lookFor": "",
+      "distinguish": "Bronze-gold rather than white scales are the quickest way to rule it out of the Ae. albopictus and Ae. aegypti pair: those two are silver and starkly banded, this one is brown-bronze and much lower in contrast, on a heavier, broader-looking body. Ae. koreicus is the genuinely difficult case — the two are close relatives in the same species group, and field guides treat them as separable only on the male terminalia or by molecular methods, so a single photograph does not settle which of the two it is.",
+      "lookFor": "Rock pools, and the containers that imitate them: disused tyres, plant pots, buckets, gutters and birdbaths. Unlike Ae. albopictus it keeps going through cool, shaded conditions, which in Europe means it appears earlier in the season than the Asian tiger mosquito. A daytime biter.",
       "local": null,
       "seeAlso": []
     },
@@ -282,9 +282,9 @@
       "activity": "Daytime biter, similar ecology to Ae. japonicus",
       "hosts": "Mammals",
       "notes": "Very similar to Ae. japonicus — reliably distinguished only by molecular methods.",
-      "blurb": "",
-      "distinguish": "",
-      "lookFor": "",
+      "blurb": "A close relative and near-twin of Ae. japonicus, little studied until the last decade or so and now established in central Europe in the same small containers. Its arrival is part of what makes Ae. japonicus worth identifying carefully.",
+      "distinguish": "Very hard to separate from Ae. japonicus. They are close relatives with overlapping ranges in central Europe, and the features used to tell them apart — fine leg scaling and the shape of the male terminalia — are not something a photograph resolves. Both are dark, bronze-scaled, unmarked on the thorax and unbanded on the legs, so none of the coarse characters used elsewhere on this list separates them. For a hand-held specimen the honest answer is that a confident call needs the specimen in hand or a sequence.",
+      "lookFor": "The same container-breeding niche as Ae. japonicus — tyres, plant pots, water butts and small garden containers left standing over the summer — and the same daytime biting. Habitat alone will not separate the two, because they share it.",
       "local": null,
       "seeAlso": []
     },
@@ -299,7 +299,7 @@
       "activity": "Aggressive crepuscular and nocturnal biter after flooding",
       "hosts": "Mammals including humans, cattle, horses",
       "notes": "Eggs survive desiccation for years. Mass emergence after floods or heavy rain.",
-      "blurb": "",
+      "blurb": "The mosquito of flooded ground. Eggs laid in a flood can survive drying for years, so a river that spills its banks, or a field that stands in water for a fortnight, can produce a population that seems to arrive out of nowhere.",
       "images": [
         {
           "src": "aedes-vexans/01-1670fcd3.jpg",
@@ -351,8 +351,8 @@
           "source_title": "File:Inland Floodwater Mosquito (48453978947).jpg"
         }
       ],
-      "distinguish": "",
-      "lookFor": "",
+      "distinguish": "The character that gives it away is a pair of pale lengthwise stripes running down the thorax, on the same plain-brown, unbanded build it shares with Ae. cinereus. There is no leg banding and no abdominal ornament beyond faint basal rings. In a swarm after heavy rain the thoracic stripes, together with the sheer numbers, are the practical way to recognise it; nothing else on this list looks like it once it has taken blood and darkened.",
+      "lookFor": "Flooded ground: river and lake margins left high by a wet spring, rain-filled field hollows, and any low-lying area that has stood in water for a few weeks. Emergence follows the water rather than the calendar, so large numbers can appear days after the flood recedes. It bites through dusk into the night and is an extremely persistent biter.",
       "local": null,
       "seeAlso": []
     },
@@ -367,7 +367,7 @@
       "activity": "Nocturnal, breeds in shaded vegetated water",
       "hosts": "Mammals",
       "notes": "Prefers cooler, shaded habitats unlike An. maculipennis.",
-      "blurb": "",
+      "blurb": "The European malaria mosquito of cool, shaded water, and one of the earliest to fly each year. It carries almost nothing that matters to people, but it belongs to the genus in which human malaria is an ordinary fact everywhere else.",
       "images": [
         {
           "src": "anopheles-claviger/01-e0159889.jpg",
@@ -395,8 +395,8 @@
           "source_title": "File:Microbe Hunters p303 mosquitoes Anopheles claviger.png"
         }
       ],
-      "distinguish": "",
-      "lookFor": "",
+      "distinguish": "An Anopheles, resting at about 45° to the surface with the abdomen forward and upward rather than head-down in line with it — the single most useful character in the genus, and one you can use at a distance on a wall. In the hand it is told from An. maculipennis by the wings: claviger's are unmarked and uniformly pale-scaled, while An. maculipennis carries dark scales that read as a distinct black patch near the middle of the wing and toward the tip.",
+      "lookFor": "Cool, clear, shaded water with vegetation — a slow stream, an irrigation channel, a marshy pond under trees — rather than the sunlit open pools An. maculipennis uses. Adults rest in dense vegetation along woodland margins and bite at night, and they are among the first mosquitoes of the year.",
       "local": null,
       "seeAlso": []
     },
@@ -411,7 +411,7 @@
       "activity": "Nocturnal biter, breeds in clean sunlit water",
       "hosts": "Mammals including humans and cattle",
       "notes": "Species complex of ~11 siblings. Historically responsible for European malaria.",
-      "blurb": "",
+      "blurb": "The mosquito that made malaria a European disease. It is a species complex of around eleven near-identical siblings, several of which still bite people, and a century of drainage, housing and land use moved the malaria line north and then back south again.",
       "images": [
         {
           "src": "anopheles-maculipennis/01-9b0cdf7b.jpg",
@@ -465,8 +465,8 @@
           "source_title": "File:G.B. War Office, mosquito, A. maculipennis, in Kent Wellcome L0014531.jpg"
         }
       ],
-      "distinguish": "",
-      "lookFor": "",
+      "distinguish": "An Anopheles: it rests at an angle to the surface with the abdomen forward and upward, and a long dark proboscis projecting beyond the palps. Against An. claviger the wings are the give-away — maculipennis carries dark scales on the costa and along the wing margin, forming a black patch visible without a lens, where claviger's wings are uniformly pale. Against An. plumbeus it is larger and paler brown overall, with distinctly patterned wings where plumbeus is plainly unspotted.",
+      "lookFor": "Sunlit, shallow, warm, weedy water with little shade — irrigation channels, farm ponds, gravel pits, open marsh edges. It is among the first Anopheles to appear in spring and among the last to disappear in autumn. Adults come to people at night.",
       "local": null,
       "seeAlso": []
     },
@@ -620,7 +620,7 @@
       "activity": "Nocturnal biter, breeds in polluted water",
       "hosts": "Birds and mammals including humans",
       "notes": "Major nuisance mosquito in the tropics. Tolerates highly polluted water.",
-      "blurb": "",
+      "blurb": "The dominant house mosquito across the tropics, and the night-biting nuisance almost everywhere it lives. It breeds in water that would put off almost any other species — open drains, cesspits, overflows.",
       "images": [
         {
           "src": "culex-quinquefasciatus/01-41680c14.jpg",
@@ -672,8 +672,8 @@
           "source_title": "File:Culex quinquefasciatus.jpg"
         }
       ],
-      "distinguish": "",
-      "lookFor": "",
+      "distinguish": "It is the tropical counterpart of C. pipiens, and it is separated on pale abdominal and leg banding rather than on anything gross: quinquefasciatus carries complete pale bands across the abdominal tergites and conspicuous pale rings on the tarsi, including a complete white ring on the first tarsomere of the hind leg that pipiens lacks. In temperate Europe the distinction is largely academic — quinquefasciatus needs a warm climate and will very rarely be the correct answer to a European photograph. A plain brown nocturnal mosquito photographed in Europe coming back as this is far more likely to be the pipiens/torrentium pair.",
+      "lookFor": "Heavily polluted water — open drains, cesspits, sewage-contaminated standing water, an overflowing septic tank — which is the one ecological character that genuinely points away from C. pipiens. Nocturnal, and among the first mosquitoes of the tropical evening.",
       "local": null,
       "seeAlso": []
     },
@@ -688,9 +688,9 @@
       "activity": "Nocturnal, similar ecology to Cx. pipiens",
       "hosts": "Primarily birds",
       "notes": "Nearly identical to Cx. pipiens — reliably distinguished only by molecular methods.",
-      "blurb": "",
-      "distinguish": "",
-      "lookFor": "",
+      "blurb": "The near-twin of C. pipiens, kept as a separate species on fine wing-scale and genital characters rather than on anything a field observer can see. Ecologically it sits slightly higher in the canopy and in cleaner water than its better-known relative.",
+      "distinguish": "Barely separable from C. pipiens by eye. Both are plain brown nocturnal mosquitoes of the same genus, resting the same way, with plain unbanded legs and no ornament on the thorax. The wing-scale pattern and the shape of the male terminalia are what separate them, and neither is reliably readable from a photograph. Where the two do differ consistently, torrentium tends to sit higher in the tree canopy, which changes nothing a camera can see. A confident pipiens/torrentium call from an image alone is not available, and the pair is often best reported as one.",
+      "lookFor": "Permanent, relatively clean water rather than the filthy containers C. pipiens uses — stone-flagged rain barrels, garden ponds, farm watering troughs, tree holes. Like pipiens it is present through the whole year wherever it can find a site to overwinter. Nocturnal.",
       "local": null,
       "seeAlso": []
     },
@@ -705,7 +705,7 @@
       "activity": "Year-round in mild climates, bites at dusk/dawn",
       "hosts": "Birds and mammals including humans (painful bite)",
       "notes": "One of the largest European mosquitoes. Distinctive banded legs and spotted wings.",
-      "blurb": "",
+      "blurb": "One of the largest mosquitoes in Europe, and the one most likely to bite you in winter. Females overwinter as adults, so a mild day in December can still find one on the wing.",
       "images": [
         {
           "src": "culiseta-annulata/01-6b11bfa5.jpg",
@@ -756,8 +756,8 @@
           "source_title": "File:Culiseta annulata, Benson (52359571071).jpg"
         }
       ],
-      "distinguish": "",
-      "lookFor": "",
+      "distinguish": "Conspicuous white bands on all the tibiae and femora are the character to use, and they are what separate it from C. longiareolata, whose legs are completely plain and unstriped. longiareolata compensates with two pale lengthwise stripes on the thorax, which annulata lacks. The wings of annulata are spotted with dark scales, another mark longiareolata does not share, and its abdominal banding is broad and white.",
+      "lookFor": "Almost any still water that holds its shape for months — ponds, marsh edges, farm tanks, overgrown ditches, and rain barrels that are never emptied. It is one of the few European mosquitoes that can be found biting on mild winter days, so an encounter with one in January is not a surprise.",
       "local": null,
       "seeAlso": []
     },
@@ -772,9 +772,9 @@
       "activity": "Breeds in containers, rarely bites humans",
       "hosts": "Primarily birds; very rarely bites mammals",
       "notes": "Very common in Mediterranean countries. Often found in neglected swimming pools.",
-      "blurb": "",
-      "distinguish": "",
-      "lookFor": "",
+      "blurb": "A Mediterranean container mosquito that rarely bites people and is mostly after birds. Where it turns up it is almost always because a garden pool or a water tank has been left standing.",
+      "distinguish": "Plain legs — no pale rings on the tibiae at all — are what set it apart from C. annulata, the other large ring-legged Culiseta of southern Europe. In compensation it carries two pale stripes running lengthwise down the thorax and a broadly banded yellow-and-dark abdomen. Its unmarked wings separate it from the spotted-winged annulata, and its smaller size separates it from the heavier C. morsitans.",
+      "lookFor": "Man-made containers in and around towns — neglected swimming pools, water tanks, fountains, cisterns, overflowing irrigation systems — which is how it spread so widely through the Mediterranean and north into temperate Europe. It rarely bites people, blood meals coming mostly from birds, so it is a presence in a garden rather than a nuisance.",
       "local": null,
       "seeAlso": []
     },
@@ -789,9 +789,9 @@
       "activity": "Crepuscular, breeds in semi-permanent woodland pools",
       "hosts": "Primarily birds and larger mammals",
       "notes": "Large mosquito in forested and rural habitats. Early-season species.",
-      "blurb": "",
-      "distinguish": "",
-      "lookFor": "",
+      "blurb": "An early-season woodland mosquito of the far north, mostly a bird feeder. Its close relatives in the annulifera group are separated on characters too fine to see, which is a recurring theme in European mosquito identification.",
+      "distinguish": "A plain brown, unmarked Culiseta: no thoracic stripes, no leg banding to speak of, unspotted wings. That leaves it inside the annulifera species group, which holds several European and Holarctic members separated only on fine scale patterns and male terminalia — C. annulifera is the one it is most often confused with in central and northern Europe. The easy calls it does make are against the other two on this list: size separates it from the smaller longiareolata, and the strong leg rings separate it from annulata. Against annulifera it has nothing obvious going for it.",
+      "lookFor": "Shaded, semi-permanent woodland pools and forest-edge water with a leaf litter, and it is an early-season species — among the first mosquitoes to fly in northern Europe in spring. It bites around dusk and dawn, taking blood mostly from birds and larger mammals.",
       "local": null,
       "seeAlso": []
     }
