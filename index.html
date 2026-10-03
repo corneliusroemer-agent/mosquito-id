@@ -517,6 +517,21 @@
     color: #b45309;
     margin: 8px 0;
   }
+  /* The verdict line sits directly above the two reserved notice boxes, so
+     showing or hiding it would move every score already on screen down the
+     panel. Its height is reserved whether or not there is anything to claim:
+     main.js toggles visibility, never display. Two lines are enough for the
+     longest sentence ("Definitely Culiseta - maybe annulata or morsitans") and
+     the full text is in the tooltip beyond that. */
+  #score-uncertain {
+    visibility: hidden;
+    min-height: 44px;
+    max-height: 44px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  #score-uncertain.shown { visibility: visible; }
   .score-item { margin: 12px 0; }
   .score-item-header {
     display: flex;
@@ -819,6 +834,10 @@
   .crop-badge.pending { background: var(--color-accent-subdued); color: var(--color-accent); }
   .crop-badge.error { background: #fee2e2; color: #b91c1c; }
   .data-table tr.row-pending td { color: var(--body-text-color-subdued); }
+  /* Contribution-table rows for a photo that is in the pooled sum at a coarser
+     claim than a species, and for one left out of it entirely. */
+  .contrib-note { color: var(--body-text-color-subdued); font-size: 11px; }
+  .data-table tr.row-excluded td { color: var(--body-text-color-subdued); }
 
   /* The results table's geometry comes from its header and its colgroup alone,
      never from the text of a row. A photo's scores arriving therefore cannot
