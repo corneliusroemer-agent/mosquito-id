@@ -1097,6 +1097,24 @@ function verdictFrom(spP) {
   return { state: "unsure", genus: null, species: null, topGenusP, topSpeciesP, runnersUp };
 }
 
+// The species posterior a set of aggregated logits describes, or null if the
+// aggregate carries no usable signal.
+//
+// The aggregated logits ARE log-probabilities up to a per-photo constant (a
+// photo's logits are scale*cos, and log p = scale*cos - logZ), so a softmax over
+// their weighted sum is the pooled posterior. Max-subtracted for overflow: raw
+// logits run to hundreds and exp() of that is Infinity on every species, which
+// would silently turn the whole pool into NaN.
+function pooledPosterior(aggLogits) {
+  const vals = EMB.species.map((sp) => aggLogits[sp]);
+  if (!vals.length || vals.some((v) => !Number.isFinite(v))) return null;
+  const max = Math.max(...vals);
+  const exps = vals.map((v) => Math.exp(v - max));
+  const total = exps.reduce((a, b) => a + b, 0);
+  if (!(total > 0) || !Number.isFinite(total)) return null;
+  return exps.map((e) => e / total);
+}
+
 // The sentence the score panel leads with. It is a claim about the photograph,
 // never about our machinery: there is deliberately no "analysing" state here.
 function verdictSentence(v) {
@@ -2646,7 +2664,37 @@ function updatePooling() {
     relScore: aggLogits[sp] - maxLogit
   })).sort((a, b) => b.relScore - a.relScore);
 
+  // The pooled genus headline. Derived from the POOLED posterior - the softmax of
+  // the aggregated logits - and gated by the same verdictFrom/verdictSentence the
+  // per-photo line uses, so "confident enough" means one thing in the app.
+  //
+  // Softmax of the aggregate, not a mean of per-photo verdicts: the logits already
+  // are the per-photo log-probabilities up to a constant (a photo's logits are
+  // scale*cos, and log p = scale*cos - logZ), so softmax(aggLogits) is the pooled
+  // posterior exactly, and one pooled gate on it is the pooled claim. Averaging
+  // per-photo verdicts instead would let two confident photos averaging to a
+  // confident mean outvote a third that pooled with them says nobody knows.
+  //
+  // A per-photo `unsure` photo is already excluded from `included` above, so it
+  // is absent from this aggregate as well - the pooled headline cannot name a
+  // genus the pool itself refused to name.
+  const pooledSpP = pooledPosterior(aggLogits);
+  const pooledVerdict = pooledSpP && verdictFrom(pooledSpP);
+  const pooledLine = pooledVerdict ? verdictSentence(pooledVerdict) : "";
+
   poolScores.innerHTML = "";
+  // A species-state verdict renders an empty sentence on purpose: the ranking
+  // below already leads with the binomial, and a headline that repeated it added
+  // nothing. So the line appears only when the pooled gate has something coarser
+  // to say, and is absent entirely when the pool is a confident species.
+  if (pooledLine) {
+    const head = document.createElement("div");
+    head.className = "combined-genus-headline" + (pooledVerdict.state === "genus" ? " is-genus" : "");
+    // Full text in the tooltip; the box is one line tall whatever the genus is.
+    head.textContent = pooledLine;
+    head.title = pooledLine;
+    poolScores.appendChild(head);
+  }
   candidates.slice(0, 10).forEach(c => {
     const row = document.createElement("div");
     row.className = "combined-candidate";

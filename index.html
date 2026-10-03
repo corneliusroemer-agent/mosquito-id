@@ -266,6 +266,27 @@
     padding-right: 4px;
   }
   .combined-candidate { margin-bottom: 8px; }
+  /* The pooled genus headline. Sticky inside .combined-scores, whose height is
+     fixed at 240px: a sticky child is in flow, so it costs the scroll area's
+     content but never its box, and the card's height is unchanged whether or not
+     there is a headline. Background matches the card so the ranking scrolls
+     under it rather than showing through. */
+  .combined-genus-headline {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--background-fill-secondary);
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-color-primary);
+    padding-right: 4px;
+  }
+  .combined-genus-headline:not(.is-genus) {
+    font-weight: 400;
+    color: var(--body-text-color-subdued);
+  }
   .combined-score-row {
     display: flex;
     justify-content: space-between;
