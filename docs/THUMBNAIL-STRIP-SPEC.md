@@ -5,15 +5,15 @@ element. Every rule here is stated so a test can check it; the rationale section
 at the end carries the rules that are not.
 
 This document is the target, not a description. Entries marked **WRONG IN CODE**
-are places where the implementation currently does something else. `e2e/tier1/tile-states.spec.ts`
+are places where the implementation did something else when this was written;
+each says "was", and each is now covered by a passing test. `e2e/tier1/tile-states.spec.ts`
 and `e2e/tier1/strip-index-stability.spec.ts` encode the tables below as
 assertions; a change to the strip that breaks a rule here fails those tests
 rather than passing review.
 
-**`strip-index-stability.spec.ts` is committed RED.** Its three failures are the
-reproduction for R5.1–R5.3, kept as tests so the fix is verifiable rather than
-asserted. They are excluded from `npm run test:e2e` for that reason, and from CI;
-they are not passing tests. Everything else in `e2e/tier1/` passes.
+**`strip-index-stability.spec.ts` was committed RED** as the reproduction for
+R5.1–R5.3. It is green now that the handlers resolve their index at event time,
+and it is back in `npm run test:e2e` and in CI.
 
 ## 1. What a tile is
 
@@ -30,9 +30,13 @@ A tile contains exactly these four interactive elements, and no more:
 | Include checkbox | `.thumb-optin` | Add or remove this photo from the pooled result |
 | Status badge | `.crop-badge` | Report the photo's analysis state (not interactive) |
 
-**R1.1** No control may be a descendant of another control. In particular the
-`<button class="tile-btn">` must not contain the checkbox or the delete button,
-and the `<label class="include">` must not contain a button.
+**R1.1** No control may be a descendant of another control, and the tile contains
+exactly the four elements in the table above and nothing else. The include
+checkbox used to sit inside a `<label class="include">` with no text, which gave
+it no accessible name and put a `<button>` in the same corner of the tile for the
+browser to retarget a click onto; the checkbox is now its own element, named by
+`aria-label`, with the hit area widened by its own padding rather than by a
+wrapper.
 
 **R1.2** No absolutely-positioned control may overlap a neighbouring tile's hit
 area. The delete button and the badge must stay within their own tile's box.
@@ -44,9 +48,13 @@ This is the part every recorded bug lived in: the gaps between these rows.
 | State | `fallback` | `pending` | `error` | `verdict.state` | `is_cropped` | Badge | Meaning |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Queued / pending | any | `true` | — | — | any | `…` | Decode or inference in flight |
+
+A photo that is not a mosquito and a photo with no crop are different states and
+must not share a badge: the green cropped `✓` on a non-mosquito photo asserts the
+opposite of what happened, and it is what R4.3 forbids.
 | Cropped, decided | `false` | `false` | — | `species` \| `genus` | `true` | `✓` | A mosquito was found and named, or named to genus |
-| Cropped, unsure | `false` | `false` | — | `unsure` | `true` | `✓` | Valid photo, classifier would not name a genus |
-| Cropped, non-mosquito | `false` | `false` | — | `non-mosquito` | `true` | `✓` | Valid photo, the gate says it is not a mosquito |
+| Cropped, unsure | `false` | `false` | — | `unsure` | `true` | `?` | Valid photo, classifier would not name a genus |
+| Cropped, non-mosquito | `false` | `false` | — | `non-mosquito` | `true` | `✕` | Valid photo, the gate says it is not a mosquito |
 | **Uncropped, no detection** | `true` | `false` | — | — | `false` | `✕` | The detector found no mosquito in this photo |
 | Uncropped, no flag | `false` | `false` | — | — | `false` | `✕` | As above, without the fallback flag set |
 | Error | any | `false` | set | — | any | `!` | The photo is readable; classification failed |
@@ -85,9 +93,20 @@ the same frame:
 
 A selection that satisfies only the third of these is a defect: a user cannot see
 `selectedIndex`, so an invisible selection is indistinguishable from a dead
-thumbnail. **WRONG IN CODE** — an uncropped photo selects, but the zoomed panel
-falls back to the same full frame for every uncropped photo, so switching between
-two of them shows no visible change.
+thumbnail. Two cases made this true and are now covered by
+`e2e/tier1/strip-feedback.spec.ts`: the selected tile could sit outside the
+strip's scroll box, and two queued photos rendered an identical viewer.
+
+**R4.2a The selected tile is inside the strip's scroll box.** With a dozen photos
+the strip overflows, and selecting the last one left it entirely off-screen. Only
+the strip's own `scrollLeft` may be written: `scrollIntoView` walks up the tree
+and scrolls whatever ancestor it finds, including the page, which is a layout
+shift the strip has no business causing.
+
+**R4.2b A photo with no pixels is told what is true about it.** The zoomed panel's
+empty line used to say "No mosquito detected" for a photo that had not been
+analysed at all, which both refutes a photo nobody has looked at yet and makes two
+queued photos indistinguishable. It names the photo and its state instead.
 
 **R4.3 The badge states the photo's analysis state** as in §2, and its `title`
 carries a full sentence. A badge reading `✕` alone is not sufficient — it must
@@ -100,23 +119,42 @@ always be possible, including mid-inference.
 means disabled for: pending, error, `fallback`, and non-mosquito. Enabled for:
 cropped-and-decided, cropped-unsure, and uncropped-without-fallback.
 
-**R4.6 A disabled checkbox explains itself.** Its own `title`, the wrapping
-label's `title`, and the badge's `title` must each name the reason — the cause,
-not a restatement of the state. A disabled control whose tooltips are empty or
-say only "excluded" is a defect, because a control that silently ignores clicks
-is indistinguishable from a broken one. **WRONG IN CODE** — the checkbox was
-disabled with no reason anywhere on the tile.
+**R4.6 A disabled checkbox explains itself.** Its accessible name, its `title`
+and the badge's `title` must each name the reason — the cause, not a restatement
+of the state, and not the mechanism's own name. A disabled control whose tooltips
+are empty, or say only "excluded", or advertise a photo it will not accept, is a
+defect: a control that silently ignores clicks is indistinguishable from a broken
+one.
+
+**R4.6a A disabled checkbox never offers inclusion.** Its name and `title` must
+not begin "Include photo" when the checkbox is disabled. The queued, errored,
+non-mosquito and fallback states each carry their own reason, and no reason is
+ever the empty string.
+
+**R4.6b The checkbox's accessible name and its `title` are one string**, so the
+two cannot drift into telling the user two different things.
 
 **R4.7 A disabled checkbox does not offer a pointer cursor.** It must compute to
 `not-allowed`, or the CSS default for disabled inputs, never `pointer`.
 
 **R4.8 A checkbox click toggles exactly one photo.** The photo whose tile was
 clicked, and no other. `includedIndices` must change by at most one entry, and
-that entry must be the clicked photo's. **WRONG IN CODE** — see §5.
+that entry must be the clicked photo's. Was **WRONG IN CODE** — see §5.
 
 **R4.9 The combined card reflects inclusion immediately.** Toggling a checkbox
 updates `#combined-scores` and `#contribution-table` within the same frame as the
 checkbox's own checked state.
+
+**R4.10 The combined card states both counts.** `#inclusion-summary` says how many
+photos are checked and how many of those enter the sum, in
+`src/app/thumbnailStrip.ts`'s `inclusionSummary`. A checked photo is allowed not
+to pool — that is R3.2's rule and the user's decision to make — but three ticked
+boxes beside a table listing two of them reads as a bug unless the card says so.
+
+**R4.11 No index the strip writes can be unresolvable.** `updatePooling` drops an
+index that no longer names a photo, and used to drop it in silence. The strip is
+the only writer of `includedIndices`, so `renderThumbnails` re-validates the set
+on every render (`validateIncluded`) and nothing dangling survives a delete.
 
 ## 5. Index stability
 
@@ -128,13 +166,19 @@ built with.
 > **R5.1** Every handler on a tile must resolve the clicked photo's index at
 > click time. No handler may capture an index in a closure at build time.
 
-Concretely: `delBtn.onclick`, `btn.onclick`, and `chk.onchange` must all be
-(re)assigned on every render, in the same place, for the same reason. The index
-used must be the index of `previews.indexOf(the photo this node is showing)`.
+Concretely: `delBtn.onclick`, `btn.onclick` and `chk.onchange` must all resolve
+the clicked photo's index when they fire. Binding them once and reading an index
+field that `renderThumbnails` writes on every render satisfies this and is what
+the code does; re-assigning all three per render satisfies it equally. What is not
+allowed is a handler that closes over a number it was given at build time, or over
+anything else that stops being true when a photo before it is deleted. The three
+handlers must be treated identically: the delete button was re-pointed on every
+render while the other two were not, and that asymmetry is precisely why two
+wrong-tile defects shipped while the delete button kept working.
 
 **R5.2** A tile's `aria-label` names the photo it currently shows, by its
-current position: `View photo N: <filename>`. **WRONG IN CODE** — the label was
-correct while the handler behind it was not, which is why the bug presented as
+current position: `View photo N: <filename>`. Was **WRONG IN CODE** — the label
+was correct while the handler behind it was not, which is why the bug presented as
 "clicking one gets another".
 
 **R5.3** After any deletion, each remaining tile's delete button, select button
@@ -149,16 +193,23 @@ selects the photo now at that position.
 
 ## 6. Accessibility
 
-**R6.1** The checkbox has an accessible name naming the photo and the action —
-it must not be an unnamed box. The tile's `.include` label currently carries a
-tooltip; the accessible name must be reachable by a screen reader.
+**R6.1** The checkbox has an accessible name naming the photo and the action, in
+every state and whether enabled or not — it must not be an unnamed box. It is
+carried by `aria-label`, regenerated on every render so its photo number tracks
+the photo's current position.
 
 **R6.2** The select button and the delete button each have an accessible name.
 The select button's is the `aria-label` from R5.2; the delete button's names the
 photo it removes.
 
-**R6.3** Tab order within a tile is: select button, delete button, checkbox. All
-three are reachable by keyboard, and each is operable by keyboard alone.
+**R6.3** Tab order within a tile is: select button, include checkbox, delete
+button — the visual order, with the destructive action last. All three are
+reachable by keyboard and each is operable by keyboard alone.
+
+**R6.3a Focus follows the selection.** Moving the selection with `←`/`→` while
+focus stayed on the tile button that was left behind makes `Enter` act on a
+different photo than the highlighted one, which is the same defect as a click
+landing on the wrong tile.
 
 **R6.4** The badge's state is exposed in text, not only in its `title`. The
 select button's `aria-label` and the badge together let a screen reader user
