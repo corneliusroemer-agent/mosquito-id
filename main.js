@@ -12,6 +12,37 @@ const CROP_PAD = 0.10;
 const COMPLEX_MARGIN = 0.02;
 const CACHE_NAME = "mosquito-models-v1";
 
+// ---- Confidence gating ----
+//
+// What the classifier will claim about a photo, and nothing below it: at
+// SPECIES_CONFIDENCE_FLOOR and above it names a species; below that but with a
+// genus whose summed posterior clears GENUS_CONFIDENCE_FLOOR it names the genus
+// and the species it leaned toward; below both it says it is not confident. The
+// per-species ranking is shown in every one of those states.
+//
+// Both floors are empirical, and both were fitted on the validation split of the
+// 659-row corpus and read once on test
+// (investigations/2026-10-03-rewrite/40-precision/40-calibration, extended for
+// the genus floor by tmp/gate/genus_gate.py):
+//
+//   SPECIES_CONFIDENCE_FLOOR 0.373 - the 90%-coverage point. Answers 88% of test
+//     images at 96.6% accuracy (95% CI 93.2-99.1) against the shipped argmax's
+//     88.0% on the same rows.
+//
+//   GENUS_CONFIDENCE_FLOOR 0.54 - a genus is easier to get right than a species,
+//     so the floor for naming one is higher: it is the smallest value at which
+//     the genus is right on every val row the species gate abstains on.
+//
+// THE BINDING CONSTRAINT IS THE VAL->TEST TRANSFER GAP, not either value. On
+// this corpus a threshold picked on val at 5% FPR got 60.0% recall on test
+// where the test-oracle threshold got 86.0%, on 74 val rows. Genus answers are
+// where that gap bites hardest and they are measured on very few rows: at this
+// floor the genus is right on 7 of 7 test rows the species gate abstains on,
+// and wrong on 2 of 16 at a floor of 0.30. Re-fit both when more labelled data
+// exists; do not tune either on the test split.
+const SPECIES_CONFIDENCE_FLOOR = 0.373;
+const GENUS_CONFIDENCE_FLOOR = 0.54;
+
 // Models live on Cloudflare R2, reached through the bucket's public development
 // URL. Objects sit at the root of that host - the dev URL serves the one bucket
 // directly, with no bucket-name path segment.
@@ -262,6 +293,8 @@ function commitScores(p, r) {
   p.detail = r.detail;
   p.logits = r.logits;
   p.demoted = r.demoted;
+  // A verdict that claims nothing must not keep the one it had: pooling reads it.
+  p.verdict = r.verdict || null;
   p.pending = false;
   p.error = null;
 }
@@ -889,7 +922,110 @@ function fuseViews(viewResults) {
   });
 
   const c = complexScores(spP, spCos);
-  return { labels: c.labels, detail, logits, demoted: c.demoted, spP, nuP, spCos, nViews: V };
+  // The gate reads the FUSED posterior, which is the whole point of fusing
+  // before deciding: one view alone is an opinion, the pool of the two is the
+  // photo's score.
+  return { labels: c.labels, detail, logits, demoted: c.demoted, spP, nuP, spCos, nViews: V,
+           verdict: verdictFrom(spP) };
+}
+
+// ---- Genus, and the three-state verdict ----
+//
+// The genus is the first word of the species name, and nothing else. It has to
+// come from EMB.species rather than a hardcoded list so that adding a species
+// cannot leave the gate reasoning about a genus that no longer exists, and so
+// that a name carrying a compound epithet - "Culiseta annulata/morsitans",
+// "Anopheles maculipennis complex" - stays inside its genus. Splitting on
+// whitespace first and only then taking the remainder handles that: the epithet
+// keeps its slash and its "complex", and neither is mistaken for a genus.
+function genusOf(name) {
+  const parts = String(name).trim().split(/\s+/);
+  // A one-word label is its own genus. Returning "" there would file every
+  // bare name under a single empty genus, which is worse than saying the name
+  // is the genus it is.
+  return parts[0] || "";
+}
+
+// Index of the genus each species belongs to, rebuilt whenever EMB changes.
+let genusIndexCache = null;
+function speciesGenusIndex() {
+  if (genusIndexCache && genusIndexCache.emb === EMB) return genusIndexCache;
+  const idx = new Map();
+  EMB.species.forEach((name, i) => {
+    const g = genusOf(name);
+    if (!idx.has(g)) idx.set(g, []);
+    idx.get(g).push(i);
+  });
+  genusIndexCache = { emb: EMB, idx };
+  return genusIndexCache;
+}
+
+// What the classifier will claim about one photo, from a single posterior.
+//
+// `spP` is the FUSED species posterior - never a single view's. Gating per view
+// would abstain far more often than the photo deserves, because fusion is what
+// turns two undecided views into a decided one, and it would make the two views
+// disagree about the same photo's verdict.
+//
+// The genus posterior is its species' posteriors summed, so it is larger than any
+// single species posterior by construction: that is why it clears a higher floor
+// rather than the same one.
+//
+// Returns null-ish fields rather than throwing on an empty posterior, so a
+// malformed score array degrades to "not confident" instead of taking the page
+// down.
+function verdictFrom(spP) {
+  if (!spP || !spP.length) {
+    return { state: "unsure", genus: null, species: null, topGenusP: 0, topSpeciesP: 0, runnersUp: [] };
+  }
+  const { idx } = speciesGenusIndex();
+  const genP = [];
+  for (const [g, members] of idx) {
+    genP.push([g, members.reduce((a, i) => a + (spP[i] || 0), 0)]);
+  }
+  genP.sort((a, b) => b[1] - a[1]);
+  const [topGenus, topGenusP] = genP[0];
+
+  let topSpecies = 0;
+  for (let i = 1; i < spP.length; i++) if (spP[i] > spP[topSpecies]) topSpecies = i;
+  const topSpeciesP = spP[topSpecies] || 0;
+  const speciesName = EMB.species[topSpecies];
+
+  // The species it leaned toward, inside the genus being named: the claim is
+  // "one of these", so the runner-ups have to be siblings or the sentence would
+  // name a species from another genus.
+  const runnersUp = (idx.get(topGenus) || [])
+    .filter((i) => i !== topSpecies)
+    .sort((a, b) => (spP[b] || 0) - (spP[a] || 0))
+    .map((i) => ({ name: EMB.species[i], p: spP[i] || 0 }));
+
+  if (topSpeciesP >= SPECIES_CONFIDENCE_FLOOR) {
+    return { state: "species", genus: topGenus, species: speciesName, topGenusP, topSpeciesP, runnersUp };
+  }
+  if (topGenusP >= GENUS_CONFIDENCE_FLOOR) {
+    return { state: "genus", genus: topGenus, species: null, topGenusP, topSpeciesP, runnersUp };
+  }
+  return { state: "unsure", genus: null, species: null, topGenusP, topSpeciesP, runnersUp };
+}
+
+// The sentence the score panel leads with. It is a claim about the photograph,
+// never about our machinery: there is deliberately no "analysing" state here.
+function verdictSentence(v) {
+  if (!v) return "";
+  if (v.state === "species") return "";
+  if (v.state === "genus") {
+    // "Definitely Aedes - maybe aegypti or albopictus". Two runners-up is enough
+    // to say which way it is torn; more is noise, and the ranking below already
+    // carries every one of them.
+    const names = [v.runnersUp[0], v.runnersUp[1]].filter(Boolean).map(r => {
+      const parts = r.name.trim().split(/\s+/);
+      return parts.length > 1 ? parts.slice(1).join(" ") : r.name;
+    });
+    if (!names.length) return `Definitely ${v.genus}`;
+    if (names.length === 1) return `Definitely ${v.genus} - maybe ${names[0]}`;
+    return `Definitely ${v.genus} - maybe ${names[0]} or ${names[1]}`;
+  }
+  return "Not confident enough to name a genus";
 }
 
 // Do the views of this photo agree on the species, and if not, by how much do
@@ -1271,6 +1407,7 @@ async function classifyImage(imgBitmap, filename) {
     detail: fused.detail,
     logits: fused.logits,
     demoted: fused.demoted,
+    verdict: fused.verdict,
     agreement: viewAgreement(views.map((v) => v.spP), fused.spP),
     viewsLanded: views.length,
     viewsTotal: views.length,
@@ -1345,7 +1482,7 @@ async function processFiles(fileList) {
     fullCanvas: null, cropCanvas: null, contextCanvas: null,
     cropBox: null, contextBox: null,
     scores: {}, detail: {}, logits: null,
-    status: "queued…", fallback: false, is_cropped: false, demoted: false,
+    status: "queued…", fallback: false, is_cropped: false, demoted: false, verdict: null,
     manual_full_photo: false, fingerprint: null,
     rev: 0, pending: true, error: null,
     agreement: null, viewsLanded: 0, viewsTotal: 0,
@@ -1444,6 +1581,7 @@ async function processFiles(fileList) {
           detail: fused.detail, logits: fused.logits, status: data.status, fallback: data.fallback,
           is_cropped: data.is_cropped,
           demoted: fused.demoted,
+          verdict: fused.verdict,
           agreement: viewAgreement(views.map((v) => v.spP), fused.spP),
           viewsLanded: views.length, viewsTotal: views.length,
           fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
@@ -1616,7 +1754,12 @@ function renderThumbnails() {
 
     const label = document.createElement("label");
     label.className = "include";
-    label.title = !p.fallback ? "Include this photo in pooled result" : "No usable mosquito detection";
+    // The one place a photo's own verdict is visible without selecting it, so an
+    // excluded photo is never only knowable from the contribution table.
+    const abstained = p.verdict?.state === "unsure";
+    label.title = abstained
+      ? "Not confident enough to name a genus - excluded from the pooled result"
+      : !p.fallback ? "Include this photo in pooled result" : "No usable mosquito detection";
 
     const chk = document.createElement("input");
     chk.type = "checkbox";
@@ -1826,6 +1969,17 @@ function renderActivePhoto() {
     agreeBox.textContent = text;
     agreeBox.className = `pending-notice${text ? " shown" : ""}${text && !a.agree ? " disagree" : ""}`;
     agreeBox.title = text;
+  }
+  // What the app is willing to claim about this photo, above the ranking. It is
+  // hidden in the species state because there the ranking already says exactly
+  // this, and shown otherwise - a photo the classifier is unsure of gets a
+  // coarser claim than its own argmax, never a silently narrower one.
+  const verdictEl = document.getElementById("score-uncertain");
+  if (verdictEl) {
+    const vText = (p.verdict && !p.pending && !p.error) ? verdictSentence(p.verdict) : "";
+    verdictEl.textContent = vText;
+    verdictEl.className = `uncertain${vText ? " shown" : ""}`;
+    verdictEl.title = vText;
   }
   const sortedScores = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
   for (const [name, score] of sortedScores) {
@@ -2313,7 +2467,16 @@ function updatePooling() {
   // crop's evidence into the combined result, so it is left out. Its own row in
   // the results table stays empty until it has a verdict, which is where the
   // card's header count and the table agree with each other.
-  const included = checked.filter(p => !p.pending && !p.error);
+  // A photo the classifier is not confident about at all - neither a species
+  // nor a genus - is LEFT OUT of the pooled combination entirely. Its fused
+  // logits are still a real posterior, and summing them in is what made the
+  // earlier parked abstention work a regression: the pooled card would fold in
+  // a species the app had just declined to name, which is worse than not
+  // gating at all. A photo that reached only the genus state does still
+  // contribute, because its evidence is sound and only its resolution is
+  // coarser; it is marked as such below rather than dropped.
+  const abstained = checked.filter(p => !p.pending && !p.error && p.verdict?.state === "unsure");
+  const included = checked.filter(p => !p.pending && !p.error && p.verdict?.state !== "unsure");
   if (included.length <= 1) {
     poolCard.style.display = "none";
     return;
@@ -2399,7 +2562,19 @@ function updatePooling() {
   included.forEach((p, idx) => {
     const tr = document.createElement("tr");
     const share = ((weights[idx] / sumW) * 100).toFixed(1);
-    tr.innerHTML = `<td>${escapeHtml(p.name)}</td><td style="text-align:right">${share}%</td>`;
+    // A genus-state photo is in the sum, so it says which claim it brought.
+    const note = p.verdict?.state === "genus"
+      ? `<br><span class="contrib-note">genus only: ${escapeHtml(p.verdict.genus)}</span>` : "";
+    tr.innerHTML = `<td>${escapeHtml(p.name)}${note}</td><td style="text-align:right">${share}%</td>`;
+    contribTable.appendChild(tr);
+  });
+  // Photos left out of the sum are listed too, with the reason. A checked photo
+  // that silently contributes nothing reads as a bug in the app; one that is
+  // listed as excluded reads as what it is.
+  abstained.forEach((p) => {
+    const tr = document.createElement("tr");
+    tr.className = "row-excluded";
+    tr.innerHTML = `<td>${escapeHtml(p.name)}<br><span class="contrib-note">excluded - not confident enough to name a genus</span></td><td style="text-align:right">-</td>`;
     contribTable.appendChild(tr);
   });
 }
@@ -2436,11 +2611,17 @@ function renderResultsTable() {
     const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
     const topSpec = sortedSpec[0] || ["-", 0];
 
+    // What the app would claim about the photo. It is a coarser claim than the
+    // ranking when the species gate abstains, never a fabricated one: a photo
+    // the classifier cannot place shows the genus it did place, or nothing.
+    const v = p.verdict || { state: "species" };
+    const topCell = v.state === "species" ? topSpec[0]
+      : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
     tr.innerHTML = `
       <td title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
       <td title="${escapeHtml(topComp[0])}">${escapeHtml(topComp[0])}</td>
       <td style="text-align:right">${(topComp[1] * 100).toFixed(1)}%</td>
-      <td title="${escapeHtml(topSpec[0])}">${escapeHtml(topSpec[0])}</td>
+      <td title="${escapeHtml(String(topCell))}">${escapeHtml(String(topCell))}</td>
       <td style="text-align:right">${(topSpec[1] * 100).toFixed(1)}%</td>
     `;
     tbody.appendChild(tr);
@@ -2462,7 +2643,12 @@ function downloadCSV() {
     const topComp = sortedComp[0] || ["-", 0];
     const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
     const topSpec = sortedSpec[0] || ["-", 0];
-    csv += `"${p.name}","${p.status}",${p.is_cropped},"${topComp[0]}",${(topComp[1] * 100).toFixed(1)},"${topSpec[0]}",${(topSpec[1] * 100).toFixed(1)}\n`;
+    // Same rule as the results table: the export carries the claim the app made,
+    // so a photo the app would not name cannot leave the machine looking named.
+    const v = p.verdict || { state: "species" };
+    const claim = v.state === "species" ? String(topSpec[0])
+      : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
+    csv += `"${p.name}","${p.status}",${p.is_cropped},"${topComp[0]}",${(topComp[1] * 100).toFixed(1)},"${claim}",${(topSpec[1] * 100).toFixed(1)}\n`;
   });
 
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
