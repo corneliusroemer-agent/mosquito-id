@@ -34,6 +34,13 @@
     return docPromise;
   }
 
+  // Reference photographs live in the same R2 bucket that serves the model
+  // weights, under an images/ prefix, so adding a picture costs the git
+  // history nothing and the site picks it up on the next deploy with no build
+  // step. Only the path is stored per species; the host is one constant here.
+  var IMAGE_BASE_URL =
+    "https://pub-2bbf73b4e93d40c9af925724fbd48d51.r2.dev/images/";
+
   // In-app route for a species. A bare fragment href needs no click handler:
   // the browser sets location.hash and the router's hashchange listener runs.
   function link(slug) {
@@ -55,12 +62,77 @@
     return "<dt>" + esc(label) + "</dt><dd" + (cls ? ' class="' + cls + '"' : "") + ">" + esc(value) + "</dd>";
   }
 
+  /* One photograph with its caption and its credits.
+   *
+   * CC BY and CC BY-SA both oblige us to name the author, the licence and the
+   * source whenever we show the picture, so all three are rendered here rather
+   * than collected on a separate credits page nobody opens. The attribution is
+   * part of the figure, which is also where the licence's own terms are most
+   * usefully encountered - a reader who wants to know what they may do with a
+   * picture is looking at the picture.
+   */
+  function shot(sp, im, i) {
+    var src = im.src && im.src.charAt(0) === "/" ? im.src : IMAGE_BASE_URL + im.src;
+    var h = [];
+    h.push('<figure class="kb-shot">');
+    // width/height are stored so the browser reserves the box before the bytes
+    // arrive: a gallery that reflows as it loads is visible jank on a phone.
+    h.push('<img src="' + esc(src) + '" alt="' + esc(im.alt || (sp.name + " reference photograph")) +
+           '" loading="lazy" decoding="async"' +
+           (im.w ? ' width="' + (im.w | 0) + '"' : "") +
+           (im.h ? ' height="' + (im.h | 0) + '"' : "") + ">");
+    h.push("<figcaption>");
+    // Sex first and on its own line: whether a photo is male or female is the
+    // first thing a reader checks, and the two look different in every one of
+    // these species. Omitted rather than guessed when the source did not say.
+    if (im.sex) h.push('<span class="kb-sex">' + esc(im.sex) + "</span>");
+    if (im.caption) h.push(esc(im.caption) + (im.sex ? " " : ""));
+    h.push('<span class="kb-credit">');
+    var bits = [];
+    if (im.author) bits.push(esc(im.author));
+    if (im.licence) {
+      bits.push(im.licenceUrl
+        ? '<a href="' + esc(im.licenceUrl) + '" target="_blank" rel="noopener nofollow">' + esc(im.licence) + "</a>"
+        : esc(im.licence));
+    }
+    if (im.sourceUrl) {
+      bits.push('<a href="' + esc(im.sourceUrl) + '" target="_blank" rel="noopener nofollow">source</a>');
+    }
+    if (bits.length) h.push("&middot; " + bits.join(" &middot; "));
+    h.push("</span></figcaption></figure>");
+    return h.join("");
+  }
+
+  /* The gallery, or nothing at all.
+   *
+   * A species with no verified photograph is a normal state, not an error:
+   * several of the sixteen are common enough that Commons has no usable
+   * picture of, and a caption saying so would be worse than the absence. The
+   * section is simply not emitted, so the page reads exactly as it did before
+   * photographs existed. */
+  function gallery(sp) {
+    var ims = (sp.images || []).filter(function (im) { return im && im.src; });
+    if (!ims.length) return "";
+    var h = ['<h2 class="kb-h">What it looks like</h2><div class="kb-gallery">'];
+    ims.forEach(function (im, i) { h.push(shot(sp, im, i)); });
+    h.push("</div>");
+    h.push('<p class="kb-gallery-note">Reference photographs of identified museum and ' +
+           "field specimens. Sex matters: females need a blood meal to develop " +
+           "eggs and are the ones that bite.</p>");
+    return h.join("\n");
+  }
+
   function render(sp, all) {
     var h = [];
     h.push('<div class="kb-eyebrow">' + esc(sp.genus) + "</div>");
     h.push('<h1 class="kb-title">' + esc(sp.name) + "</h1>");
     h.push('<p class="kb-common">' + esc(sp.common) + "</p>");
     if (sp.blurb) h.push('<p class="kb-lead">' + esc(sp.blurb) + "</p>");
+
+    // Photographs sit directly under the introduction, before the data block:
+    // a reader who wants to know what the species looks like has not yet
+    // started reading the species sheet, and this is the part they came for.
+    h.push(gallery(sp));
 
     h.push('<h2 class="kb-h">At a glance</h2><dl class="kb-facts">');
     h.push(fact("Disease vector", sp.vectors, "kb-viz" + vectorClass(sp.vectors)));
