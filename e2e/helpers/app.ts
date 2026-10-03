@@ -39,6 +39,8 @@ declare global {
     __mosqShiftCount?: number;
     /** One line per shift: value plus what moved. A CLS failure must say what moved. */
     __mosqShiftLog?: string[];
+    /** The app's own "engine settled" flag. False once a load has failed. */
+    modelsReady?: boolean;
   }
 }
 

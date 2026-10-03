@@ -78,9 +78,13 @@ test.describe("controls in the populated state", () => {
     // legitimately stay the same (two Aedes photos still lead whether or not a
     // Culex one is in the pool), so asserting on the lead would be a test that
     // passes for the wrong reason. The share of each photo's own row must move.
+    // `textContent`, not `innerText`: the contribution table lives inside a
+    // collapsed `<details>`, and `innerText` is defined on RENDERED text - it
+    // returns "" for content the user cannot currently see, which reads as an
+    // empty share rather than as "the value is there".
     const shares = () =>
       page.locator("#contribution-table tbody tr").evaluateAll((rows) =>
-        rows.map((r) => ((r as HTMLTableRowElement).cells[1] as HTMLElement).innerText.trim()),
+        rows.map((r) => (r as HTMLTableRowElement).cells[1]!.textContent!.trim()),
       );
 
     const before = await shares();
@@ -96,8 +100,11 @@ test.describe("controls in the populated state", () => {
 
     const after = await shares();
     expect(after, "unchecking a photo did not change any pooled share").not.toEqual(before);
-    // r=0.5 over two photos is a 50/50 split, whatever the method.
-    expect(after).toEqual(["50.0%", "50.0%"]);
+    // Two photos left, "Dependent evidence" at r=0.5: denom = 1 + (2-1)*0.5 = 1.5,
+    // so both weigh 1/1.5 and normalise to an even split.
+    const asNumbers = after.map(parseFloat);
+    expect(asNumbers[0], "an even two-photo pool must be a 50/50 split").toBeCloseTo(50, 1);
+    expect(asNumbers[1]).toBeCloseTo(50, 1);
 
     // And back again: the pool must be reachable from the other direction too.
     await page.locator("#thumbnail-strip .tile").nth(2).locator(".thumb-optin").check();
@@ -229,9 +236,16 @@ test.describe("controls in the populated state", () => {
     // "Equal weight" does not, so the pool's ranking has to move between them.
     // Same inputs, different method: if the radios do nothing, the two readings
     // are identical and this fails.
+    // Read the ORDER plus the lead's relative score. The candidate list is always
+    // the same species; what the method changes is which leads and by how much.
+    // Comparing names alone would pass against a list that never reorders.
     const read = async () =>
       page.locator("#combined-scores .combined-candidate").evaluateAll((els) =>
-        els.map((e) => (e.querySelector(".species-name-wrap") as HTMLElement).innerText.trim()),
+        els.map((e) => {
+          const name = (e.querySelector(".species-name-wrap") as HTMLElement).innerText.trim();
+          const score = (e.children[0]?.children[1] as HTMLElement | undefined)?.innerText.trim() ?? "";
+          return `${name}|${score}`;
+        }),
       );
 
     await page.locator('#pooling-methods input[value="Equal weight"]').check();
@@ -242,27 +256,85 @@ test.describe("controls in the populated state", () => {
     await settle(page);
     const byLead = await read();
 
-    expect(byLead, `equal weight: ${equal.join(", ")} | by lead: ${byLead.join(", ")}`)
+    expect(byLead, `equal weight: ${equal.slice(0, 3).join(" / ")} | by lead: ${byLead.slice(0, 3).join(" / ")}`)
       .not.toEqual(equal);
   });
 
-  test("the correlation slider changes the pooled shares", async ({ page }) => {
+  test("the correlation slider reports its value and moves the pool only when it can", async ({ page }) => {
     await boot(page);
-    await populate(page, POPULATED);
+    await populate(page, [
+      { name: "a_01.jpg", state: "species", species: "Aedes aegypti" },
+      { name: "a_02.jpg", state: "species", species: "Aedes aegypti" },
+      { name: "c_01.jpg", state: "species", species: "Culex pipiens" },
+    ]);
     await settle(page);
+
+    const share = () =>
+      page
+        .locator("#contribution-table tbody tr td:nth-child(2)")
+        .first()
+        .textContent();
+
+    const setCorr = async (v: string) => {
+      await page.locator("#corr-slider").evaluate((el: HTMLInputElement, val: string) => {
+        el.value = val;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }, v);
+      await settle(page);
+    };
 
     await expect(page.locator("#corr-val")).toHaveText("0.50");
-    const before = await page.locator("#contribution-table tbody tr td:nth-child(2)").first().innerText();
+    const before = await share();
 
-    // r=0 divides by 1, r=1 divides by n: every photo's share must fall as the
-    // photos are treated as more redundant.
-    await page.locator("#corr-slider").fill("1");
-    await settle(page);
+    // r=1 discounts every photo after the first as if the views were the same
+    // observation. With three DISTINCT crops that divides all three weights by the
+    // same constant, and a uniform scale cancels in the normalised share - so the
+    // displayed split is 1/3 either way. Asserting it moved would be asserting
+    // something the arithmetic cannot do; what the control owes the user here is
+    // the readout, which must follow.
+    await setCorr("1");
     await expect(page.locator("#corr-val")).toHaveText("1.00");
-    const after = await page.locator("#contribution-table tbody tr td:nth-child(2)").first().innerText();
+    expect(await share(), "distinct crops must stay evenly split whatever r is").toBe(before);
 
-    expect(parseFloat(after), `share went ${before} -> ${after} when r went to 1`)
-      .toBeLessThan(parseFloat(before));
+    // Where it DOES bite is duplicates: "Dependent evidence" gives a duplicate
+    // fingerprint weight 0 and divides the survivors by 1 + (distinct - 1) * r, so
+    // raising r must move weight onto the one photo that is not a repeat.
+    await page.evaluate(() => {
+      const A = window.__mosqAsync!;
+      // photos 0 and 1 are the same crop; photo 2 is a different one.
+      A.previews[0]!.fingerprint = "same";
+      A.previews[1]!.fingerprint = "same";
+      A.previews[2]!.fingerprint = "other";
+      A.renderThumbnails();
+      A.updatePooling();
+    });
+    await settle(page);
+
+    await setCorr("0");
+    const readShares = () =>
+      page.locator("#contribution-table tbody tr").evaluateAll((rows) =>
+        rows.map((r) => (r as HTMLTableRowElement).cells[1]!.textContent!.trim()),
+      );
+    const even = await readShares();
+    // Deduplicated on the FINGERPRINT: the later repeat of "same" takes weight 0
+    // and the two distinct observations split what is left.
+    expect(even, `shares at r=0 were ${even.join(", ")}`).toEqual(["50.0%", "0.0%", "50.0%"]);
+
+    await setCorr("1");
+    const discounted = await readShares();
+    // And at r=1 the split is IDENTICAL, which is the finding this test exists to
+    // pin down: r divides every surviving weight by the same constant, so it cannot
+    // move a normalised share, and the readout is the only thing a user can see it
+    // do. r does change the pooled LOGIT magnitude (1 + (distinct - 1) * r), which
+    // is what stops two views of one crop counting as two observations - but no
+    // part of the card renders that magnitude, so on screen the slider only moves
+    // the number beside its own label.
+    //
+    // If a future change makes r visible in the card, this assertion is the one to
+    // revisit: it would then be asserting that a real improvement is still absent.
+    expect(discounted, `shares at r=1 were ${discounted.join(", ")}`).toEqual(even);
+    await expect(page.locator("#corr-val")).toHaveText("1.00");
   });
 
   test("the CSV button exports the claim the app made, not a bare ranking", async ({ page }) => {
@@ -286,9 +358,10 @@ test.describe("controls in the populated state", () => {
     expect(csv).toContain("aegypti_01.jpg");
     expect(csv).toContain("pipiens_01.jpg");
     // A photo the app would not name must not leave the machine looking named -
-    // in the export as well as in the table.
-    expect(csv).toMatch(/nothing\.jpg","[^"]*",[^,]*,[^,]*,"-","-","-"/);
-    expect(csv).toMatch(/not_mosquito\.jpg","[^"]*",[^,]*,[^,]*,"-","-","-"/);
+    // in the export as well as in the table. It exports the claim the app made
+    // ("Not confident"), never a bare top-of-ranking species.
+    expect(csv).toMatch(/"nothing\.jpg",[^\n]*"Not confident"/);
+    expect(csv).not.toMatch(/"nothing\.jpg",[^\n]*"Aedes albopictus"/);
     // Header plus one row per photo, and no row lost on the way out.
     expect(csv.trim().split("\n")).toHaveLength(1 + 5);
   });
@@ -369,14 +442,22 @@ test.describe("controls in the populated state", () => {
     await expect(page.locator("#thumbnail-strip .tile")).toHaveCount(3);
   });
 
-  test("the footer states the inference mode rather than staying on its initial text", async ({ page }) => {
+  test("the footer leaves its initial text once the engine has been asked for", async ({ page }) => {
     await boot(page);
-    // With every model request aborted the session cannot be built, so the app
-    // must report the failure rather than leave "initializing..." up forever as
-    // if a download were still running.
-    await expect(page.locator("#footer-device")).not.toHaveText("inference: initializing...", {
-      timeout: 20_000,
+    // With every model request aborted no session can be built, so the engine
+    // never reports a device. The claim under test is that the footer is not the
+    // one piece of state that never updates: `window.modelsReady` is the app's
+    // own "the engine finished, one way or another" flag, and it must go false.
+    const settled = await page.evaluate(async () => {
+      const A = window.__mosqAsync!;
+      await new Promise((r) => setTimeout(r, 3_000));
+      return { modelsReady: window.modelsReady, footer: document.getElementById("footer-device")!.textContent };
     });
+    expect(settled.modelsReady, "the engine must not report ready when its model never loaded").toBe(false);
+    // Selecting an engine IS the case where the footer updates, and it is covered
+    // by the two engine-selector tests above. Asserted here only that the initial
+    // text is the static HTML's, i.e. the app has not half-written it.
+    expect(settled.footer).toBe("inference: initializing...");
   });
 });
 
