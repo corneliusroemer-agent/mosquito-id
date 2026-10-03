@@ -1402,12 +1402,15 @@ function hasCropBox(p) {
 
 // The same p.cropBox expressed as fractions of each panel's surface. Both take
 // p.cropBox in full-image pixels; each panel shows a different image through a
-// different object-fit:cover window, so each needs its own map. Returns null
-// when the panel cannot place the box (no image, or no context region).
+// different object-fit, so each needs its own map. The full panel fits with
+// contain (the whole photo, letterboxed) and the zoom panel with cover (a
+// deliberate crop), so the two panels disagree by construction and each has to
+// ask for its own. Returns null when the panel cannot place the box (no image,
+// or no context region).
 function cropBoxInFullSurface(p) {
   if (!hasCropBox(p) || !p.fullCanvas) return null;
   const surfaceFull = document.getElementById("crop-surface-full");
-  const { kx, ox, ky, oy } = coverMapping(surfaceFull, p.fullCanvas);
+  const { kx, ox, ky, oy } = fitMapping(surfaceFull, p.fullCanvas, "contain");
   const [bx1, by1, bx2, by2] = p.cropBox;
   const l = (bx1 / p.fullCanvas.width - ox) / kx;
   const t = (by1 / p.fullCanvas.height - oy) / ky;
@@ -1435,7 +1438,7 @@ function cropBoxInZoomSurface(p) {
   const ctx_w = ctx_x2 - ctx_x1;
   const ctx_h = ctx_y2 - ctx_y1;
   if (!(ctx_w > 0) || !(ctx_h > 0)) return null;
-  const { kx, ox, ky, oy } = coverMapping(surfaceZoomed, p.contextCanvas || p.fullCanvas);
+  const { kx, ox, ky, oy } = fitMapping(surfaceZoomed, p.contextCanvas || p.fullCanvas, "cover");
   const l = ((cx1 - ctx_x1) / ctx_w - ox) / kx;
   const t = ((cy1 - ctx_y1) / ctx_h - oy) / ky;
   return {
@@ -1460,20 +1463,29 @@ function applyBox(el, box) {
   el.style.display = "block";
 }
 
-// The context canvas is painted with object-fit:cover, so a fraction of the
-// zoomed surface is only the same fraction of the image when the two aspects
-// match. Return the affine map surfaceFraction -> imageFraction for the photo
-// currently shown, so the crop-box overlay and the fine-tune drag agree with
-// what is on screen (and are the identity in the normal, matching-aspect case).
-// object-fit:cover shows only a window of the image, and centres it. Returns the
-// affine map from image fraction to surface fraction: surface = (image - off) / k.
+// The affine map between a surface and the photo painted in it, as
+// imageFraction = k * surfaceFraction + o, per axis. The crop-box overlay
+// (image -> surface) and the drag handlers (surface -> image) both run through
+// this, so the two directions cannot drift apart.
 //
-// The scale is per-axis, because cover crops on exactly one axis: the other is
-// shown whole and is the identity. A single scalar k for both axes stretched
-// that whole axis by 1/k, so a crop outline drawn on the photo came out a
-// different shape from the same crop drawn in the zoom panel - the reported
-// "one panel's shape is more square, the other's more rectangular".
-function coverMapping(surface, img) {
+// `fit` is the CSS object-fit in force on that panel and decides which side of
+// 1 k falls on. Both fits scale the photo by the same factor; they differ in
+// what happens to the leftover room:
+//
+//   cover   - the photo always fills the surface, so k < 1 on one axis is the
+//             part of the image that survives the window, centred.
+//   contain - the whole photo is shown, so k < 1 on the other axis is the
+//             margin the surface adds around it, also centred.
+//
+// k is per-axis because each fit pads or crops on exactly one axis and leaves
+// the other at 1. A single scalar for both axes stretched whichever axis was
+// not cropped, so a crop outline drawn on the photo came out a different shape
+// from the same crop drawn in the other panel - the reported "one panel's shape
+// is more square, the other's more rectangular".
+//
+// For any image and any surface this is the identity when the two aspects
+// match, which is the normal case the two panels agree in.
+function fitMapping(surface, img, fit) {
   const identity = { kx: 1, ox: 0, ky: 1, oy: 0 };
   if (!surface || !img) return identity;
   const b = surface.getBoundingClientRect();
@@ -1481,18 +1493,21 @@ function coverMapping(surface, img) {
   const boxAspect = b.width / b.height;
   const imgAspect = img.width / img.height;
   if (!imgAspect) return identity;
-  const kx = Math.min(1, boxAspect / imgAspect);
-  const ky = Math.min(1, imgAspect / boxAspect);
+  // cover keeps the axis where the image overflows; contain keeps the axis
+  // where the surface overflows. Same k, opposite choice of axis.
+  const pick = fit === "contain" ? Math.max : Math.min;
+  const kx = pick(1, boxAspect / imgAspect);
+  const ky = pick(1, imgAspect / boxAspect);
   return { kx, ox: (1 - kx) / 2, ky, oy: (1 - ky) / 2 };
 }
 
 function zoomedSurfaceMapping() {
   const p = previews[selectedIndex];
-  return coverMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas);
+  return fitMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas, "cover");
 }
 
 function fullSurfaceMapping(p) {
-  return coverMapping(document.getElementById("crop-surface-full"), p?.fullCanvas);
+  return fitMapping(document.getElementById("crop-surface-full"), p?.fullCanvas, "contain");
 }
 
 // Aspect ratio (w/h) of the zoomed panel's container, i.e. the box the context
@@ -2174,8 +2189,8 @@ function selectPhoto(idx) {
 // container width. Every arrival of a photo therefore resized the page, and the
 // resize landed again on every selection change and every re-crop.
 //
-// The photo's aspect is not lost, it is delegated: `.crop-surface img` is
-// object-fit:cover, and coverMapping() reads the surface's box at paint time, so
+// The photo's aspect is not lost, it is delegated: each panel fits its image
+// with object-fit, and fitMapping() reads the surface's box at paint time, so
 // crop overlays stay aligned whatever shape the box is.
 function fitSurface(surface, cv) {
   if (!surface) return;
@@ -2472,16 +2487,15 @@ function setupCropSurfaces() {
 async function applyCropFromFullSurface(idx, rect, t0) {
   const p = previews[idx];
   const fullCv = p.fullCanvas;
-// Surface fractions -> image fractions through the same cover window
+// Surface fractions -> image fractions through the same contain window
   // cropBoxInFullSurface() draws through, so a drag lands on the pixels the
   // user pointed at rather than on the same fraction of a wider photo.
   //
-  // The window is per-axis, not a single k: object-fit:cover crops one axis and
-  // shows the other whole, so scaling both by one factor stretches whichever
-  // axis was not cropped. That is what made the two panels' rectangles disagree
-  // in shape while the panels themselves measured identically.
-  const { kx, ox, ky, oy } = coverMapping(
-    document.getElementById("crop-surface-full"), fullCv
+  // The window is per-axis, not a single k: contain fits one axis to the photo
+  // and letterboxes the other, so scaling both by one factor would stretch
+  // whichever axis was not letterboxed.
+  const { kx, ox, ky, oy } = fitMapping(
+    document.getElementById("crop-surface-full"), fullCv, "contain"
   );
   const r = [kx * rect[0] + ox, ky * rect[1] + oy, kx * rect[2] + ox, ky * rect[3] + oy];
   const x1 = Math.max(0, Math.min(fullCv.width, Math.round(r[0] * fullCv.width)));
