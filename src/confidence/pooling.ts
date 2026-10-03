@@ -231,9 +231,16 @@ export function poolingWeights(
   });
   // Every photo fully trusted: the method's answer, bit for bit.
   if (pool.every((w) => w === 1)) return base;
-  // Restoring the method's own total means dividing by what the weights now sum
-  // to, not by the pool weights alone - the two differ wherever a method's
-  // weights are not uniform, which is exactly what "Weight by lead" is for.
+  // LOAD-BEARING, and it reads like redundant normalisation. Deleting
+  // `keepTotal` makes the pool sum to less than the method asked for, and since
+  // softmax is sensitive to the scale of its input, every pooled posterior
+  // flattens - because a photo was CHECKED, not because anything was learned.
+  // With it, the down-weight moves weight between photos and the pool stays
+  // exactly as sharp as its fully-trusted photos alone.
+  //
+  // The denominator is what the weights sum to AFTER scaling, not the pool
+  // weights alone: the two differ wherever a method's weights are not uniform,
+  // which is exactly what "Weight by lead" is for.
   const after = base.reduce((a, b, i) => a + b * pool[i]!, 0);
   if (!(after > 0)) return base;
   const keepTotal = base.reduce((a, b) => a + b, 0) / after;
@@ -517,8 +524,14 @@ export function pooledVerdict(
   // An `unsure` photo is pooled now, so the pool routinely contains one, and
   // three flat photos pool to a genus posterior above the 0.80 floor - three
   // photographs of a blank wall would otherwise be announced as a genus, which
-  // is the claim this gate exists to prevent, just one resolution down. A pool
-  // the user checked against a photo the app cannot name says so.
+  // is the claim this gate exists to prevent, just one resolution down.
+  //
+  // THE PRODUCT DECISION IS HERE, and it is reversible. Checking one blurry
+  // photo alongside three confident ones now costs the pool its headline: it
+  // reports "not confident enough to name a genus" where it used to name the
+  // species. To weaken it, delete this gate and let the species-only gate above
+  // demote instead - a one-line change that brings the blank-wall regression
+  // back, which `tests/regressions.test.ts` is written to catch.
   const everyPhotoResolvedToGenus = claimed.length > 0 && claimed.every((s) => s === "species" || s === "genus");
   if (everyPhotoResolvedToGenus) return v.state === "species" ? { ...v, state: "genus", species: null } : v;
   return { state: "unsure", genus: null, species: null, topGenusP: v.topGenusP, topSpeciesP: v.topSpeciesP, runnersUp: v.runnersUp };

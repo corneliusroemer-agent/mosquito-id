@@ -19,9 +19,9 @@ import { aggregateAdjacent, aggregateLogits, pooledCandidates, pooledVerdict as 
          poolingWeights, splitPoolable } from "../confidence/pooling";
 import type { PoolablePhoto, PoolingMethod } from "../confidence/pooling";
 import type { Head } from "../confidence/types";
-import { verdictSentence } from "../confidence/verdict";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { inclusionSummary } from "./thumbnailStrip";
+import { claimSentence } from "./granularity";
 
 // ---- Pooling / Evidence Aggregation ----
 export function updatePooling(head: Head, previews: PoolablePhoto[], includedIndices: Iterable<number>): void {
@@ -118,7 +118,11 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   // `included` is passed so the pool can also gate its SPECIES claim on the
   // photos rather than on its own sharpened posterior: see pooledVerdict().
   const pooledVerdict = pooledVerdictOf(head, aggLogits, included, aggAdjLogits);
-  const pooledLine = pooledVerdict ? verdictSentence(pooledVerdict) : "";
+  // claimSentence, not verdictSentence: the rows below already go through
+  // speciesLabelHtml and so already refuse to name a species the head cannot
+  // separate, and the headline must agree with them rather than print a binomial
+  // the ranking is deliberately not showing.
+  const pooledLine = pooledVerdict ? claimSentence(pooledVerdict) : "";
 
   poolScores.innerHTML = "";
   // A species-state verdict renders an empty sentence on purpose: the ranking

@@ -66,8 +66,8 @@ export function canView(p: ClassifiedPhoto): boolean {
  * a photo whose crop the nuisance gate rejected must not reach the fusion step,
  * so the checkbox is closed here even though a whole-frame view of it exists.
  *
- * It is a permission, not a promise - `unsure` may be checked, and is then listed
- * in the contribution table as excluded with its reason.
+ * It is a permission, not a promise - `unsure` may be checked and IS pooled, at
+ * a weight below a named photo's.
  */
 export function contributesToPool(p: ClassifiedPhoto): boolean {
   if (!p || p.fallback || p.pending || p.error) return false;
@@ -77,9 +77,15 @@ export function contributesToPool(p: ClassifiedPhoto): boolean {
 /**
  * If this photo were checked, would it enter the pooled SUM? Spec §1.1.
  *
- * Distinct from `contributesToPool`, which is the strip's permission: a photo
- * that is allowed to be checked need not be one that pooling will sum. `unsure`
- * is the case in point.
+ * Distinct from `contributesToPool`, which is the strip's permission. A photo
+ * allowed to be checked is not always one that pooling will sum: `non-mosquito`
+ * is allowed to be visible but is not pooled, because "this is not a mosquito"
+ * is evidence against every species rather than weak evidence for one.
+ *
+ * `unsure` IS pooled, down-weighted by its own top posterior - a checked photo
+ * is never silently dropped. What the down-weight bounds is the photo's
+ * influence on the claim: the pool will not name a species while it holds a
+ * photo that named none, which is `pooledVerdict`'s rule, not this one's.
  *
  * Restates `splitPoolable`'s rule rather than calling it, because this module is
  * imported by the strip and `splitPoolable` belongs to the confidence layer; the
@@ -90,7 +96,7 @@ export function contributesToPool(p: ClassifiedPhoto): boolean {
 export function entersPooledSum(p: ClassifiedPhoto): boolean {
   if (p.pending || p.error) return false;
   const state = p.verdict?.state;
-  return state === "species" || state === "genus";
+  return state === "species" || state === "genus" || state === "unsure";
 }
 
 const name = (p: ClassifiedPhoto): string => p.name ?? "(unnamed)";

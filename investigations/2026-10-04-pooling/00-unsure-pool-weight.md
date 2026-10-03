@@ -64,13 +64,25 @@ The blurry photo carries 5.7% of the pooled evidence against a species the other
 three outvote 8:1. It moves the pool's margin by about a twentieth; it cannot
 move the answer.
 
-The rescale is what makes this a weighting rather than a discount on the whole
-sum. Without it, adding an unsure photo would shrink every logit in the pool and
-flatten the posterior for reasons that have nothing to do with the evidence. With
-it, weight moves *between* photos: the three named ones rise from 0.5 to 0.708 to
-make up what the unsure one gave up, and the pool is exactly as sharp as the
-three photos alone. `poolingWeights` returns the method's own numbers bit for
-bit when every photo is at full weight, so no existing behaviour moves.
+### The rescale is load-bearing
+
+The last line of `poolingWeights` rescales the weighted sum back to the total
+the method asked for, and it is doing real work. Remove it and adding an unsure
+photo shrinks every logit in the pool, because the pool now sums to 1.06 rather
+than 1.5. Softmax is sensitive to the scale of its input, so the whole pooled
+posterior flattens - and it flattens for a reason that has nothing to do with
+the evidence: the pool would be less certain because a photo was *checked*, not
+because anything was learned. That is the exact class of surprise the existing
+`pooledVerdict` doc warns about, where pooling raises the winner with depth
+alone.
+
+The rescale makes the down-weight a statement about the balance between photos
+and nothing else. Weight moves *between* them: the three named photos rise from
+0.5 to 0.708 to make up what the unsure one gave up, and the pool is exactly as
+sharp as those three photos alone would have been. Someone reading
+`return base.map((b, i) => b * pool[i]! * keepTotal)` later will be tempted to
+delete the last factor as a no-op - it is not, and the test that pins the total
+(`expect(total).toBeCloseTo(1.6, 12)`) is what catches the deletion.
 
 All four methods compose the same way: the down-weight is multiplicative on the
 method's own weight, then the total is restored. "Weight by lead" already
@@ -128,24 +140,83 @@ The e2e tier1 suite passes against this build except
 from the same box (145-166 ms against a 110 ms budget on both) - it is the load
 from three agents sharing the machine, not this change.
 
-## Handed back: two functions in `src/app/thumbnailStrip.ts` are now wrong
+## `thumbnailStrip.ts` restates the rule by hand, and now says so correctly
 
-`entersPooledSum` restates `splitPoolable`'s rule by hand and says an `unsure`
-photo does not enter the sum. It does now. `tests/thumbnail-strip.test.ts`
-cross-checks the two, and `PoolSplit.abstained` no longer exists, so that file
-does not typecheck - which is why `npm run test:all` is red on this branch.
+`entersPooledSum` answers "would this photo enter the SUM" and is a hand-written
+restatement of `splitPoolable`'s rule, cross-checked against it in
+`tests/thumbnail-strip.test.ts` so the two cannot drift. It returned `false` for
+an `unsure` photo, which is exactly the bug being fixed, so it now returns
+`true` alongside species and genus.
 
-I did not touch either file. The change is:
+The distinction that function draws is worth keeping sharp, because it is easy to
+collapse the two functions into one and lose it:
 
-- `src/app/thumbnailStrip.ts`, `entersPooledSum`: add `state === "unsure"` to the
-  returned condition, and update the doc comment above it, which says `unsure`
-  "need not be one that pooling will sum".
-- `tests/thumbnail-strip.test.ts` line ~129: expect `true` for an unsure photo.
-- `tests/thumbnail-strip.test.ts` lines ~154-155: `abstained` → `excluded`.
-- `tests/thumbnail-strip.test.ts` line ~142: the cross-check then agrees, since
-  `splitPoolable` now returns the unsure photo in `included`.
-- The comment at line ~146 says `splitPoolable` "deliberately does not classify"
-  a photo with no verdict; it does now, as `no-verdict`.
+- `contributesToPool` - the strip's **permission**. May this photo be checked?
+  A non-mosquito photo fails here: there is nothing a user could usefully pool.
+- `entersPooledSum` - the **arithmetic**. Of the photos that may be checked,
+  which contribute? An `unsure` photo may be checked and does contribute,
+  down-weighted. A non-mosquito photo is visible and checkable in principle but
+  contributes nothing, because "this is not a mosquito" is evidence against
+  every species rather than weak evidence for one.
 
-I verified the whole suite is green with those five edits applied, then reverted
-them.
+The cross-check test is what enforces both halves: it walks every verdict state
+and asserts `entersPooledSum(p)` equals "`splitPoolable` put this photo in
+`included`", so a future change to either side fails a test rather than changing
+what a user sees.
+
+## What to reverse, if you disagree
+
+The trade in this change is one decision, and it is worth being able to undo it
+without archaeology.
+
+**What I did.** The pooled card's claim is gated on the *coarsest resolution any
+photo in the pool reached*: a species claim needs every photo species, a genus
+claim needs every photo genus-or-better. So three confident photos plus one
+unsure photo return **"Not confident enough to name a genus"**, where before
+this change they returned the species.
+
+**Why.** With unsure photos pooled at full-ish weight, three photographs of a
+blank wall pool to a species posterior of 0.397 and a genus posterior of 0.832 -
+clearing both floors (0.373 and 0.80). The species-only gate that was there
+before demoted that to "Aedes": three photographs of a wall announced as a
+genus, which is the shipped `bogusresults.png` regression one resolution down.
+Generalising the gate is what keeps the original fix fixed.
+
+**How to reverse it**, if you would rather an unsure photo cap the pool at a
+genus than silence it. In `pooledVerdict`, drop the second gate - the one that
+requires every photo to have reached a genus - and let the existing species-only
+gate demote into the genus branch:
+
+```ts
+// src/confidence/pooling.ts, pooledVerdict
+const everyPhotoClaimed = claimed.length > 0 && claimed.every((s) => s === "species");
+if (everyPhotoClaimed) return v;
+// DELETE everyPhotoResolvedToGenus and its branch here.
+return { ...v, state: "genus", species: null };
+```
+
+That is a strict weakening: three blank walls then come back as a genus, and
+`tests/regressions.test.ts` ("three blank-wall photos still name nothing, now that
+they are in the sum") is the test that fails, which is the point - it is there to
+be the thing that stops you.
+
+**What I would not reverse.** Pooling the unsure photo at all. Dropping it is the
+defect this branch exists to fix, and it is independent of which way the gate
+goes.
+
+## Verification
+
+`tests/pooling.test.ts` is new: 13 cases. Nine fail on `origin/main`, including
+the headline one - an `unsure` photo is in the pool, where before it was dropped.
+The formula is pinned against hand-computed numbers (0.12 -> 0.12, 0.95 -> 0.373),
+and the invariant across all four pooling methods is asserted rather than
+asserted-about.
+
+`tests/regressions.test.ts` keeps the original defect as a live test rather than
+as a comment: the blank-wall photos are now pooled, and the assertion is that
+they still name nothing.
+
+The e2e tier1 suite passes against this build. `reactivity.spec.ts:81` is the one
+exception and is not this change: it fails identically on a pristine `origin/main`
+build served from the same box (145-166 ms on both against a 110 ms budget), so it
+is the load from several agents sharing one machine.
