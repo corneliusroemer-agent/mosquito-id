@@ -410,15 +410,20 @@ async function initEngine() {
   }
 
   // Preference: URL query param > localStorage > default. fp16 is skipped while
-  // it is unavailable, so a stale saved choice falls through instead of 404ing.
-  // culico is the default because it is the only engine a phone can fetch
-  // without caring about its data plan: 81 MB against H/14's 1.2 GB. It is
-  // experimental - its head is a linear probe and it cannot reject a photo with
-  // no mosquito in it as reliably as H/14 - so H/14 stays one click away and is
-  // the better answer on a connection that can afford it. INT8 is never the
-  // default: onnxruntime-web has no int8 WebGPU kernels, so the session silently
-  // falls back to WASM CPU and runs an order of magnitude slower.
-  const defaultEngine = "webgpu-culico";
+// it is unavailable, so a stale saved choice falls through instead of 404ing.
+//
+// H/14 is the default, and it is the default because culico's head cannot yet be
+// made to serve this app: its species argmax sits at 22% because the ten species
+// the corpus never labels carry the GENUS weight row, so on a correctly-identified
+// Aedes photo those three rows outscore the species probe. Pinning them instead
+// lifts species to 71% but drops genus from 83% to 57%, and the app's default
+// read is a genus, so the honest position is that the head needs fitting that
+// treats a genus-only label as evidence about the genus rather than copying it
+// into every species column. That is analysis, not a UI default.
+//
+// INT8 is never the default: onnxruntime-web has no int8 WebGPU kernels, so the
+// session silently falls back to WASM CPU and runs an order of magnitude slower.
+  const defaultEngine = "webgpu-fp16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
   const savedEngine = localStorage.getItem("mosquito_engine");
