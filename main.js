@@ -434,7 +434,10 @@ async function initEngine() {
 
   // Preference: URL query param > localStorage > default. fp16 is skipped while
   // it is unavailable, so a stale saved choice falls through instead of 404ing.
-  const defaultEngine = "webgpu-int8";
+  // INT8 is deliberately not the default: onnxruntime-web has no int8 WebGPU kernels, so it
+  // silently falls back to WASM CPU and runs an order of magnitude slower. B/16 is
+  // fp16 and stays on the GPU.
+  const defaultEngine = "webgpu-b16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
   const savedEngine = localStorage.getItem("mosquito_engine");
@@ -1623,7 +1626,7 @@ function updatePooling() {
     const widthPct = Math.max(0, Math.min(100, ((c.relScore + 20) / 20) * 100));
     row.innerHTML = `
       <div class="combined-score-row">
-        <span><strong>${escapeHtml(c.complex)}</strong> <small style="color:var(--body-text-color-subdued);">(${escapeHtml(c.name)})</small></span>
+        <span><strong>${escapeHtml(c.name)}</strong></span>
         <span>${c.relScore.toFixed(1)}</span>
       </div>
       <div class="combined-bar-track">
