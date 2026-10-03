@@ -329,13 +329,18 @@ function resolveModelUrl(path) {
 // completion from clearing a batch that is still running.
 let progressOwner = null;
 
+// `text` is deliberately ignored. Progress is shown by the bar alone: a
+// sentence describing what the app is currently doing ("Classifying…",
+// "Analyzing 3 of 10 photos on …") is not information about the photo, and it
+// was asked to go. Only a failure is worth a sentence, and that goes through
+// setProgressError.
 function setProgress(owner, text, pct) {
   const slot = document.getElementById("progress-slot");
   if (!slot) return;
   progressOwner = owner;
   const msg = document.getElementById("progress-msg");
   const fill = document.getElementById("progress-fill");
-  if (msg) msg.textContent = text || "";
+  if (msg) msg.textContent = "";
   if (fill) {
     slot.classList.toggle("indeterminate", pct === null || pct === undefined);
     fill.style.width = `${Math.max(0, Math.min(100, pct || 0))}%`;
@@ -343,6 +348,13 @@ function setProgress(owner, text, pct) {
   slot.style.visibility = "visible";
   const cancel = document.getElementById("btn-cancel-batch");
   if (cancel) cancel.disabled = owner !== "batch";
+}
+
+// A failure is worth a sentence: unlike "loading" it describes something the
+// user has to act on.
+function setProgressError(text) {
+  const msg = document.getElementById("progress-msg");
+  if (msg) msg.textContent = text;
 }
 
 function clearProgress(owner) {
@@ -598,7 +610,7 @@ async function initEngine() {
       } else {
         currentEngine = chosen;
         if (footerDevice) {
-          footerDevice.textContent = `inference: ${WEBGPU_MODELS[chosen]?.name || "WebGPU"} · Loading…`;
+          footerDevice.textContent = `inference: ${WEBGPU_MODELS[chosen]?.name || "WebGPU"}`;
         }
         await loadWebGPUModels(chosen);
       }
@@ -973,7 +985,10 @@ function viewAgreement(views, fusedSpP) {
   };
 }
 
-// One-line plain-English rendering of the agreement signal, for the UI. Plain
+// One-line plain-English rendering of the agreement signal. Not rendered: the
+// two-view agreement was shown as a sentence in the score panel, and the panel
+// shows species scores only. Kept for the data path and for anyone who wants
+// the signal in a tooltip or a log.
 // because it is a statement about the photograph, not about the model: it says
 // what the two views of this picture disagree about and how close the call is.
 function agreementSentence(a) {
@@ -1649,7 +1664,7 @@ function renderThumbnails() {
     badge.title = p.error
       ? p.error
       : p.pending
-        ? "Classifying the current crop…"
+        ? ""
         : p.is_cropped ? "Mosquito detected & cropped" : "Uncropped / no mosquito detected";
     btn.appendChild(badge);
 
@@ -1845,9 +1860,10 @@ function renderActivePhoto() {
     if (p.error) {
       noticeClass = " error";
       noticeText = p.error;
-    } else if (p.pending) {
-      noticeText = p.cropBox === null && !p.fullCanvas ? "Reading photo…" : "Classifying…";
     }
+    // Deliberately no text for p.pending: an in-flight classification is
+    // indicated by the dimmed score list and nothing else. A sentence about
+    // what the app is doing is not information about the photo.
     scoreNotice.textContent = noticeText;
     scoreNotice.className = `pending-notice${noticeClass}${noticeText ? " shown" : ""}`;
     // A failed classification is worth reading in full, so it goes in the
@@ -1855,18 +1871,14 @@ function renderActivePhoto() {
     scoreNotice.title = noticeText;
   }
 
-  // Whether the photo's two views back each other up. Shown whenever there is
-  // something to say and hidden otherwise, in a box that is always the same
-  // height, so its arrival seconds into a photo's classification moves nothing.
+  // The agreement box keeps its reserved height (see index.html) but is never
+  // written to: the two-view agreement was reported as a sentence, and a
+  // sentence about how the views relate is not a species score.
   const agreeBox = document.getElementById("view-agreement");
   if (agreeBox) {
-    const a = p.agreement;
-    // While a second view is still to come, the scores below are one view's
-    // alone, so there is no agreement to report yet.
-    const text = (a && !p.pending) ? agreementSentence(a) : "";
-    agreeBox.textContent = text;
-    agreeBox.className = `pending-notice${text ? " shown" : ""}${text && !a.agree ? " disagree" : ""}`;
-    agreeBox.title = text;
+    agreeBox.textContent = "";
+    agreeBox.className = "pending-notice";
+    agreeBox.title = "";
   }
   const sortedScores = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
   for (const [name, score] of sortedScores) {
@@ -1885,13 +1897,15 @@ function renderActivePhoto() {
     scoreList.appendChild(item);
   }
 
-  // The status line is the other place a stale verdict would show: while a
-  // recompute is in flight, or after one failed, say so rather than repeating
-  // the crop size as though it were a result.
+  // The status line names the photo and, when one failed, why. A pending
+  // photo's p.status describes work in flight ("decoding… detecting…") and is
+  // deliberately not shown: the name alone, with the score list dimmed below it,
+  // is the whole signal.
   const statusText = p.error
     ? `analysis failed: ${p.error.replace(/^Classification failed: /, "")}`
-    : p.status;
-  document.getElementById("photo-name").textContent = `${p.name} · ${statusText}`;
+    : (p.pending ? "" : p.status);
+  document.getElementById("photo-name").textContent =
+    statusText ? `${p.name} · ${statusText}` : p.name;
   const btnFull = document.getElementById("btn-full-photo");
   if (p.is_cropped) {
     btnFull.style.display = "inline-block";
@@ -2737,6 +2751,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // Init Engine
   initEngine().catch(err => {
     console.error("Engine initialization error:", err);
-    setProgress("model", `Error: ${err.message}`, null);
+    setProgress("model", null, null);
+    setProgressError(`Error: ${err.message}`);
   });
 });
