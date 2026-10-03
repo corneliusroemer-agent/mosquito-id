@@ -25,11 +25,6 @@ const MODEL_BASE_URL =
   "https://pub-2bbf73b4e93d40c9af925724fbd48d51.r2.dev/";
 const FP16_AVAILABLE = true;
 
-// Base URL of an optional server-inference backend (the FastAPI app in
-// 09-unified/app.py, e.g. behind a Cloudflare Tunnel). Empty means no backend,
-// which is the normal case for the static deployment.
-const SERVER_API_BASE = "";
-
 const COMPLEX_OF = {
   "Aedes albopictus": "Aedes albopictus",
   "Aedes aegypti": "Aedes aegypti",
@@ -201,7 +196,77 @@ let previews = [];
 let includedIndices = new Set();
 let selectedIndex = 0;
 let isProcessingBatch = false;
-let cropVersion = 0; // For async crop cancellation
+
+// ---- Crop: displayed state vs. computed state ----
+//
+// A crop release does two separate things. The geometry - crop canvas, context
+// canvas, both boxes, the thumbnail - is written and re-rendered synchronously
+// in the pointer-up handler, so the picture the user is looking at is never
+// more than one frame behind their hand. The classifier then runs with the
+// score panel marked pending, and writes back only if it still owns the photo.
+const ASYNC = (window.__mosqAsync = {
+  last: null,      // timing of the most recent crop release
+  frames: 0,       // bumped every animation frame: a frozen UI stops counting
+  longTasks: 0,
+  worstLongTaskMs: 0,
+  get previews() { return previews; },
+  get sessClip() { return sessClip; },
+  get sessDet() { return sessDet; },
+  get selectedIndex() { return selectedIndex; },
+  selectPhoto,
+  processFiles
+});
+(function countFrames() {
+  requestAnimationFrame(() => { ASYNC.frames++; countFrames(); });
+})();
+if (typeof PerformanceObserver === "function") {
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        ASYNC.longTasks++;
+        ASYNC.worstLongTaskMs = Math.max(ASYNC.worstLongTaskMs, Math.round(e.duration));
+      }
+    }).observe({ entryTypes: ["longtask"] });
+  } catch (e) { /* longtask unsupported: ASYNC.longTasks stays 0 */ }
+}
+
+// Take ownership of a photo's scores for a new crop. Bumping the revision is
+// what makes the last release win: every earlier computation still in flight
+// for this photo now holds a revision that no longer matches and is dropped.
+function beginRecompute(p) {
+  p.rev = (p.rev || 0) + 1;
+  p.pending = true;
+  p.error = null;
+  return p.rev;
+}
+
+// A result may be written back only by the computation that still owns the
+// photo: same revision (no newer release), same object still in previews (not
+// deleted, and not replaced by a batch that finished meanwhile), not removed.
+function ownsRecompute(p, idx, rev) {
+  return p.rev === rev && previews[idx] === p && !p.removed;
+}
+
+// Everything a finished computation commits, in one place, so the local and
+// server paths cannot drift apart in what they mark current.
+function commitScores(p, r) {
+  p.scores = r.labels;
+  p.detail = r.detail;
+  p.logits = r.logits;
+  p.demoted = r.demoted;
+  p.pending = false;
+  p.error = null;
+}
+
+function markComputeFailed(p, err) {
+  p.pending = false;
+  p.error = `Classification failed: ${err && err.message ? err.message : err}`;
+  sendLog("crop_failed", { name: p.name, error: String(err) });
+}
+
+// Thrown when a release is overtaken before its work starts, so the catch block
+// can tell "nothing to do" from "the model failed".
+class Superseded extends Error {}
 
 // ---- Telemetry Logging ----
 function sendLog(action, data = {}) {
@@ -427,25 +492,17 @@ async function initEngine() {
   const optServer = document.getElementById("opt-server");
   const footerDevice = document.getElementById("footer-device");
 
-  // Probe the server backend, but only when one is actually configured. The site
-  // is static, so there is no /api/health to reach and probing anyway just logs a
-  // failed request on every load. Set this to the backend's origin (for example a
-  // Cloudflare Tunnel URL) to enable server inference; leave it empty and the app
-  // goes straight to on-device inference with no wasted request.
-  if (SERVER_API_BASE) {
-    try {
-      const res = await fetch(`${SERVER_API_BASE}/api/health`, {
-        signal: AbortSignal.timeout(2000)
-      });
-      if (res.ok) {
-        const data = await res.json();
-        serverAvailable = true;
-        serverEngineLabel = data.engine_label || "Cloud GPU";
-        if (optServer) optServer.textContent = `⚡ ${serverEngineLabel} · Instant`;
-      }
-    } catch (err) {
-      serverAvailable = false;
+  // Probe server /api/health
+  try {
+    const res = await fetch("/api/health", { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      const data = await res.json();
+      serverAvailable = true;
+      serverEngineLabel = data.engine_label || "Cloud GPU";
+      if (optServer) optServer.textContent = `⚡ ${serverEngineLabel} · Instant`;
     }
+  } catch (err) {
+    serverAvailable = false;
   }
 
   // Preference: URL query param > localStorage > default. fp16 is skipped while
@@ -917,6 +974,9 @@ async function classifyImage(imgBitmap, filename) {
     fallback,
     is_cropped,
     demoted,
+    rev: 0,
+    pending: false,
+    error: null,
     fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
     manual_full_photo: !best,
     detTime,
@@ -973,94 +1033,177 @@ async function processFiles(fileList) {
     };
   }
 
-  const newPreviews = [];
-  for (let i = 0; i < imageFiles.length; i++) {
-    if (isBatchAborted) {
-      sendLog("batch_aborted", { processed: i, total: imageFiles.length });
-      break;
-    }
-    const file = imageFiles[i];
-    const engineLabel = currentEngine === "server-gpu" ? `Server (${serverEngineLabel})` : "WebGPU";
-    progressText.textContent = `Analyzing ${i + 1} of ${imageFiles.length} photos on ${engineLabel} (${file.name})…`;
-    progressFill.style.width = `${((i + 1) / imageFiles.length) * 100}%`;
+  // New photos are prepended to the stack (existing behaviour) and stay there
+  // for the whole batch, so an index computed here stays valid: a photo's slot
+  // never moves while its own inference runs, which is what lets a completion
+  // write to previews[i] without a lookup.
+  const offset = imageFiles.length;
+  const updatedIncluded = new Set();
+  for (const i of includedIndices) updatedIncluded.add(i + offset);
+  includedIndices = updatedIncluded;
 
-    if (currentEngine === "server-gpu") {
-      try {
+  // Placeholders first, so the gallery shows the whole batch immediately: each
+  // tile greyed with a pending badge, then resolved as its own inference
+  // finishes rather than all at the end. A placeholder carries the same
+  // rev/pending contract as a crop release, so a photo deleted or superseded
+  // mid-flight is never painted as finished.
+  const slots = imageFiles.map((file) => ({
+    name: file.name, file,
+    fullCanvas: null, cropCanvas: null, contextCanvas: null,
+    cropBox: null, contextBox: null,
+    scores: {}, detail: {}, logits: null,
+    status: "queued…", fallback: false, is_cropped: false, demoted: false,
+    manual_full_photo: false, fingerprint: null,
+    rev: 0, pending: true, error: null,
+    detTime: null, clipTime: null, totalTime: null
+  }));
+  previews = [...slots, ...previews];
+  selectedIndex = 0;
+
+  document.getElementById("gallery-section").style.display = "block";
+  document.getElementById("results-table-section").style.display = "block";
+  renderThumbnails();
+  renderActivePhoto();
+  updatePooling();
+  renderResultsTable();
+
+  // Decode with bounded concurrency, inference effectively serial. Decoding a
+  // JPEG is independent per file and releases the GIL-free browser work queue, so
+  // overlapping it measurably shortens the wait before the first inference can
+  // start; the cap keeps a phone from holding ten full-resolution bitmaps at
+  // once. Inference stays serial: onnxruntime-web occupies the main thread for
+  // the length of a run, so overlapping runs would not make the batch finish
+  // any sooner.
+  const DECODE_CONCURRENCY = 3;
+  let nextToDecode = 0;
+  let decoded = 0;
+  async function decodeStage() {
+    await Promise.all(Array.from({ length: Math.min(DECODE_CONCURRENCY, slots.length) }, async () => {
+      for (;;) {
+        const i = nextToDecode++;
+        if (i >= slots.length) return;
+        const slot = slots[i];
+        try {
+          slot.bitmap = await createImageBitmap(slot.file, { imageOrientation: "from-image" });
+          // Paint the photo as soon as it is decoded, so the tile is the real
+          // image (greyed) while its own inference is still to come.
+          slot.fullCanvas = document.createElement("canvas");
+          slot.fullCanvas.width = slot.bitmap.width;
+          slot.fullCanvas.height = slot.bitmap.height;
+          slot.fullCanvas.getContext("2d").drawImage(slot.bitmap, 0, 0);
+          slot.status = "decoding… detecting…";
+        } catch (err) {
+          slot.pending = false;
+          slot.error = `Could not read image: ${err.message || err}`;
+          console.error("Error decoding", slot.name, err);
+        }
+        decoded++;
+        progressText.textContent = `Decoded ${decoded} of ${imageFiles.length} photos…`;
+        renderThumbnails();
+      }
+    }));
+  }
+
+  const engineLabel = currentEngine === "server-gpu" ? `Server (${serverEngineLabel})` : "WebGPU";
+  let processed = 0;
+  async function inferSlot(slot, i) {
+    if (isBatchAborted) {
+      // Aborted before this photo started: say so rather than leaving a tile
+      // greyed forever.
+      if (slot.pending) {
+        slot.pending = false;
+        slot.error = "Batch aborted before this photo was analyzed";
+      }
+      return;
+    }
+    progressText.textContent = `Analyzing ${processed + 1} of ${imageFiles.length} photos on ${engineLabel} (${slot.name})…`;
+    try {
+      if (currentEngine === "server-gpu") {
         const formData = new FormData();
-        formData.append("file", file);
+        formData.append("file", slot.file);
         const res = await fetch("/api/predict", { method: "POST", body: formData });
         if (!res.ok) throw new Error("Server inference error " + res.status);
         const data = await res.json();
         const fullCv = await dataUrlToCanvas(data.fullDataUrl);
         const cropCv = await dataUrlToCanvas(data.cropDataUrl);
         const contextCv = await dataUrlToCanvas(data.contextDataUrl);
-
-        newPreviews.push({
-          name: data.filename,
-          fullCanvas: fullCv,
-          cropCanvas: cropCv,
-          contextCanvas: contextCv,
-          cropBox: data.cropBox,
-          contextBox: data.contextBox,
-          scores: data.labels,
-          detail: data.detail,
-          logits: data.logits,
-          status: data.status,
-          fallback: data.fallback,
+        commitBatchSlot(slots[i], {
+          name: data.filename, fullCanvas: fullCv, cropCanvas: cropCv, contextCanvas: contextCv,
+          cropBox: data.cropBox, contextBox: data.contextBox, scores: data.labels,
+          detail: data.detail, logits: data.logits, status: data.status, fallback: data.fallback,
           is_cropped: data.is_cropped,
           demoted: Boolean(Object.keys(data.labels)[0]?.includes("low confidence")),
           fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
           manual_full_photo: !data.is_cropped,
-          detTime: data.detTime,
-          clipTime: data.clipTime,
-          totalTime: data.totalTime
+          detTime: data.detTime, clipTime: data.clipTime, totalTime: data.totalTime
         });
-
         const devElem = document.getElementById("footer-device");
         if (devElem) {
           devElem.textContent = `inference: ${data.engine_label} · ${data.totalTime}ms/photo (crop: ${data.detTime}ms · analyze: ${data.clipTime}ms)`;
         }
-      } catch (err) {
-        console.error("Error processing on server", file.name, err);
+      } else {
+        const res = await classifyImage(slot.bitmap, slot.name);
+        commitBatchSlot(slots[i], res);
       }
-    } else {
-      try {
-        const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
-        const res = await classifyImage(bitmap, file.name);
-        newPreviews.push(res);
-      } catch (err) {
-        console.error("Error processing locally", file.name, err);
-      }
+    } catch (err) {
+      // One unreadable photo must not take the batch down with it.
+      if (slots[i].pending) markComputeFailed(slots[i], err);
+      else slots[i].error = `Analysis failed: ${err.message || err}`;
+      console.error("Error processing", slot.name, err);
     }
+    processed++;
+    progressFill.style.width = `${(processed / imageFiles.length) * 100}%`;
+    renderThumbnails();
+    renderActivePhoto();
+    updatePooling();
+    renderResultsTable();
+  }
+
+  // Inference, one photo at a time, each result painted as it lands.
+  const decodeDone = decodeStage();
+  for (let i = 0; i < slots.length; i++) {
+    // Let the decode pool make progress before each inference claims the thread.
+    await decodeDone.catch(() => {});
+    if (!slots[i].fullCanvas && !slots[i].error) {
+      // Still decoding: wait for this slot specifically.
+      while (!slots[i].bitmap && !slots[i].error) await new Promise((r) => setTimeout(r, 8));
+    }
+    await inferSlot(slots[i], i);
   }
 
   progressWrap.style.display = "none";
   isProcessingBatch = false;
 
-  // Prepend new photos (stack behavior). Keep unselected by default.
-  const offset = newPreviews.length;
-  const updatedIncluded = new Set();
-  for (const i of includedIndices) {
-    updatedIncluded.add(i + offset);
-  }
-  includedIndices = updatedIncluded;
-  previews = [...newPreviews, ...previews];
-  selectedIndex = 0;
-
-  document.getElementById("gallery-section").style.display = "block";
-  document.getElementById("results-table-section").style.display = "block";
-
   renderThumbnails();
   renderActivePhoto();
   updatePooling();
   renderResultsTable();
-  sendLog("process_files_completed", { added: newPreviews.length, total: previews.length });
+  sendLog("process_files_completed", { added: slots.length, total: previews.length });
+}
+
+// A batch result lands on its own slot, under the same guard a crop release
+// uses: if the photo was deleted, or a crop release overtook it while its
+// inference was in flight, the result is dropped rather than painted.
+function commitBatchSlot(slot, res) {
+  const rev = slot.rev;
+  if (slot.removed || previews.indexOf(slot) < 0 || slot.rev !== rev) {
+    sendLog("batch_slot_superseded", { name: slot.name, rev, currentRev: slot.rev });
+    return;
+  }
+  Object.assign(slot, res);
+  slot.file = undefined;   // release the File/ImageBitmap once it is not needed
+  slot.bitmap = undefined;
+  slot.pending = false;
+  slot.error = null;
 }
 
 function deletePhoto(idx) {
   if (idx < 0 || idx >= previews.length) return;
-  const deletedName = previews[idx].name;
+  const deleted = previews[idx];
+  const deletedName = deleted.name;
   sendLog("delete_photo", { idx, name: deletedName });
+  // Any computation still running for this photo now has nothing to write to.
+  deleted.removed = true;
   previews.splice(idx, 1);
   const updated = new Set();
   for (const i of includedIndices) {
@@ -1091,7 +1234,10 @@ function renderThumbnails() {
 
   previews.forEach((p, idx) => {
     const tile = document.createElement("div");
-    tile.className = "tile" + (selectedIndex === idx ? " active" : "") + (!includedIndices.has(idx) ? " excluded" : "");
+    // A photo still being analyzed is visibly unsettled: greyed tile, pending
+    // badge, and it cannot be opted into the pooled result yet.
+    tile.className = "tile" + (selectedIndex === idx ? " active" : "") +
+      (!includedIndices.has(idx) ? " excluded" : "") + (p.pending ? " pending" : "");
 
     const delBtn = document.createElement("button");
     delBtn.className = "tile-delete-btn";
@@ -1109,8 +1255,17 @@ function renderThumbnails() {
     btn.onclick = () => selectPhoto(idx);
 
     const img = document.createElement("img");
-    img.src = (p.cropCanvas || p.fullCanvas).toDataURL("image/jpeg", 0.8);
-    img.alt = p.name;
+    // A queued photo has no canvas yet: it gets a greyed placeholder tile that
+    // resolves to the real image as soon as its own decode finishes. The alt is
+    // empty in that state, so the filename does not render over the tile.
+    const src = p.cropCanvas || p.fullCanvas;
+    if (src) {
+      img.src = src.toDataURL("image/jpeg", 0.8);
+      img.alt = p.name;
+    } else {
+      img.className = "thumb-placeholder";
+      img.alt = "";
+    }
     btn.appendChild(img);
 
     const num = document.createElement("span");
@@ -1119,9 +1274,14 @@ function renderThumbnails() {
     btn.appendChild(num);
 
     const badge = document.createElement("span");
-    badge.className = "crop-badge" + (p.is_cropped ? " cropped" : "");
-    badge.textContent = p.is_cropped ? "✓" : "✕";
-    badge.title = p.is_cropped ? "Mosquito detected & cropped" : "Uncropped / no mosquito detected";
+    const badgeState = p.error ? "error" : p.pending ? "pending" : p.is_cropped ? "cropped" : "uncropped";
+    badge.className = `crop-badge ${badgeState}`;
+    badge.textContent = p.error ? "!" : p.pending ? "…" : p.is_cropped ? "✓" : "✕";
+    badge.title = p.error
+      ? p.error
+      : p.pending
+        ? "Classifying the current crop…"
+        : p.is_cropped ? "Mosquito detected & cropped" : "Uncropped / no mosquito detected";
     btn.appendChild(badge);
 
     tile.appendChild(btn);
@@ -1134,7 +1294,7 @@ function renderThumbnails() {
     chk.type = "checkbox";
     chk.className = "thumb-optin";
     chk.checked = includedIndices.has(idx);
-    chk.disabled = p.fallback;
+    chk.disabled = p.fallback || p.pending || p.error;
     chk.onchange = (e) => {
       if (e.target.checked) includedIndices.add(idx);
       else includedIndices.delete(idx);
@@ -1183,12 +1343,21 @@ function renderActivePhoto() {
   const surfaceFull = document.getElementById("crop-surface-full");
   fitSurface(surfaceFull, p.fullCanvas);
   const fullImg = document.getElementById("full-img");
-  fullImg.src = p.fullCanvas.toDataURL("image/jpeg", 0.9);
+  // A photo whose decode has not finished has no canvas to show yet. Hide the
+  // image rather than leaving a broken-icon with alt text over an empty panel;
+  // the pending notice beside it says what is happening.
+  if (p.fullCanvas) {
+    fullImg.src = p.fullCanvas.toDataURL("image/jpeg", 0.9);
+    fullImg.style.visibility = "visible";
+  } else {
+    fullImg.removeAttribute("src");
+    fullImg.style.visibility = "hidden";
+  }
 
   // Active crop outline on full photo (for both manual and automatic crops!)
   const fullActiveBox = document.getElementById("full-active-crop-box");
   if (fullActiveBox) {
-    if (p.cropBox && !p.fallback && !p.manual_full_photo) {
+    if (p.cropBox && p.fullCanvas && !p.fallback && !p.manual_full_photo) {
       const [bx1, by1, bx2, by2] = p.cropBox;
       const l = (bx1 / p.fullCanvas.width) * 100;
       const t = (by1 / p.fullCanvas.height) * 100;
@@ -1242,13 +1411,39 @@ function renderActivePhoto() {
   } else {
     contextImg.style.display = "none";
     cropEmpty.style.display = "block";
-    cropEmpty.textContent = p.manual_full_photo ? "Using full photo" : "No mosquito detected";
+    cropEmpty.textContent = p.pending
+      ? "Analyzing photo…"
+      : p.error
+        ? "Crop unavailable"
+        : p.manual_full_photo ? "Using full photo" : "No mosquito detected";
     if (zoomedActiveBox) zoomedActiveBox.style.display = "none";
   }
 
   // 3. Render Right Panel (Scores)
   const scoreList = document.getElementById("score-list");
+  const scoreNotice = document.getElementById("score-pending");
+  const unsettled = Boolean(p.pending) || Boolean(p.error);
   scoreList.innerHTML = "";
+  // The numbers below still describe the previous crop while a new one is being
+  // classified, so they are dimmed and labelled rather than presented as the
+  // verdict for what is on screen.
+  scoreList.classList.toggle("stale", unsettled);
+  if (scoreNotice) {
+    if (p.error) {
+      scoreNotice.textContent = p.error;
+      scoreNotice.className = "pending-notice error";
+      scoreNotice.style.display = "block";
+    } else if (p.pending) {
+      scoreNotice.textContent = p.cropBox === null && !p.fullCanvas
+        ? "Reading photo…"
+        : "Classifying…";
+      scoreNotice.className = "pending-notice";
+      scoreNotice.style.display = "block";
+    } else {
+      scoreNotice.style.display = "none";
+      scoreNotice.textContent = "";
+    }
+  }
   const sortedScores = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
   for (const [name, score] of sortedScores) {
     const item = document.createElement("div");
@@ -1279,7 +1474,13 @@ function renderActivePhoto() {
     scoreList.appendChild(item);
   }
 
-  document.getElementById("photo-name").textContent = `${p.name} · ${p.status}`;
+  // The status line is the other place a stale verdict would show: while a
+  // recompute is in flight, or after one failed, say so rather than repeating
+  // the crop size as though it were a result.
+  const statusText = p.error
+    ? `analysis failed: ${p.error.replace(/^Classification failed: /, "")}`
+    : p.status;
+  document.getElementById("photo-name").textContent = `${p.name} · ${statusText}`;
   const btnFull = document.getElementById("btn-full-photo");
   if (p.is_cropped) {
     btnFull.style.display = "inline-block";
@@ -1345,6 +1546,9 @@ function setupCropSurfaces() {
     }
 
     async function onPointerUp(ev) {
+      // Stamped first, before any bookkeeping: this is the "the user let go"
+      // instant the displayed-picture latency is measured from.
+      const releasedAt = performance.now();
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
@@ -1371,10 +1575,11 @@ function setupCropSurfaces() {
 
       sendLog("drag_end", { target, rect, w, h });
 
+      const idx = selectedIndex;
       if (target === "full") {
-        await applyCropFromFullSurface(selectedIndex, rect);
+        applyCropFromFullSurface(idx, rect, releasedAt);
       } else if (target === "zoomed") {
-        await applyCropFromZoomedSurface(selectedIndex, rect);
+        applyCropFromZoomedSurface(idx, rect, releasedAt);
       }
     }
 
@@ -1388,7 +1593,7 @@ function setupCropSurfaces() {
 }
 
 // Execute Crop from Full Photo surface
-async function applyCropFromFullSurface(idx, rect) {
+async function applyCropFromFullSurface(idx, rect, t0) {
   const p = previews[idx];
   const fullCv = p.fullCanvas;
   const x1 = Math.max(0, Math.min(fullCv.width, Math.round(rect[0] * fullCv.width)));
@@ -1399,11 +1604,11 @@ async function applyCropFromFullSurface(idx, rect) {
   if (x2 - x1 < 10 || y2 - y1 < 10) return;
 
   sendLog("manual_crop", { target: "full", rect: [x1, y1, x2, y2] });
-  await executeCrop(p, [x1, y1, x2, y2]);
+  return executeCrop(p, idx, [x1, y1, x2, y2], t0);
 }
 
 // Execute Crop from Zoomed 50% Context surface (fine-tuning)
-async function applyCropFromZoomedSurface(idx, rect) {
+async function applyCropFromZoomedSurface(idx, rect, t0) {
   const p = previews[idx];
   if (!p.contextBox) return;
   const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
@@ -1424,13 +1629,64 @@ async function applyCropFromZoomedSurface(idx, rect) {
   if (x2 - x1 < 10 || y2 - y1 < 10) return;
 
   sendLog("manual_crop", { target: "zoomed", rect: [x1, y1, x2, y2] });
-  await executeCrop(p, [x1, y1, x2, y2]);
+  return executeCrop(p, idx, [x1, y1, x2, y2], t0);
+}
+
+// Classify one canvas locally. Split out of executeCrop/revertToFullPhoto so
+// both paths compute exactly the same numbers from a canvas.
+async function classifyCanvasLocal(cropCv) {
+  const emb = await clipEmbed(cropCv);
+  const { spP, spCos, logits } = softmaxJoint(emb);
+  const { labels, demoted } = complexScores(spP, spCos);
+  const detail = {};
+  EMB.species.forEach((name, i) => { detail[name] = spP[i]; });
+  return { labels, detail, logits, demoted };
+}
+
+// Server path: the server owns no geometry decision we need for display, only
+// the scores for a crop box we send it. If it answers with a different box
+// than the one it was given, its labels describe a crop the user is not looking
+// at, so the box is logged and ignored rather than silently re-displayed.
+async function classifyCanvasServer(p, cropBox) {
+  const blob = await new Promise((r) => p.fullCanvas.toBlob(r, "image/jpeg", 0.85));
+  const formData = new FormData();
+  formData.append("file", blob, p.name);
+  formData.append("crop_box", JSON.stringify(cropBox));
+  const res = await fetch("/api/predict", { method: "POST", body: formData });
+  if (!res.ok) throw new Error(`Server inference error ${res.status}`);
+  const data = await res.json();
+  if (JSON.stringify(data.cropBox) !== JSON.stringify(cropBox)) {
+    sendLog("server_crop_box_diverged", { requested: cropBox, returned: data.cropBox });
+  }
+  return {
+    labels: data.labels,
+    detail: data.detail,
+    logits: data.logits,
+    demoted: Boolean(Object.keys(data.labels)[0]?.includes("low confidence"))
+  };
+}
+
+// Hand the thread back to the browser for one painted frame before the model
+// starts. Without this the synchronous geometry update and the inference share
+// a single task: the browser gets no chance to composite in between, so the
+// first frame showing the new crop is delayed by the whole inference. Measured
+// 844 ms with a 46 ms update; with the yield, the frame lands in ~50 ms.
+function afterNextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
 }
 
 // Core Crop Execution (handles Server and Local WebGPU)
-async function executeCrop(p, cropBox) {
+//
+// Two phases. Phase one is synchronous and touches no model: cut the crop,
+// re-cut the context around it, and repaint. That is what the user asked for
+// by releasing. Phase two asks the model what the new crop is and commits the
+// answer only if this is still the newest release for this photo.
+async function executeCrop(p, idx, cropBox, t0) {
   const [bx1, by1, bx2, by2] = cropBox;
   const fullCv = p.fullCanvas;
+  const started = t0 ?? performance.now();
 
   const cw = Math.max(1, bx2 - bx1);
   const ch = Math.max(1, by2 - by1);
@@ -1438,128 +1694,151 @@ async function executeCrop(p, cropBox) {
   cropCv.width = cw;
   cropCv.height = ch;
   cropCv.getContext("2d").drawImage(fullCv, bx1, by1, cw, ch, 0, 0, cw, ch);
+  const { contextCanvas, contextBox } = extractContextCrop(fullCv, cropBox);
 
-  if (currentEngine === "server-gpu") {
-    try {
-      const blob = await new Promise((r) => fullCv.toBlob(r, "image/jpeg", 0.85));
-      const formData = new FormData();
-      formData.append("file", blob, p.name);
-      formData.append("crop_box", JSON.stringify(cropBox));
-      const res = await fetch("/api/predict", { method: "POST", body: formData });
-      if (res.ok) {
-        const data = await res.json();
-        p.cropCanvas = await dataUrlToCanvas(data.cropDataUrl);
-        p.contextCanvas = await dataUrlToCanvas(data.contextDataUrl);
-        p.cropBox = data.cropBox;
-        p.contextBox = data.contextBox;
-        p.scores = data.labels;
-        p.detail = data.detail;
-        p.logits = data.logits;
-        p.status = data.status;
-        p.is_cropped = true;
-        p.demoted = Boolean(Object.keys(data.labels)[0]?.includes("low confidence"));
-        p.manual_full_photo = false;
-        p.fallback = false;
-      }
-    } catch (e) {
-      console.error("Server crop error:", e);
-    }
-  } else {
-    const emb = await clipEmbed(cropCv);
-    const { spP, spCos, logits } = softmaxJoint(emb);
-    const { labels, demoted } = complexScores(spP, spCos);
+  // Phase one: geometry and pixels, now. The scores on screen no longer belong
+  // to what is on screen, so they are marked pending rather than left looking
+  // current.
+  const rev = beginRecompute(p);
+  p.cropCanvas = cropCv;
+  p.contextCanvas = contextCanvas;
+  p.cropBox = cropBox;
+  p.contextBox = contextBox;
+  p.status = `manual crop: ${cw}x${ch}px · classifying…`;
+  p.is_cropped = true;
+  p.manual_full_photo = false;
+  p.fallback = false;
 
-    const detail = {};
-    EMB.species.forEach((name, i) => { detail[name] = spP[i]; });
-    const { contextCanvas, contextBox } = extractContextCrop(fullCv, cropBox);
+  renderThumbnails();
+  renderActivePhoto();
+  updatePooling();
+  renderResultsTable();
 
-    p.cropCanvas = cropCv;
-    p.contextCanvas = contextCanvas;
-    p.cropBox = cropBox;
-    p.contextBox = contextBox;
-    p.scores = labels;
-    p.detail = detail;
-    p.logits = logits;
-    p.status = `manual crop: ${cw}x${ch}px`;
-    p.is_cropped = true;
-    p.demoted = demoted;
-    p.manual_full_photo = false;
-    p.fallback = false;
-  }
-
-  sendLog("crop_executed", {
-    engine: currentEngine,
-    cropBox,
-    cw,
-    ch,
-    topSpecies: Object.keys(p.scores)[0],
-    topScore: Object.values(p.scores)[0]
+  const rec = {
+    what: "crop", cropBox, cw, ch, rev,
+    applyMs: Math.round((performance.now() - started) * 10) / 10,
+    cropFrameMs: null, cropPaintMs: null, scoresMs: null, topSpecies: null,
+    dropped: false, failed: null
+  };
+  ASYNC.last = rec;
+  // cropFrameMs is the next frame boundary after the DOM was updated;
+  // cropPaintMs is the frame after that, i.e. the first callback that runs once
+  // the frame containing the new crop has actually been painted.
+  requestAnimationFrame(() => {
+    rec.cropFrameMs = Math.round((performance.now() - started) * 10) / 10;
+    requestAnimationFrame(() => {
+      rec.cropPaintMs = Math.round((performance.now() - started) * 10) / 10;
+    });
   });
+  sendLog("crop_released", { engine: currentEngine, cropBox, cw, ch, rev });
+
+  // Phase two: the model, off the critical path.
+  try {
+    await afterNextPaint();
+    if (!ownsRecompute(p, idx, rev)) throw new Superseded();
+    const r = currentEngine === "server-gpu"
+      ? await classifyCanvasServer(p, cropBox)
+      : await classifyCanvasLocal(cropCv);
+    if (!ownsRecompute(p, idx, rev)) {
+      rec.dropped = true;
+      sendLog("crop_superseded", { name: p.name, rev, currentRev: p.rev });
+      return;
+    }
+    commitScores(p, r);
+    p.status = `manual crop: ${cw}x${ch}px`;
+    rec.scoresMs = Math.round(performance.now() - started);
+    rec.topSpecies = Object.keys(p.scores)[0];
+  } catch (err) {
+    if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) {
+      rec.dropped = true;
+      return;
+    }
+    console.error("Crop classification failed:", err);
+    markComputeFailed(p, err);
+    p.status = `manual crop: ${cw}x${ch}px · analysis failed`;
+    rec.failed = p.error;
+    rec.scoresMs = Math.round(performance.now() - started);
+  }
 
   const devElem = document.getElementById("footer-device");
   if (devElem) {
-    if (currentEngine === "server-gpu") {
-      devElem.textContent = `inference: ${serverEngineLabel} · manual crop updated`;
-    } else {
-      const epLabel = clipEP === "webgpu" ? "WEBGPU" : "WASM CPU";
-      devElem.textContent = `inference: ${WEBGPU_MODELS[currentEngine]?.name || "WebGPU"} (${epLabel}) · manual crop updated`;
-    }
+    const engine = currentEngine === "server-gpu"
+      ? serverEngineLabel
+      : `${WEBGPU_MODELS[currentEngine]?.name || "WebGPU"} (${clipEP === "webgpu" ? "WEBGPU" : "WASM CPU"})`;
+    devElem.textContent = `inference: ${engine} · manual crop ${p.pending ? "classifying…" : "updated"}`;
   }
 
   renderThumbnails();
   renderActivePhoto();
   updatePooling();
   renderResultsTable();
+  sendLog("crop_executed", {
+    engine: currentEngine, cropBox, cw, ch,
+    topSpecies: Object.keys(p.scores)[0] || null
+  });
 }
 
 async function revertToFullPhoto(idx) {
   const p = previews[idx];
   const fullCv = p.fullCanvas;
+  const started = performance.now();
   sendLog("revert_to_full", { name: p.name });
 
-  if (currentEngine === "server-gpu") {
-    try {
-      const blob = await new Promise((r) => fullCv.toBlob(r, "image/jpeg", 0.85));
-      const formData = new FormData();
-      formData.append("file", blob, p.name);
-      formData.append("crop_box", JSON.stringify([0, 0, fullCv.width, fullCv.height]));
-      const res = await fetch("/api/predict", { method: "POST", body: formData });
-      if (res.ok) {
-        const data = await res.json();
-        p.cropCanvas = fullCv;
-        p.contextCanvas = fullCv;
-        p.cropBox = null;
-        p.contextBox = [0, 0, fullCv.width, fullCv.height];
-        p.scores = data.labels;
-        p.detail = data.detail;
-        p.logits = data.logits;
-        p.status = "manual full photo";
-        p.is_cropped = false;
-        p.demoted = Boolean(Object.keys(data.labels)[0]?.includes("low confidence"));
-        p.manual_full_photo = true;
-      }
-    } catch (e) {
-      console.error("Server revertToFullPhoto error:", e);
+  // Phase one, as in executeCrop: the full photo is displayed immediately.
+  const rev = beginRecompute(p);
+  p.cropCanvas = fullCv;
+  p.contextCanvas = fullCv;
+  p.cropBox = null;
+  p.contextBox = [0, 0, fullCv.width, fullCv.height];
+  p.status = "manual full photo · classifying…";
+  p.is_cropped = false;
+  p.manual_full_photo = true;
+  p.fallback = false;
+
+  renderThumbnails();
+  renderActivePhoto();
+  updatePooling();
+  renderResultsTable();
+
+  const rec = {
+    what: "revert", rev,
+    applyMs: Math.round((performance.now() - started) * 10) / 10,
+    cropFrameMs: null, cropPaintMs: null, scoresMs: null, topSpecies: null,
+    dropped: false, failed: null
+  };
+  ASYNC.last = rec;
+  requestAnimationFrame(() => {
+    rec.cropFrameMs = Math.round((performance.now() - started) * 10) / 10;
+    requestAnimationFrame(() => {
+      rec.cropPaintMs = Math.round((performance.now() - started) * 10) / 10;
+    });
+  });
+
+  try {
+    await afterNextPaint();
+    if (!ownsRecompute(p, idx, rev)) throw new Superseded();
+    const r = currentEngine === "server-gpu"
+      ? await classifyCanvasServer(p, [0, 0, fullCv.width, fullCv.height])
+      : await classifyCanvasLocal(fullCv);
+    if (!ownsRecompute(p, idx, rev)) {
+      rec.dropped = true;
+      sendLog("revert_superseded", { name: p.name, rev, currentRev: p.rev });
+      return;
     }
-  } else {
-    const emb = await clipEmbed(fullCv);
-    const { spP, spCos, logits } = softmaxJoint(emb);
-    const { labels, demoted } = complexScores(spP, spCos);
-
-    const detail = {};
-    EMB.species.forEach((name, i) => { detail[name] = spP[i]; });
-
-    p.cropCanvas = fullCv;
-    p.contextCanvas = fullCv;
-    p.cropBox = null;
-    p.contextBox = [0, 0, fullCv.width, fullCv.height];
-    p.scores = labels;
-    p.detail = detail;
-    p.logits = logits;
+    commitScores(p, r);
     p.status = "manual full photo";
-    p.is_cropped = false;
-    p.demoted = demoted;
-    p.manual_full_photo = true;
+    rec.scoresMs = Math.round(performance.now() - started);
+    rec.topSpecies = Object.keys(p.scores)[0];
+  } catch (err) {
+    if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) {
+      rec.dropped = true;
+      return;
+    }
+    console.error("Revert classification failed:", err);
+    markComputeFailed(p, err);
+    p.status = "manual full photo · analysis failed";
+    rec.failed = p.error;
+    rec.scoresMs = Math.round(performance.now() - started);
   }
 
   renderThumbnails();
@@ -1574,7 +1853,19 @@ function updatePooling() {
   const poolScores = document.getElementById("combined-scores");
   const contribTable = document.getElementById("contribution-table").querySelector("tbody");
 
-  const included = Array.from(includedIndices).map(i => previews[i]).filter(Boolean);
+  const checked = Array.from(includedIndices).map(i => previews[i]).filter(Boolean);
+  // A photo whose crop is being re-classified, or whose classification failed,
+  // has no verdict that matches its pixels. Pooling it would fold the previous
+  // crop's evidence into the combined result, so it is left out and said so.
+  const included = checked.filter(p => !p.pending && !p.error);
+  const waiting = checked.length - included.length;
+  const poolNote = document.getElementById("pool-note");
+  if (poolNote) {
+    poolNote.textContent = waiting
+      ? `${waiting} checked photo${waiting > 1 ? "s are" : " is"} still classifying and excluded here.`
+      : "";
+    poolNote.style.display = waiting ? "block" : "none";
+  }
   if (included.length <= 1) {
     poolCard.style.display = "none";
     return;
@@ -1673,6 +1964,17 @@ function renderResultsTable() {
 
   previews.forEach(p => {
     const tr = document.createElement("tr");
+    // A row whose photo is mid-recompute says so instead of repeating numbers
+    // that belong to the previous crop.
+    if (p.pending || p.error) {
+      tr.className = "row-pending";
+      tr.innerHTML = `
+        <td>${escapeHtml(p.name)}</td>
+        <td colspan="4">${escapeHtml(p.error || "classifying…")}</td>
+      `;
+      tbody.appendChild(tr);
+      return;
+    }
     const sortedComp = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
     const topComp = sortedComp[0] || ["-", 0];
     const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
@@ -1694,6 +1996,12 @@ function downloadCSV() {
   sendLog("download_csv");
   let csv = "Filename,Status,Cropped,Top Complex,Complex Score (%),Top Species,Species Score (%)\n";
   previews.forEach(p => {
+    if (p.pending || p.error) {
+      // Exporting the previous crop's numbers under the new crop's name would be
+      // a wrong result, not a stale one.
+      csv += `"${p.name}","${(p.error || "classifying").replace(/"/g, "'")}",${p.is_cropped},"-","-","-","-"\n`;
+      return;
+    }
     const sortedComp = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
     const topComp = sortedComp[0] || ["-", 0];
     const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
