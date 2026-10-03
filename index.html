@@ -536,9 +536,17 @@
     max-height: 320px;
     max-width: 100%;
   }
-  /* cover, not contain: contain letterboxes the photo and leaves black bars where
-     there is image to show. With cover the surface shows a centred window of the
-     photo, so anything drawn over it must map through coverMapping(). */
+  /* The two panels fit the photo differently, and the reason is in the labels:
+     the zoomed panel is a deliberate crop and wants no bars, so it is
+     object-fit:cover - the surface shows a centred window of the photo, and
+     anything drawn over it maps through fitMapping(surface, img, "cover").
+
+     The full panel promises the whole photograph, and cover takes that promise
+     back per axis: a landscape photo in a squarer surface loses its left and
+     right edges. So it is object-fit:contain and maps through
+     fitMapping(surface, img, "contain"). The bars that leaves are the panel's
+     own background (.crop-container below), not black, and a photo with
+     letterbox bars still shows every pixel it has. */
   .crop-surface img {
     display: block;
     width: 100%;
@@ -547,6 +555,7 @@
     pointer-events: none;
     user-select: none;
   }
+  #crop-surface-full img { object-fit: contain; }
   .crop-rectangle {
     position: absolute;
     border: 2px solid var(--color-accent);
