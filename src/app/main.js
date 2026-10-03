@@ -36,6 +36,7 @@ import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCro
 import { downloadCSV, renderResultsTable } from "./resultsTable";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
+import { updatePooling } from "./poolingPanel";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -222,7 +223,7 @@ const ASYNC = (window.__mosqAsync = {
   // them would not be measuring it.
   renderThumbnails,
   renderActivePhoto,
-  updatePooling,
+  updatePooling: () => updatePooling(EMB, previews, includedIndices),
   renderResultsTable: () => renderResultsTable(previews)
 });
 (function countFrames() {
@@ -919,7 +920,7 @@ async function processFiles(fileList) {
   document.getElementById("results-table-section").style.display = "block";
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
+  updatePooling(EMB, previews, includedIndices);
   renderResultsTable(previews);
 
   // Decode with bounded concurrency, inference effectively serial. Decoding a
@@ -1031,7 +1032,7 @@ async function processFiles(fileList) {
     setProgress("batch", `Analyzed ${processed} of ${imageFiles.length} photos…`, (100 * processed) / imageFiles.length);
     renderThumbnails();
     renderActivePhoto();
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
     renderResultsTable(previews);
   }
 
@@ -1052,7 +1053,7 @@ async function processFiles(fileList) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
+  updatePooling(EMB, previews, includedIndices);
   renderResultsTable(previews);
   sendLog("process_files_completed", { added: slots.length, total: previews.length });
 
@@ -1106,11 +1107,11 @@ function deletePhoto(idx) {
   if (previews.length === 0) {
     document.getElementById("gallery-section").style.display = "none";
     document.getElementById("results-table-section").style.display = "none";
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
   } else {
     renderThumbnails();
     renderActivePhoto();
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
     renderResultsTable(previews);
   }
 }
@@ -1175,7 +1176,7 @@ function buildTile(idx) {
     if (e.target.checked) includedIndices.add(idx);
     else includedIndices.delete(idx);
     renderThumbnails();
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
   };
   label.appendChild(chk);
   tile.appendChild(label);
@@ -1265,7 +1266,7 @@ function setAllSelected(on) {
     else includedIndices.delete(i);
   });
   renderThumbnails();
-  updatePooling();
+  updatePooling(EMB, previews, includedIndices);
   updateStripActions();
 }
 
@@ -1286,8 +1287,8 @@ function deleteAllPhotos() {
   document.getElementById("gallery-section").style.display = "none";
   document.getElementById("results-table-section").style.display = "none";
   // The combined card is not hidden: hiding it shifts the layout under the
-  // strip. updatePooling() decides what it shows.
-  updatePooling();
+  // strip. updatePooling(EMB, previews, includedIndices) decides what it shows.
+  updatePooling(EMB, previews, includedIndices);
 }
 
 // Nothing to select, deselect or delete without photos, so the buttons say so
@@ -1770,7 +1771,7 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
     applyViews(p, landed, views.length);
     renderThumbnails();
     renderActivePhoto();
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
     renderResultsTable(previews);
   }
 
@@ -1841,7 +1842,7 @@ async function executeCrop(p, idx, cropBox, t0) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
+  updatePooling(EMB, previews, includedIndices);
   renderResultsTable(previews);
 
   const rec = {
@@ -1896,7 +1897,7 @@ async function executeCrop(p, idx, cropBox, t0) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
+  updatePooling(EMB, previews, includedIndices);
   renderResultsTable(previews);
   sendLog("crop_executed", {
     engine: currentEngine, cropBox, cw, ch,
@@ -1923,7 +1924,7 @@ async function revertToFullPhoto(idx) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
+  updatePooling(EMB, previews, includedIndices);
   renderResultsTable(previews);
 
   const rec = {
@@ -1967,132 +1968,10 @@ async function revertToFullPhoto(idx) {
 
   renderThumbnails();
   renderActivePhoto();
-  updatePooling();
+  updatePooling(EMB, previews, includedIndices);
   renderResultsTable(previews);
 }
 
-// ---- Pooling / Evidence Aggregation ----
-function updatePooling() {
-  const poolScores = document.getElementById("combined-scores");
-  const contribTable = document.getElementById("contribution-table").querySelector("tbody");
-
-  const checked = Array.from(includedIndices).map(i => previews[i]).filter(Boolean);
-  // A photo whose crop is being re-classified, or whose classification failed,
-  // has no verdict that matches its pixels. Pooling it would fold the previous
-  // crop's evidence into the combined result, so it is left out. Its own row in
-  // the results table stays empty until it has a verdict, which is where the
-  // card's header count and the table agree with each other.
-  // A photo the classifier is not confident about at all - neither a species
-  // nor a genus - is LEFT OUT of the pooled combination entirely. Its fused
-  // logits are still a real posterior, and summing them in is what made the
-  // earlier parked abstention work a regression: the pooled card would fold in
-  // a species the app had just declined to name, which is worse than not
-  // gating at all. A photo that reached only the genus state does still
-  // contribute, because its evidence is sound and only its resolution is
-  // coarser; it is marked as such below rather than dropped.
-  // A photo the gate called NOT a mosquito is left out on the same grounds as one
-  // it could not name: its evidence is about a different subject, so pooling it
-  // would fold a midge's logits into a mosquito's posterior. Anything other than a
-  // species or genus verdict is therefore excluded, which is what makes the
-  // non-mosquito state safe to introduce without a second filter here.
-  const { included, abstained } = splitPoolable(checked);
-  if (included.length <= 1) {
-    // The card is permanent, so the empty case is drawn rather than hidden:
-    // hiding it resized the whole row above the gallery, and zooming re-pools,
-    // so it flickered out whenever the transient selection changed.
-    poolScores.innerHTML =
-      '<p class="hint" style="margin:0;">Check two or more photos of the same mosquito to combine their results.</p>';
-    contribTable.innerHTML = "";
-    return;
-  }
-
-  const selectedMethod = document.querySelector('input[name="pooling-method"]:checked')?.value || "Dependent evidence";
-  const r = parseFloat(document.getElementById("corr-slider").value) || 0.5;
-
-  const weights = poolingWeights(included, selectedMethod, r);
-
-  const aggLogits = aggregateLogits(EMB, included, weights);
-
-  // The same sum for the adjacent (non-mosquito) classes, so the pooled card can
-  // say "this is not a mosquito" instead of being structurally unable to ask.
-  const aggAdjLogits = aggregateAdjacent(EMB, included, weights);
-
-  // Relative Log Scores (Axis: -20 to 0)
-  const candidates = pooledCandidates(EMB, aggLogits);
-
-  // The pooled genus headline. Derived from the POOLED posterior - the softmax of
-  // the aggregated logits - and gated by the same verdictFrom/verdictSentence the
-  // per-photo line uses, so "confident enough" means one thing in the app.
-  //
-  // Softmax of the aggregate, not a mean of per-photo verdicts: the logits already
-  // are the per-photo log-probabilities up to a constant (a photo's logits are
-  // scale*cos, and log p = scale*cos - logZ), so softmax(aggLogits) is the pooled
-  // posterior exactly, and one pooled gate on it is the pooled claim. Averaging
-  // per-photo verdicts instead would let two confident photos averaging to a
-  // confident mean outvote a third that pooled with them says nobody knows.
-  //
-  // A per-photo `unsure` photo is already excluded from `included` above, so it
-  // is absent from this aggregate as well - the pooled headline cannot name a
-  // genus the pool itself refused to name.
-  //
-  // `included` is passed so the pool can also gate its SPECIES claim on the
-  // photos rather than on its own sharpened posterior: see pooledVerdict().
-  const pooledVerdict = pooledVerdictOf(aggLogits, included, aggAdjLogits);
-  const pooledLine = pooledVerdict ? verdictSentence(pooledVerdict) : "";
-
-  poolScores.innerHTML = "";
-  // A species-state verdict renders an empty sentence on purpose: the ranking
-  // below already leads with the binomial, and a headline that repeated it added
-  // nothing. So the line appears only when the pooled gate has something coarser
-  // to say, and is absent entirely when the pool is a confident species.
-  if (pooledLine) {
-    const head = document.createElement("div");
-    head.className = "combined-genus-headline" + (pooledVerdict.state === "genus" ? " is-genus" : "");
-    // Full text in the tooltip; the box is one line tall whatever the genus is.
-    head.textContent = pooledLine;
-    head.title = pooledLine;
-    poolScores.appendChild(head);
-  }
-  candidates.slice(0, 10).forEach(c => {
-    const row = document.createElement("div");
-    row.className = "combined-candidate";
-    // Same non-finite guard as the single-photo score list above.
-    const relFinite = Number.isFinite(c.relScore);
-    const widthPct = relFinite ? Math.max(0, Math.min(100, ((c.relScore + 20) / 20) * 100)) : 0;
-    row.innerHTML = `
-      <div class="combined-score-row">
-        <span class="species-name-wrap">${speciesLabelHtml(c.name)}</span>
-        <span>${relFinite ? c.relScore.toFixed(1) : ""}</span>
-      </div>
-      <div class="combined-bar-track">
-        <div class="combined-bar" style="width: ${widthPct}%"></div>
-      </div>
-    `;
-    poolScores.appendChild(row);
-  });
-
-  // Contribution Table
-  contribTable.innerHTML = "";
-  const sumW = weights.reduce((a, b) => a + b, 0) || 1e-6;
-  included.forEach((p, idx) => {
-    const tr = document.createElement("tr");
-    const share = ((weights[idx] / sumW) * 100).toFixed(1);
-    // A genus-state photo is in the sum, so it says which claim it brought.
-    const note = p.verdict?.state === "genus"
-      ? `<br><span class="contrib-note">genus only: ${escapeHtml(p.verdict.genus)}</span>` : "";
-    tr.innerHTML = `<td>${escapeHtml(p.name)}${note}</td><td style="text-align:right">${share}%</td>`;
-    contribTable.appendChild(tr);
-  });
-  // Photos left out of the sum are listed too, with the reason. A checked photo
-  // that silently contributes nothing reads as a bug in the app; one that is
-  // listed as excluded reads as what it is.
-  abstained.forEach((p) => {
-    const tr = document.createElement("tr");
-    tr.className = "row-excluded";
-    tr.innerHTML = `<td>${escapeHtml(p.name)}<br><span class="contrib-note">excluded - not confident enough to name a genus</span></td><td style="text-align:right">-</td>`;
-    contribTable.appendChild(tr);
-  });
-}
 
 
 
@@ -2183,7 +2062,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll('input[name="pooling-method"]').forEach(r => {
     r.onchange = (e) => {
       localStorage.setItem("mosquito_pooling", e.target.value);
-      updatePooling();
+      updatePooling(EMB, previews, includedIndices);
     };
   });
 
@@ -2196,7 +2075,7 @@ window.addEventListener("DOMContentLoaded", () => {
   corrSlider.oninput = (e) => {
     localStorage.setItem("mosquito_corr", e.target.value);
     document.getElementById("corr-val").textContent = parseFloat(e.target.value).toFixed(2);
-    updatePooling();
+    updatePooling(EMB, previews, includedIndices);
   };
 
   // Arrow Key Navigation
