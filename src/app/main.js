@@ -29,6 +29,7 @@ import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
          FP16_AVAILABLE, MODEL_BASE_URL, NMS_IOU, TEMPERATURE, WEBGPU_MODELS } from "./modelConfig";
 import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
+import { createLogger } from "./telemetry";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -168,6 +169,15 @@ let includedIndices = new Set();
 let selectedIndex = 0;
 let isProcessingBatch = false;
 
+// Bound here rather than at each call site: `currentEngine`, `serverAvailable`
+// and the selection are all read at event time, so the logger takes them as
+// thunks and stays correct across an engine switch mid-session.
+const sendLog = createLogger({
+  engine: () => currentEngine,
+  photo: () => previews[selectedIndex]?.name || null,
+  serverAvailable: () => serverAvailable
+});
+
 // ---- Crop: displayed state vs. computed state ----
 //
 // A crop release does two separate things. The geometry - crop canvas, context
@@ -277,26 +287,6 @@ function markComputeFailed(p, err) {
 // can tell "nothing to do" from "the model failed".
 class Superseded extends Error {}
 
-// ---- Telemetry Logging ----
-function sendLog(action, data = {}) {
-  const payload = {
-    action,
-    engine: currentEngine,
-    photo: previews[selectedIndex]?.name || null,
-    timestamp: new Date().toISOString(),
-    ...data
-  };
-  console.log(`[CLIENT LOG] ${action}:`, payload);
-  // Only the Cloud GPU deployment has an /api/log endpoint. Posting to it from
-  // the static site just produces a failed request, which the browser reports as
-  // a console error no matter how the promise is handled.
-  if (!serverAvailable) return;
-  fetch("/api/log", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  }).catch(() => {});
-}
 
 // A canvas -> data: URL memo, keyed on the canvas object.
 //
