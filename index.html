@@ -526,7 +526,9 @@
   }
   .table-wrap {
     max-height: 280px;
-    overflow-y: auto;
+    /* The results table below sets its own min-width, so on a narrow screen the
+       wrapper is always the thing that scrolls - never the page. */
+    overflow: auto;
   }
 
   .app-footer {
@@ -749,7 +751,20 @@
   }
   .crop-badge.pending { background: var(--color-accent-subdued); color: var(--color-accent); }
   .crop-badge.error { background: #fee2e2; color: #b91c1c; }
-  .data-table tr.row-pending td { color: var(--body-text-color-subdued); font-style: italic; }
+  .data-table tr.row-pending td { color: var(--body-text-color-subdued); }
+
+  /* The results table's geometry comes from its header and its colgroup alone,
+     never from the text of a row. A photo's scores arriving therefore cannot
+     resize a column, and a long species name is scrolled to rather than wrapped
+     onto a second line - which is the one thing that would make a row taller
+     than the pending row it is replacing. Narrow screens scroll the wrapper
+     sideways (see the max-width: 640px rule below) instead of squeezing the
+     columns until the labels wrap. */
+  #results-table { table-layout: fixed; min-width: 660px; }
+  #results-table th, #results-table td {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #results-table td:nth-child(2), #results-table td:nth-child(4) { cursor: help; }
 
   /* A photo still being analyzed: greyed tile, resolving to full contrast as
      soon as its own decode and inference land. */
@@ -815,7 +830,6 @@
         <div class="combined-axis"><span>−20</span><span>−10</span><span>0 (best)</span></div>
       </div>
       <div id="combined-scores" class="combined-scores"></div>
-      <p id="pool-note" class="pending-notice" style="display:none;"></p>
       <details class="combined-options" id="combined-options">
         <summary>Aggregation options</summary>
         <div class="options-body">
@@ -905,6 +919,14 @@
     </div>
     <div class="table-wrap">
       <table class="data-table" id="results-table">
+        <!-- Fixed column widths, so a row's contents cannot change them. -->
+        <colgroup>
+          <col style="width: 27%">
+          <col style="width: 22%">
+          <col style="width: 14%">
+          <col style="width: 24%">
+          <col style="width: 13%">
+        </colgroup>
         <thead>
           <tr>
             <th>File</th>
