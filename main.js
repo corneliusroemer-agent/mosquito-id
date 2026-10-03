@@ -1041,6 +1041,10 @@ function zoomedSurfaceMapping() {
   return coverMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas);
 }
 
+function fullSurfaceMapping(p) {
+  return coverMapping(document.getElementById("crop-surface-full"), p?.fullCanvas);
+}
+
 // Aspect ratio (w/h) of the zoomed panel's container, i.e. the box the context
 // canvas is displayed in. The container lives inside #gallery-section, which is
 // display:none until the first photo has been classified, so on the very first
@@ -1895,10 +1899,17 @@ function setupCropSurfaces() {
 async function applyCropFromFullSurface(idx, rect, t0) {
   const p = previews[idx];
   const fullCv = p.fullCanvas;
-  const x1 = Math.max(0, Math.min(fullCv.width, Math.round(rect[0] * fullCv.width)));
-  const y1 = Math.max(0, Math.min(fullCv.height, Math.round(rect[1] * fullCv.height)));
-  const x2 = Math.max(0, Math.min(fullCv.width, Math.round(rect[2] * fullCv.width)));
-  const y2 = Math.max(0, Math.min(fullCv.height, Math.round(rect[3] * fullCv.height)));
+  // Surface fractions -> image fractions, through the object-fit:cover window.
+  // Without this the crop is stored where the panel's own rectangle was, not
+  // where the drag was: on a photo whose aspect differs from the panel's, the
+  // two disagree most at the edges, so a drag on the left came back as a crop
+  // in the middle, and the box drawn over the drag was drawn off the panel.
+  const { k, off } = fullSurfaceMapping(p);
+  const r = rect.map((f) => k * f + off);
+  const x1 = Math.max(0, Math.min(fullCv.width, Math.round(r[0] * fullCv.width)));
+  const y1 = Math.max(0, Math.min(fullCv.height, Math.round(r[1] * fullCv.height)));
+  const x2 = Math.max(0, Math.min(fullCv.width, Math.round(r[2] * fullCv.width)));
+  const y2 = Math.max(0, Math.min(fullCv.height, Math.round(r[3] * fullCv.height)));
 
   if (x2 - x1 < 10 || y2 - y1 < 10) return;
 
