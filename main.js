@@ -25,6 +25,11 @@ const MODEL_BASE_URL =
   "https://pub-2bbf73b4e93d40c9af925724fbd48d51.r2.dev/";
 const FP16_AVAILABLE = true;
 
+// Base URL of an optional server-inference backend (the FastAPI app in
+// 09-unified/app.py, e.g. behind a Cloudflare Tunnel). Empty means no backend,
+// which is the normal case for the static deployment.
+const SERVER_API_BASE = "";
+
 const COMPLEX_OF = {
   "Aedes albopictus": "Aedes albopictus",
   "Aedes aegypti": "Aedes aegypti",
@@ -422,17 +427,25 @@ async function initEngine() {
   const optServer = document.getElementById("opt-server");
   const footerDevice = document.getElementById("footer-device");
 
-  // Probe server /api/health
-  try {
-    const res = await fetch("api/health", { signal: AbortSignal.timeout(2000) });
-    if (res.ok) {
-      const data = await res.json();
-      serverAvailable = true;
-      serverEngineLabel = data.engine_label || "Cloud GPU";
-      if (optServer) optServer.textContent = `⚡ ${serverEngineLabel} · Instant`;
+  // Probe the server backend, but only when one is actually configured. The site
+  // is static, so there is no /api/health to reach and probing anyway just logs a
+  // failed request on every load. Set this to the backend's origin (for example a
+  // Cloudflare Tunnel URL) to enable server inference; leave it empty and the app
+  // goes straight to on-device inference with no wasted request.
+  if (SERVER_API_BASE) {
+    try {
+      const res = await fetch(`${SERVER_API_BASE}/api/health`, {
+        signal: AbortSignal.timeout(2000)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        serverAvailable = true;
+        serverEngineLabel = data.engine_label || "Cloud GPU";
+        if (optServer) optServer.textContent = `⚡ ${serverEngineLabel} · Instant`;
+      }
+    } catch (err) {
+      serverAvailable = false;
     }
-  } catch (err) {
-    serverAvailable = false;
   }
 
   // Preference: URL query param > localStorage > default. fp16 is skipped while
