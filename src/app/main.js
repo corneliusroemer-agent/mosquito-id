@@ -1102,14 +1102,52 @@ function deletePhoto(idx) {
 
 // ---- UI Rendering & Navigation ----
 
-// A photo can only be pooled if its checkbox is enabled, so the bulk actions use
-// the same rule rather than a second one that could drift from it.
-function isSelectable(p) {
+// Whether a photo may enter the pooled result. This is the FUSION question and
+// only this one: pooling sums a photo's evidence into a claim about a mosquito, so
+// a photo that is not evidence about a mosquito must not contribute to it.
+function contributesToPool(p) {
   if (!p || p.fallback || p.pending || p.error) return false;
   // A photo the gate called not-a-mosquito is finished and valid, but it has
-  // nothing to contribute to a pooled mosquito result, so it is not selectable.
+  // nothing to contribute to a pooled mosquito result.
   return p.verdict?.state !== "non-mosquito";
 }
+
+// Whether the user may LOOK at this photo.
+//
+// This was `isSelectable` doing both jobs at once, and the conflation shipped as
+// two bugs from one cause. A photo the detector found no mosquito in has
+// `fallback` set, so `isSelectable` was false, so `renderThumbnails` disabled its
+// checkbox - a disabled checkbox silently ignores clicks, indistinguishable from
+// a broken one - and nothing on the tile said why. Separately, selecting such a
+// photo left the zoomed panel with no crop to draw, so the panel could not
+// distinguish it from the photo already on screen.
+//
+// "Cannot contribute to a pooled mosquito result" and "cannot be viewed" are
+// different decisions. Only the second one is about the photo's pixels being
+// unavailable, and a photo with a decoded frame has pixels whatever the detector
+// found in them.
+function canView(p) {
+  // A failed photo is still worth looking at - the photo is fine, the classifier
+  // is what failed, and the full frame is on screen beside the failure message.
+  return !!p;
+}
+
+// Why a photo cannot be pooled, in a sentence about the photo. Returned rather
+// than rendered inline because it is written to three different places (the
+// checkbox tooltip, the label, and the pooled card), and a reason that exists in
+// three places is a reason that will eventually differ in two of them.
+function poolExclusionReason(p) {
+  if (!p) return "";
+  if (p.error) return "Excluded from the combined result - analysis failed for this photo.";
+  if (p.pending) return "Excluded from the combined result - still classifying.";
+  if (p.fallback) return "Excluded from the combined result - no mosquito was detected in this photo.";
+  if (p.verdict?.state === "non-mosquito") return "Excluded from the combined result - this does not look like a mosquito.";
+  return "";
+}
+
+// A photo can only be pooled if its checkbox is enabled, so the bulk actions use
+// the same rule rather than a second one that could drift from it.
+const isSelectable = contributesToPool;
 
 // Tiles are keyed by the photo slot they were built for, so a re-render updates
 // them in place instead of rebuilding the strip.
@@ -1222,21 +1260,38 @@ function renderThumbnails() {
     const badgeState = p.error ? "error" : p.pending ? "pending" : p.is_cropped ? "cropped" : "uncropped";
     node.badge.className = `crop-badge ${badgeState}`;
     node.badge.textContent = p.error ? "!" : p.pending ? "…" : p.is_cropped ? "✓" : "✕";
+    // A badge that cannot be acted on has to say so on the badge. "✕" alone said
+    // only that no mosquito was detected, which reads as a crop failure rather
+    // than as "this control is off, and here is why" - the whole of which was the
+    // report that started this: a tile that looks inert and does not explain.
     node.badge.title = p.error
       ? p.error
       : p.pending
-        ? ""
-        : p.is_cropped ? "Mosquito detected & cropped" : "Uncropped / no mosquito detected";
+        ? "Still classifying - not yet part of the combined result"
+        : p.is_cropped
+          ? poolExclusionReason(p) || "Mosquito detected & cropped"
+          : poolExclusionReason(p) || "No mosquito detected in this photo";
 
     // The one place a photo's own verdict is visible without selecting it, so an
     // excluded photo is never only knowable from the contribution table.
     const abstained = p.verdict?.state === "unsure";
     node.label.title = abstained
       ? "Not confident enough to name a genus - excluded from the pooled result"
-      : !p.fallback ? "Include this photo in pooled result" : "No usable mosquito detection";
+      : poolExclusionReason(p) || "Include this photo in pooled result";
 
     node.chk.checked = includedIndices.has(idx);
-    node.chk.disabled = !isSelectable(p);
+    node.chk.disabled = !contributesToPool(p);
+    // The CSS gives every opt-in box `cursor: pointer`, so a disabled one still
+    // invites a click it cannot accept. Set here rather than in the stylesheet
+    // because the state is per-photo and set per render; the cost is one style
+    // write on an element that is already being written to.
+    node.chk.style.cursor = contributesToPool(p) ? "pointer" : "not-allowed";
+    // The tooltip on the control itself, not only on the label wrapping it: a
+    // pointer over the checkbox is where someone who has just found it dead looks
+    // for the explanation.
+    node.chk.title = contributesToPool(p)
+      ? "Include this photo in the combined result"
+      : poolExclusionReason(p) || "Not part of the combined result";
 
     // One appendChild on an already-present child moves it to the end, which is
     // how the strip is put into index order after a deletion.

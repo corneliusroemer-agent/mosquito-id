@@ -12,9 +12,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test",
+    "test:e2e": "playwright test --project=tier1 --grep-invert \"strip index stability\"",
     "test:all": "npm run typecheck && npm run test && npm run build && npm run test:e2e",
-    "test:render": "node tests/render-cost-probe.mjs"
+    "test:render": "node tests/render-cost-probe.mjs",
+    "test:e2e:all": "playwright test --project=tier1",
+    "test:e2e:model": "MOSQ_E2E_TIER2=1 playwright test --project=tier2"
   },
   "type": "module",
   "devDependencies": {
