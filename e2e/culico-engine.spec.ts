@@ -142,7 +142,7 @@ test("only culico's ONNX is fetched, not culico and H/14 together", async ({ pag
   await expect(page.locator("#pipeline-sub")).toContainText("culico-net-cls-v1");
   await expect(page.locator("#footer-device")).toContainText("culico-net-cls-v1");
   await expect(page.locator("#engine-caveat")).toBeVisible();
-  await expect(page.locator("#engine-caveat")).toContainText("no non-mosquito channel");
+  await expect(page.locator("#engine-caveat")).toContainText("no mosquito in it");
 });
 
 test("switching engines fetches the second classifier, and only that one", async ({ page }) => {
@@ -170,6 +170,9 @@ test("switching engines fetches the second classifier, and only that one", async
 
   await modelsReady(page);
   await expect(page.locator("#pipeline-sub")).toContainText("BioCLIP 2.5 H/14");
-  // H/14 has no caveat, so the notice is withdrawn rather than left stale.
-  await expect(page.locator("#engine-caveat")).toBeHidden();
+  // H/14 has no caveat, so the notice is CLEARED rather than left stale. The line
+  // itself keeps its box on purpose -- showing and hiding it moved everything
+  // below it, which is a layout shift -- so the assertion is on the text being
+  // empty, not on the element being hidden.
+  await expect(page.locator("#engine-caveat")).toHaveText("");
 });
