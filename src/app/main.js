@@ -21,7 +21,9 @@ import { genusScores as _genusScores } from "../confidence/genusScores";
 import { fuseViews as _fuseViews } from "../confidence/fuseViews";
 import { genusOf, speciesGenusIndex } from "../confidence/genus";
 import { verdictFrom as _verdictFrom, verdictSentence } from "../confidence/verdict";
-import { pooledPosterior as _pooledPosterior } from "../confidence/pooling";
+import { pooledPosterior as _pooledPosterior,
+         splitPoolable, poolingWeights, aggregateLogits, pooledCandidates,
+         pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
 import { render as renderSpeciesPage } from "./speciesPage";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
@@ -39,6 +41,7 @@ const genusScores = (spP, spCos) => _genusScores(EMB, spP, spCos);
 const fuseViews = (viewResults) => _fuseViews(EMB, viewResults);
 const verdictFrom = (spP, agreement, adP) => _verdictFrom(EMB, spP, agreement, adP);
 const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
+const pooledVerdictOf = (aggLogits) => _pooledVerdictOf(EMB, aggLogits);
 
 const DET_SIZE = 640;
 const CLIP_SIZE = 224;
@@ -2531,10 +2534,7 @@ function updatePooling() {
   // would fold a midge's logits into a mosquito's posterior. Anything other than a
   // species or genus verdict is therefore excluded, which is what makes the
   // non-mosquito state safe to introduce without a second filter here.
-  const abstained = checked.filter(p => !p.pending && !p.error && p.verdict?.state === "unsure");
-  const included = checked.filter(
-    p => !p.pending && !p.error &&
-         (p.verdict?.state === "species" || p.verdict?.state === "genus"));
+  const { included, abstained } = splitPoolable(checked);
   if (included.length <= 1) {
     // The card is permanent, so the empty case is drawn rather than hidden:
     // hiding it resized the whole row above the gallery, and zooming re-pools,
@@ -2548,58 +2548,12 @@ function updatePooling() {
   const selectedMethod = document.querySelector('input[name="pooling-method"]:checked')?.value || "Dependent evidence";
   const r = parseFloat(document.getElementById("corr-slider").value) || 0.5;
 
-  const N = included.length;
-  const weights = [];
-  const leads = included.map(p => {
-    const sorted = Object.values(p.scores).sort((a, b) => b - a);
-    return (sorted[0] || 0) - (sorted[1] || 0);
-  });
+  const weights = poolingWeights(included, selectedMethod, r);
 
-  if (selectedMethod === "Equal weight") {
-    for (let i = 0; i < N; i++) weights.push(1 / N);
-  } else if (selectedMethod === "Weight by lead") {
-    const sumLead = leads.reduce((a, b) => a + b, 0) || 1e-6;
-    for (let i = 0; i < N; i++) weights.push(leads[i] / sumLead);
-  } else if (selectedMethod === "Accumulate evidence") {
-    for (let i = 0; i < N; i++) weights.push(1);
-  } else {
-    // Dependent evidence: de-duplicate identical crops
-    const seen = new Set();
-    const effectiveWeights = [];
-    included.forEach(p => {
-      if (seen.has(p.fingerprint)) {
-        effectiveWeights.push(0);
-      } else {
-        seen.add(p.fingerprint);
-        effectiveWeights.push(1);
-      }
-    });
-    const denom = 1 + (seen.size - 1) * r;
-    for (let i = 0; i < N; i++) {
-      weights.push(effectiveWeights[i] / denom);
-    }
-  }
-
-  // Aggregate Logits
-  const aggLogits = {};
-  EMB.species.forEach(sp => { aggLogits[sp] = 0; });
-
-  included.forEach((p, idx) => {
-    const w = weights[idx];
-    if (w > 0 && p.logits) {
-      EMB.species.forEach(sp => {
-        aggLogits[sp] += (p.logits[sp] || 0) * w;
-      });
-    }
-  });
+  const aggLogits = aggregateLogits(EMB, included, weights);
 
   // Relative Log Scores (Axis: -20 to 0)
-  const maxLogit = Math.max(...Object.values(aggLogits));
-  const candidates = EMB.species.map(sp => ({
-    name: sp,
-    genus: genusOf(sp),
-    relScore: aggLogits[sp] - maxLogit
-  })).sort((a, b) => b.relScore - a.relScore);
+  const candidates = pooledCandidates(EMB, aggLogits);
 
   // The pooled genus headline. Derived from the POOLED posterior - the softmax of
   // the aggregated logits - and gated by the same verdictFrom/verdictSentence the
@@ -2615,8 +2569,7 @@ function updatePooling() {
   // A per-photo `unsure` photo is already excluded from `included` above, so it
   // is absent from this aggregate as well - the pooled headline cannot name a
   // genus the pool itself refused to name.
-  const pooledSpP = pooledPosterior(aggLogits);
-  const pooledVerdict = pooledSpP && verdictFrom(pooledSpP);
+  const pooledVerdict = pooledVerdictOf(aggLogits);
   const pooledLine = pooledVerdict ? verdictSentence(pooledVerdict) : "";
 
   poolScores.innerHTML = "";
