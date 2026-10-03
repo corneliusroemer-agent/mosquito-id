@@ -12,15 +12,18 @@ const CROP_PAD = 0.10;
 const COMPLEX_MARGIN = 0.02;
 const CACHE_NAME = "mosquito-models-v1";
 
-// Models live on HuggingFace. GitHub Releases are not an option: they serve no
-// Access-Control-Allow-Origin, so a browser cannot fetch them cross-origin.
-// Cloudflare R2 is the intended final host (CORS-configurable, free egress);
-// this HF Space is the interim one. It holds 3 of the 4 models - a free HF
-// account caps at 1 GB per repository and bioclip_2_5_fp16.onnx is 1207 MB,
-// so that one only loads once R2 is live.
+// Models live on Cloudflare R2, reached through the bucket's public development
+// URL. Objects sit at the root of that host - the dev URL serves the one bucket
+// directly, with no bucket-name path segment.
+//
+// Two hosts were ruled out first. GitHub Releases serve no
+// Access-Control-Allow-Origin on either redirect hop, so a browser cannot fetch
+// them cross-origin at all. HuggingFace works, but a free account caps at 1 GB
+// per repository and bioclip_2_5_fp16.onnx is 1207 MB, so it cannot hold the
+// full set however the models are split across repos.
 const MODEL_BASE_URL =
-  "https://huggingface.co/spaces/corneliusroemer-agent/mosquito-id/resolve/main/models/";
-const FP16_AVAILABLE = false;
+  "https://pub-2bbf73b4e93d40c9af925724fbd48d51.r2.dev/";
+const FP16_AVAILABLE = true;
 
 const COMPLEX_OF = {
   "Aedes albopictus": "Aedes albopictus",
@@ -434,10 +437,10 @@ async function initEngine() {
 
   // Preference: URL query param > localStorage > default. fp16 is skipped while
   // it is unavailable, so a stale saved choice falls through instead of 404ing.
-  // INT8 is deliberately not the default: onnxruntime-web has no int8 WebGPU kernels, so it
-  // silently falls back to WASM CPU and runs an order of magnitude slower. B/16 is
-  // fp16 and stays on the GPU.
-  const defaultEngine = "webgpu-b16";
+  // fp16 is the default: it stays on the GPU and is the most accurate. INT8 is
+  // never the default - onnxruntime-web has no int8 WebGPU kernels, so the session
+  // silently falls back to WASM CPU and runs an order of magnitude slower.
+  const defaultEngine = "webgpu-fp16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
   const savedEngine = localStorage.getItem("mosquito_engine");

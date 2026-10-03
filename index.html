@@ -33,6 +33,13 @@
   * { box-sizing: border-box; }
   body {
     margin: 0;
+    /* Column flex + margin-top:auto on the footer pins it to the bottom of the
+       viewport when the content is short, instead of leaving it stranded
+       mid-page. dvh rather than vh so mobile browser chrome does not push it
+       off screen. */
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
     /* Keep clear of the notch and the home indicator on notched phones; the 0 fallback
        is what non-notch devices get, since env() is 0 there anyway. */
     padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
@@ -112,7 +119,6 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
-    align-items: start;
     margin-bottom: 16px;
   }
   @media (max-width: 768px) {
@@ -504,6 +510,7 @@
   }
 
   .app-footer {
+    margin-top: auto;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -648,8 +655,8 @@
         <label for="engine-select" style="font-size:12px;font-weight:600;color:var(--body-text-color-subdued);">ENGINE:</label>
         <select id="engine-select" class="btn" style="padding:6px 12px;font-size:13px;font-weight:500;border-radius:var(--radius-sm);cursor:pointer;background:var(--background-fill-secondary);">
           <option value="webgpu-b16">⚡ WebGPU: BioCLIP B/16 (Ultra-fast · 172 MB)</option>
-          <option value="webgpu-fp16" disabled>💻 WebGPU: BioCLIP 2.5 FP16 (1.25 GB) — temporarily unavailable</option>
-          <option value="webgpu-int8" selected>💻 WebGPU: BioCLIP 2.5 INT8 (Fast · 609 MB) · Recommended</option>
+          <option value="webgpu-fp16" selected>💻 WebGPU: BioCLIP 2.5 FP16 (1.25 GB) · Recommended</option>
+          <option value="webgpu-int8">🐢 WebGPU: BioCLIP 2.5 INT8 (609 MB) — runs on CPU, slow</option>
           <option value="server-gpu" id="opt-server" disabled>⚡ Server Inference — unavailable in the web version</option>
         </select>
       </div>
