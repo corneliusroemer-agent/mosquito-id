@@ -50,6 +50,41 @@ const CACHE_NAME = "mosquito-models-v1";
 const SPECIES_CONFIDENCE_FLOOR = 0.373;
 const GENUS_CONFIDENCE_FLOOR = 0.80;
 
+// Whether two views of one photo naming different species costs that photo its
+// species claim.
+//
+// Both floors read one number - the FUSED posterior - and that is the right
+// single view of a photo, but it is an average of two opinions. When the two
+// disagree the average is of two contradictory things, and an average of a wrong
+// answer and a different wrong answer is still wrong while carrying a
+// plausible-looking number: the gate passes it and a species is named. Measured
+// on the only labelled two-view cache there is (180 rows, the 07-benchmark's
+// detector crop and whole frame, same H/14 head), split 60/20/20 by class group
+// exactly as the floors above were (investigations/2026-10-03-mosquito-id/
+// 35-view-disagreement.md):
+//
+//   views agree     genus correct 93.8% val / 95.2% test
+//   views disagree  genus correct 63.6% val / 65.2% test
+//
+// and the species claims made on disagreeing rows are right 18.2% of the time on
+// val, 33.3% on test - so the floor above is answering exactly the photos it was
+// fitted to decline.
+//
+// The constant is BOOLEAN because that is what the data identifies. The obvious
+// graded form - abstain only when a disagreement is also narrow in the fused
+// margin - was fitted the same way and is not identified: accuracy on
+// disagreeing rows is flat in marginPts across 1..30 points on val (62% to 64%),
+// so the val optimum for "demote every disagreeing species claim" sits at the
+// boundary of the grid rather than in it, which is a boundary-limited fit, not a
+// result. Grading it would be inventing a number the corpus does not contain.
+//
+// So the rule is the whole of what was measured: a disagreement costs the
+// species claim, and the genus floor then decides the rest on its own. That is
+// not free abstention - coverage is unchanged, because a demoted photo still
+// clears GENUS_CONFIDENCE_FLOOR on the rows that earned it - and it is not
+// uniform hesitation, because photos whose views agree answer exactly as before.
+const VIEW_DISAGREEMENT_VETOES_SPECIES = true;
+
 // Models live on Cloudflare R2, reached through the bucket's public development
 // URL. Objects sit at the root of that host - the dev URL serves the one bucket
 // directly, with no bucket-name path segment.
@@ -1014,8 +1049,15 @@ const c = genusScores(spP, spCos);
   // The gate reads the FUSED posterior, which is the whole point of fusing
   // before deciding: one view alone is an opinion, the pool of the two is the
   // photo's score.
+  //
+  // ...and the agreement of the very views that were pooled, which the fused
+  // posterior cannot express: an average of two contradictory opinions is still
+  // an average. Computed once here, from the views in hand, and handed to both
+  // the verdict and the caller - a second caller recomputing it would be a
+  // second disagreement measure, free to drift from the one the gate read.
+  const agreement = viewAgreement(viewResults.map((v) => v.spP), spP);
   return { labels: c.labels, detail, logits, demoted: c.demoted, spP, nuP, spCos, nViews: V,
-           verdict: verdictFrom(spP) };
+           agreement, verdict: verdictFrom(spP, agreement) };
 }
 
 // ---- Genus, and the three-state verdict ----
@@ -1056,6 +1098,14 @@ function speciesGenusIndex() {
 // turns two undecided views into a decided one, and it would make the two views
 // disagree about the same photo's verdict.
 //
+// `agreement` is viewAgreement()'s object for those same views, or null where
+// there are no two views to disagree (a pool of photos is one claim, not a
+// photo). It carries no posterior of its own: it only says whether the two views
+// that produced `spP` named the same species. See
+// VIEW_DISAGREEMENT_VETOES_SPECIES for what that is worth - without it the gate
+// reads a fused posterior alone, which cannot see that the average it is reading
+// is an average of a contradiction.
+//
 // The genus posterior is its species' posteriors summed, so it is larger than any
 // single species posterior by construction: that is why it clears a higher floor
 // rather than the same one.
@@ -1063,7 +1113,7 @@ function speciesGenusIndex() {
 // Returns null-ish fields rather than throwing on an empty posterior, so a
 // malformed score array degrades to "not confident" instead of taking the page
 // down.
-function verdictFrom(spP) {
+function verdictFrom(spP, agreement) {
   if (!spP || !spP.length) {
     return { state: "unsure", genus: null, species: null, topGenusP: 0, topSpeciesP: 0, runnersUp: [] };
   }
@@ -1088,7 +1138,12 @@ function verdictFrom(spP) {
     .sort((a, b) => (spP[b] || 0) - (spP[a] || 0))
     .map((i) => ({ name: EMB.species[i], p: spP[i] || 0 }));
 
-  if (topSpeciesP >= SPECIES_CONFIDENCE_FLOOR) {
+  // A species claim needs the photo's views to have agreed as well as the fused
+  // posterior to be high. The veto demotes into the genus branch below rather
+  // than past it, so whether the photo gets a genus or nothing is still the genus
+  // floor's call and not this one's.
+  const vetoed = Boolean(agreement && !agreement.agree && VIEW_DISAGREEMENT_VETOES_SPECIES);
+  if (!vetoed && topSpeciesP >= SPECIES_CONFIDENCE_FLOOR) {
     return { state: "species", genus: topGenus, species: speciesName, topGenusP, topSpeciesP, runnersUp };
   }
   if (topGenusP >= GENUS_CONFIDENCE_FLOOR) {
@@ -1522,7 +1577,7 @@ async function classifyImage(imgBitmap, filename) {
     logits: fused.logits,
     demoted: fused.demoted,
     verdict: fused.verdict,
-    agreement: viewAgreement(views.map((v) => v.spP), fused.spP),
+    agreement: fused.agreement,
     viewsLanded: views.length,
     viewsTotal: views.length,
     pending: false
@@ -1694,7 +1749,7 @@ async function processFiles(fileList) {
           is_cropped: data.is_cropped,
           demoted: fused.demoted,
           verdict: fused.verdict,
-          agreement: viewAgreement(views.map((v) => v.spP), fused.spP),
+          agreement: fused.agreement,
           viewsLanded: views.length, viewsTotal: views.length,
           fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
           manual_full_photo: !data.is_cropped,
@@ -2395,7 +2450,7 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
 function applyViews(p, landed, total) {
   const fused = fuseViews(landed);
   commitScores(p, fused);
-  p.agreement = viewAgreement(landed.map((v) => v.spP), fused.spP);
+  p.agreement = fused.agreement;
   p.viewsLanded = landed.length;
   p.viewsTotal = total;
   p.pending = landed.length < total;
