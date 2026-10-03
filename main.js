@@ -1507,20 +1507,23 @@ function renderActivePhoto() {
   // verdict for what is on screen.
   scoreList.classList.toggle("stale", unsettled);
   if (scoreNotice) {
+    // The notice keeps its box and only changes visibility: it sits above the
+    // score list, so showing or hiding it used to push every score already on
+    // screen up or down. The reserved height is in CSS and is sized for two
+    // lines, so the text length never changes the box either.
+    let noticeClass = "";
+    let noticeText = "";
     if (p.error) {
-      scoreNotice.textContent = p.error;
-      scoreNotice.className = "pending-notice error";
-      scoreNotice.style.display = "block";
+      noticeClass = " error";
+      noticeText = p.error;
     } else if (p.pending) {
-      scoreNotice.textContent = p.cropBox === null && !p.fullCanvas
-        ? "Reading photo…"
-        : "Classifying…";
-      scoreNotice.className = "pending-notice";
-      scoreNotice.style.display = "block";
-    } else {
-      scoreNotice.style.display = "none";
-      scoreNotice.textContent = "";
+      noticeText = p.cropBox === null && !p.fullCanvas ? "Reading photo…" : "Classifying…";
     }
+    scoreNotice.textContent = noticeText;
+    scoreNotice.className = `pending-notice${noticeClass}${noticeText ? " shown" : ""}`;
+    // A failed classification is worth reading in full, so it goes in the
+    // tooltip rather than being cut off at the panel's edge.
+    scoreNotice.title = noticeText;
   }
   const sortedScores = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
   for (const [name, score] of sortedScores) {

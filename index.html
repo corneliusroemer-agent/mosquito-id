@@ -727,6 +727,21 @@
     background: var(--background-fill-tertiary);
     border: 1px solid var(--border-color-primary);
   }
+  /* The score notice sits directly above the score list, so showing or hiding
+     it moved every score already on screen. Its height is reserved whether or
+     not there is anything to say, and the reservation is two lines - the
+     longest a status or error runs to before it ellipsizes - so a one-line
+     message and a two-line one occupy the same box. main.js toggles
+     visibility rather than display; the box is always there. */
+  #score-pending {
+    visibility: hidden;
+    min-height: 50px;
+    max-height: 50px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  #score-pending.shown { visibility: visible; }
   .pending-notice.error {
     color: #b91c1c;
     background: #fef2f2;
@@ -872,7 +887,7 @@
       <div class="scores-panel">
         <div class="scores-header">Species scores</div>
         <p id="score-uncertain" class="uncertain" style="display:none;"></p>
-        <p id="score-pending" class="pending-notice" style="display:none;"></p>
+        <p id="score-pending" class="pending-notice"></p>
         <div id="score-list" class="score-list"></div>
       </div>
     </div>
