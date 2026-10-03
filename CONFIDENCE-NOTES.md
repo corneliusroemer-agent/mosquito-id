@@ -117,6 +117,7 @@ indistinguishable and the compiler accepted both. The one caller with genuinely
 no adjacent evidence, `pooledVerdict`, now passes `[]` on its own line with the
 gap documented: the omission can no longer happen by forgetting an argument, only
 by writing that line.
+
 ## Also found, lower severity
 
 **`updatePooling`'s comment described a formula the code did not implement.** It
