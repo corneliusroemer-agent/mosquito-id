@@ -479,23 +479,18 @@ async function initEngine() {
 const loadModels = () => initEngine();
 
 /**
- * State what the selected model can and cannot do, in the header, and keep the
- * pipeline line naming the classifier that is actually running.
+ * Name the classifier that is actually running, under the title.
  *
- * The caveat text is not decoration. culico's head is a linear probe whose
- * non-mosquito gate is measurably weaker than H/14's text head, so on a photo
- * of a wall it will sometimes name a species. That is only acceptable while the
- * page says so rather than leaving a user to find out by being wrong in public.
- *
- * The caveat line keeps its box whether or not the model has a caveat: showing
- * and hiding it moved everything below it, which is a layout shift (CLS 0.27 on
- * desktop when it was toggled). A model with nothing to declare renders as an
- * empty reserved line.
+ * It used to also render a per-model caveat line here. That is gone: it was a
+ * block above the content whose visibility moved with the model, which cost 0.27
+ * of Cumulative Layout Shift on desktop before the line was given a reserved box,
+ * and a permanent header paragraph about one engine's limitations is not worth a
+ * reserved box. The engine is labelled "experimental" in the dropdown instead,
+ * which is where someone chooses it and therefore the only place the label has to
+ * be seen.
  */
 function applyEngineNotices(engineKey) {
   const cfg = WEBGPU_MODELS[engineKey];
-  const caveat = document.getElementById("engine-caveat");
-  if (caveat) caveat.textContent = cfg?.caveat || "";
   const sub = document.getElementById("pipeline-sub");
   if (sub) {
     sub.textContent =

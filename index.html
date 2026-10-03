@@ -986,21 +986,15 @@
         <h1 style="margin:0 0 4px;">mosquito-id</h1>
         <p class="sub" style="margin:0;" id="pipeline-sub">Cascade: YOLO11n crop &rarr; BioCLIP 2.5 H/14 analysis</p>
       </div>
-      <div class="engine-control-box" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div class="engine-control-box" style="display:flex;align-items:center;gap:8px;">
         <label for="engine-select" style="font-size:12px;font-weight:600;color:var(--body-text-color-subdued);">ENGINE:</label>
         <select id="engine-select" class="btn" style="padding:6px 12px;font-size:13px;font-weight:500;border-radius:var(--radius-sm);cursor:pointer;background:var(--background-fill-secondary);">
-          <option value="webgpu-culico" selected>⚡ culico-net (experimental · 81 MB) — cannot reject non-mosquito</option>
+          <option value="webgpu-culico" selected>⚡ culico-net-cls-v1 (experimental · 81 MB)</option>
           <option value="webgpu-b16">⚡ WebGPU: BioCLIP B/16 (Ultra-fast · 172 MB)</option>
           <option value="webgpu-fp16">💻 WebGPU: BioCLIP 2.5 FP16 (1.25 GB) · Most accurate</option>
           <option value="webgpu-int8">🐢 WebGPU: BioCLIP 2.5 INT8 (609 MB) — runs on CPU, slow</option>
           <option value="server-gpu" id="opt-server" disabled>⚡ Server Inference — unavailable in the web version</option>
         </select>
-        <!-- Occupies its line from first paint, at the same height whether or not
-             it has text, because toggling `display` here shifted everything below
-             it the moment initEngine chose an engine (CLS 0.27 on desktop). The
-             text is written by applyEngineNotices; the placeholder is the default
-             engine's own caveat, so the first paint is already truthful. -->
-        <span id="engine-caveat" style="font-size:11px;color:#b45309;flex:1 1 100%;line-height:1.4;min-height:1.4em;">Experimental. This model cannot tell a photo with no mosquito in it from one with: its head is a linear probe with no non-mosquito channel, so a photograph of a wall will still be named as a species. Only photograph mosquitoes with it.</span>
       </div>
     </div>
     <!-- Present from first paint at a constant height. Idle it is invisible but
