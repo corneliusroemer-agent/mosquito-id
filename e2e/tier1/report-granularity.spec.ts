@@ -41,8 +41,9 @@ test.describe("a head that cannot separate species", () => {
 
     // The photo's own claim, above the ranking.
     const sentence = page.locator("#score-uncertain");
-    await expect(sentence).toContainText("not separable");
-    await expect(sentence).toContainText("Aedes");
+    // The exact wording, not a substring: one format, so a reader who has seen
+    // one of these knows what every other one means.
+    await expect(sentence).toHaveText("Aedes (vexans / geniculatus / cinereus not separable)");
     // The bare binomial is the claim the head cannot support.
     await expect(sentence).not.toContainText("Aedes vexans");
 
@@ -61,7 +62,7 @@ test.describe("a head that cannot separate species", () => {
     for (const binomial of UNSEPARABLE) {
       expect(text.join("\n"), `${binomial} must not be named on its own row`).not.toContain(binomial);
     }
-    expect(text.join("\n")).toContain("not separable");
+    expect(text.join("\n")).toContain("Culex (pipiens / torrentium / quinquefasciatus not separable)");
 
     expect(errors(page)).toEqual([]);
   });
