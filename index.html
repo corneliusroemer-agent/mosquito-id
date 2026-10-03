@@ -201,6 +201,25 @@
   .btn-primary:hover { background: var(--color-accent-hover); }
   .btn-sm { padding: 4px 12px; font-size: 12px; }
 
+/* The bulk actions sit beside the strip rather than above it, so the strip
+     keeps its full width and the row never changes height when the buttons
+     appear. */
+  .strip-toolbar {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    min-width: 0;
+  }
+  .strip-toolbar .thumbnail-strip { flex: 1 1 auto; min-width: 0; }
+  .strip-actions {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  @media (max-width: 640px) {
+    .strip-toolbar { flex-direction: column; align-items: stretch; }
+  }
   /* Combined result panel */
   .combined-card {
     overflow-y: auto;
@@ -916,7 +935,14 @@
       </div>
     </div>
     
-    <div id="thumbnail-strip" class="thumbnail-strip"></div>
+    <div class="strip-toolbar">
+      <div id="thumbnail-strip" class="thumbnail-strip"></div>
+      <div class="strip-actions">
+        <button id="btn-select-all" class="btn btn-sm" type="button">Select all</button>
+        <button id="btn-select-none" class="btn btn-sm" type="button">Select none</button>
+        <button id="btn-delete-all" class="btn btn-sm" type="button">Delete all</button>
+      </div>
+    </div>
     <p class="hint">Select a photo to inspect it. Check photos of the same mosquito to combine their results.</p>
 
     <div class="viewer-grid">
