@@ -244,6 +244,19 @@ const ASYNC = (window.__mosqAsync = {
   get sessClip() { return sessClip; },
   get sessDet() { return sessDet; },
   get selectedIndex() { return selectedIndex; },
+  get EMB() { return EMB; },
+  get includedIndices() { return includedIndices; },
+  set includedIndices(v) { includedIndices = v; },
+  ensureEmbeds,
+  useEmbeds,
+  verdictFrom,
+  verdictSentence,
+  fuseViews,
+  renderActivePhoto,
+  updatePooling,
+  renderResultsTable,
+  downloadCSV,
+  commitScores,
   selectPhoto,
   processFiles,
   deletePhoto
@@ -429,6 +442,29 @@ const WEBGPU_MODELS = {
   }
 };
 
+// The text embeddings are a 2 MB JSON, separate from the 1.26 GB classifier
+// that normally precedes them. Kept as its own function so a caller that only
+// needs the label set - scoring a posterior it already has, or a test - can get
+// it without pulling the model down at all. Once cached per path it is free.
+async function ensureEmbeds(path) {
+  if (embedsCache[path]) return embedsCache[path];
+  const data = await fetch(path).then((r) => r.json());
+  for (const k of ["species_emb", "nuisance_emb"]) {
+    data[k] = Float32Array.from(data[k]);
+  }
+  embedsCache[path] = data;
+  return data;
+}
+
+// ensureEmbeds plus making the result the live EMB. Everything that scores a
+// posterior reads EMB, so a caller holding one - the app itself, or a test that
+// must not download the classifier - goes through here rather than reaching
+// into the cache.
+async function useEmbeds(path) {
+  EMB = await ensureEmbeds(path);
+  return EMB;
+}
+
 async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   const loadCard = document.getElementById("load-card");
   const msg = document.getElementById("load-msg");
@@ -507,18 +543,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   loadedClipEngine = engineKey;
 
   // 3. Load text embeddings for this model
-  const targetEmbedsPath = clipCfg.embedsPath || "text_embeds.json";
-  if (!embedsCache[targetEmbedsPath]) {
-    msg.textContent = `Loading species embeddings (${targetEmbedsPath})…`;
-    fill.style.width = "95%";
-    const r = await fetch(targetEmbedsPath);
-    const data = await r.json();
-    for (const k of ["species_emb", "nuisance_emb"]) {
-      data[k] = Float32Array.from(data[k]);
-    }
-    embedsCache[targetEmbedsPath] = data;
-  }
-  EMB = embedsCache[targetEmbedsPath];
+  await useEmbeds(clipCfg.embedsPath || "text_embeds.json");
 
   fill.style.width = "100%";
   const deviceLabel = `inference: ${clipCfg.name} (${clipEP.toUpperCase()}) · YOLO11n (${detEP.toUpperCase()})`;
