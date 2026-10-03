@@ -39,6 +39,9 @@ import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
 import { updatePooling } from "./poolingPanel";
+import { badge, canView, checkLabel, contributesToPool,
+         removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
+         validateIncluded, viewLabel } from "./thumbnailStrip";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -506,6 +509,39 @@ function applyEngineNotices(engineKey) {
 }
 
 
+/**
+ * Which ONNX output is the embedding.
+ *
+ * By NAME, checked against the head's dimension - never by position. culico is
+ * the first model here with two graph outputs: the released file has `1747`
+ * (its own 18-way probe logits, `[1,18]`) and the re-export adds
+ * `culico_embedding` (`[1,1153]`). `Object.keys()` puts the numeric key first
+ * regardless of graph order, so the positional read returned the 18 probe
+ * logits, every dot product past index 17 was `undefined * number` = NaN, the
+ * whole posterior was NaN, and the non-finite guard in `verdictFrom` returned
+ * `{state: "unsure", topGenusP: 0, topSpeciesP: 0}` on every photograph. H/14
+ * and B/16 have a single output, which is why this was invisible until culico.
+ */
+function pickEmbedding(res) {
+  const want = EMB ? EMB.dim : null;
+  const keys = Object.keys(res);
+  // Preferred: an output whose width matches the head.
+  if (want) {
+    for (const k of keys) {
+      const t = res[k];
+      if (t && t.dims && t.dims.length === 2 && t.dims[1] === want) return t;
+    }
+  }
+  // Otherwise a named embedding output, in case the head has not loaded yet.
+  for (const k of keys) {
+    if (/embedding|embed/i.test(k) && res[k]?.data) return res[k];
+  }
+  throw new Error(
+    `No embedding among the model's outputs (${keys.join(", ")}); ` +
+    `none has width ${want}. The app reads features, not classifier logits.`
+  );
+}
+
 async function clipEmbed(sourceCanvas) {
   const cw = sourceCanvas.width;
   const ch = sourceCanvas.height;
@@ -912,9 +948,7 @@ async function processFiles(fileList) {
   // never moves while its own inference runs, which is what lets a completion
   // write to previews[i] without a lookup.
   const offset = imageFiles.length;
-  const updatedIncluded = new Set();
-  for (const i of includedIndices) updatedIncluded.add(i + offset);
-  includedIndices = updatedIncluded;
+  includedIndices = shiftIncludedForPrepend(includedIndices, offset);
 
   // Placeholders first, so the gallery shows the whole batch immediately: each
   // tile greyed with a pending badge, then resolved as its own inference
@@ -1107,82 +1141,29 @@ function deletePhoto(idx) {
   // Any computation still running for this photo now has nothing to write to.
   deleted.removed = true;
   previews.splice(idx, 1);
-  const updated = new Set();
-  for (const i of includedIndices) {
-    if (i < idx) updated.add(i);
-    else if (i > idx) updated.add(i - 1);
-  }
-  includedIndices = updated;
+  includedIndices = shiftIncluded(includedIndices, idx);
   // Follow the photo, not the index. Deleting anything before the selected photo
   // shifts every later photo down one, so the selection has to move with it -
   // otherwise deleting the leftmost tile silently switched the gallery to a
   // different photo while the highlighted tile stayed where it was. The clamp
   // alone only handled the case where the selection fell off the end.
-  if (idx < selectedIndex) {
-    selectedIndex -= 1;
-  } else if (selectedIndex >= previews.length) {
-    selectedIndex = Math.max(0, previews.length - 1);
-  }
+  selectedIndex = shiftSelected(selectedIndex, idx, previews.length);
+  // The strip is re-rendered either way. It used to be re-rendered only when a
+  // photo survived, which left the deleted tile in the DOM with the gallery
+  // hidden around it: a tile outliving the photo it was built for, held alive by
+  // the cache, with its handlers still bound to an index that no longer existed.
+  renderThumbnails();
+  updatePooling(EMB, previews, includedIndices);
   if (previews.length === 0) {
     document.getElementById("gallery-section").style.display = "none";
     document.getElementById("results-table-section").style.display = "none";
-    updatePooling(EMB, previews, includedIndices);
   } else {
-    renderThumbnails();
     renderActivePhoto();
-    updatePooling(EMB, previews, includedIndices);
     renderResultsTable(previews);
   }
 }
 
 // ---- UI Rendering & Navigation ----
-
-// Whether a photo may enter the pooled result. This is the FUSION question and
-// only this one: pooling sums a photo's evidence into a claim about a mosquito, so
-// a photo that is not evidence about a mosquito must not contribute to it.
-function contributesToPool(p) {
-  if (!p || p.fallback || p.pending || p.error) return false;
-  // A photo the gate called not-a-mosquito is finished and valid, but it has
-  // nothing to contribute to a pooled mosquito result.
-  return p.verdict?.state !== "non-mosquito";
-}
-
-// Whether the user may LOOK at this photo.
-//
-// This was `isSelectable` doing both jobs at once, and the conflation shipped as
-// two bugs from one cause. A photo the detector found no mosquito in has
-// `fallback` set, so `isSelectable` was false, so `renderThumbnails` disabled its
-// checkbox - a disabled checkbox silently ignores clicks, indistinguishable from
-// a broken one - and nothing on the tile said why. Separately, selecting such a
-// photo left the zoomed panel with no crop to draw, so the panel could not
-// distinguish it from the photo already on screen.
-//
-// "Cannot contribute to a pooled mosquito result" and "cannot be viewed" are
-// different decisions. Only the second one is about the photo's pixels being
-// unavailable, and a photo with a decoded frame has pixels whatever the detector
-// found in them.
-function canView(p) {
-  // A failed photo is still worth looking at - the photo is fine, the classifier
-  // is what failed, and the full frame is on screen beside the failure message.
-  return !!p;
-}
-
-// Why a photo cannot be pooled, in a sentence about the photo. Returned rather
-// than rendered inline because it is written to three different places (the
-// checkbox tooltip, the label, and the pooled card), and a reason that exists in
-// three places is a reason that will eventually differ in two of them.
-function poolExclusionReason(p) {
-  if (!p) return "";
-  if (p.error) return "Excluded from the combined result - analysis failed for this photo.";
-  if (p.pending) return "Excluded from the combined result - still classifying.";
-  if (p.fallback) return "Excluded from the combined result - no mosquito was detected in this photo.";
-  if (p.verdict?.state === "non-mosquito") return "Excluded from the combined result - this does not look like a mosquito.";
-  return "";
-}
-
-// A photo can only be pooled if its checkbox is enabled, so the bulk actions use
-// the same rule rather than a second one that could drift from it.
-const isSelectable = contributesToPool;
 
 // Tiles are keyed by the photo slot they were built for, so a re-render updates
 // them in place instead of rebuilding the strip.
@@ -1199,20 +1180,39 @@ const isSelectable = contributesToPool;
 // nothing about it decodes, resizes or moves.
 const tileNodes = new Map();
 
-function buildTile(idx) {
-  const tile = document.createElement("div");
+// A stable DOM id per photo, for the checkbox's label. Minted once and kept for
+// the photo's life, so it does not change when the photo's index does.
+const inputIds = new WeakMap();
+let inputIdSeq = 0;
+function inputIdFor(p) {
+  let id = inputIds.get(p);
+  if (!id) { id = `strip-in-${++inputIdSeq}`; inputIds.set(p, id); }
+  return id;
+}
 
-  const delBtn = document.createElement("button");
-  delBtn.className = "tile-delete-btn";
-  delBtn.innerHTML = "&times;";
-  // Set per-render, because the index a tile was built for stops being its
-  // index as soon as a photo before it is deleted.
-  tile.appendChild(delBtn);
+/**
+ * Build a tile's DOM once, for the photo it will show for as long as it lives.
+ *
+ * No index is captured. Every handler reads `node.idx`, which `renderThumbnails`
+ * writes on each render, so a tile reused after a photo before it was deleted acts
+ * on the photo it now shows.
+ *
+ * Capturing the index at build time is what made three separate defects out of
+ * one: clicking the tile labelled "View photo 2: photo_C.jpg" selected photo_D,
+ * clicking one checkbox toggled a different tile's checkbox, and three ticked
+ * boxes reached the pooled card as fewer photos than were ticked. The delete
+ * button was re-pointed on every render, which is exactly why it was the one that
+ * worked - and why the other two went unnoticed for so long.
+ *
+ * Child order is select, include, delete, so the tab order matches the visual
+ * order and the destructive action is last.
+ */
+function buildTile() {
+  const tile = document.createElement("div");
 
   const btn = document.createElement("button");
   btn.className = "tile-btn";
-  btn.onclick = () => selectPhoto(idx);
-  tile.appendChild(btn);
+  btn.type = "button";
 
   const img = document.createElement("img");
   btn.appendChild(img);
@@ -1221,29 +1221,50 @@ function buildTile(idx) {
   num.className = "number";
   btn.appendChild(num);
 
-  const badge = document.createElement("span");
-  btn.appendChild(badge);
+  const badgeEl = document.createElement("span");
+  btn.appendChild(badgeEl);
 
-  const label = document.createElement("label");
-  label.className = "include";
+  // The checkbox is its own interactive element, pointed at by an explicit
+  // label. It used to sit inside a <label> with no text, which gave it no
+  // accessible name in any state, and put a <button> in the same corner of the
+  // tile for the browser to retarget a click onto.
   const chk = document.createElement("input");
   chk.type = "checkbox";
   chk.className = "thumb-optin";
-  chk.onchange = (e) => {
-    if (e.target.checked) includedIndices.add(idx);
-    else includedIndices.delete(idx);
+
+  const delBtn = document.createElement("button");
+  delBtn.className = "tile-delete-btn";
+  delBtn.type = "button";
+  delBtn.innerHTML = "&times;";
+
+  const node = { tile, delBtn, btn, img, num, badge: badgeEl, chk, idx: -1 };
+
+  btn.onclick = () => selectPhoto(node.idx);
+  chk.onchange = () => {
+    if (chk.checked) includedIndices.add(node.idx);
+    else includedIndices.delete(node.idx);
     renderThumbnails();
     updatePooling(EMB, previews, includedIndices);
   };
-  label.appendChild(chk);
-  tile.appendChild(label);
+  delBtn.onclick = (e) => {
+    e.stopPropagation();
+    deletePhoto(node.idx);
+  };
 
-  return { tile, delBtn, btn, img, num, badge, label, chk };
+  tile.append(btn, chk, delBtn);
+  return node;
 }
 
 function renderThumbnails() {
   const strip = document.getElementById("thumbnail-strip");
   updateStripActions();
+
+  // The strip is the only writer of `includedIndices`, so this is where an index
+  // is made valid. `updatePooling` drops an index it cannot resolve, silently,
+  // and that silence is how three ticked boxes reached a pooled card counting one
+  // of them.
+  includedIndices = validateIncluded(includedIndices, previews.length);
+
   document.getElementById("gallery-counter").textContent = `${selectedIndex + 1} / ${previews.length}`;
 
   // Drop the entries for photos that are gone, so a tile whose photo was deleted
@@ -1259,9 +1280,10 @@ function renderThumbnails() {
   previews.forEach((p, idx) => {
     let node = tileNodes.get(p);
     if (!node) {
-      node = buildTile(idx);
+      node = buildTile();
       tileNodes.set(p, node);
     }
+    node.idx = idx;
 
     // A photo still being analyzed is visibly unsettled: greyed tile, pending
     // badge, and it cannot be opted into the pooled result yet.
@@ -1269,12 +1291,19 @@ function renderThumbnails() {
       (!includedIndices.has(idx) ? " excluded" : "") + (p.pending ? " pending" : "");
 
     node.delBtn.title = `Remove ${p.name}`;
-    node.delBtn.onclick = (e) => {
-      e.stopPropagation();
-      deletePhoto(idx);
-    };
+    node.delBtn.setAttribute("aria-label", removeLabel(p, idx + 1));
 
-    node.btn.setAttribute("aria-label", `View photo ${idx + 1}: ${p.name}`);
+    node.btn.setAttribute("aria-label", viewLabel(p, idx + 1));
+    // The selection is announced, not only drawn: a border is not a state a
+    // screen reader can report.
+    node.btn.setAttribute("aria-current", selectedIndex === idx ? "true" : "false");
+
+    node.chk.id = inputIdFor(p);
+
+    // The select button is never disabled in any state, and this is where that is
+    // true rather than merely intended: a photo whose classifier failed or has
+    // not run yet is exactly the one whose state the user needs to see.
+    node.btn.disabled = !canView(p);
 
     // A queued photo has no canvas yet: it gets a greyed placeholder tile that
     // resolves to the real image as soon as its own decode finishes. The alt is
@@ -1292,51 +1321,65 @@ function renderThumbnails() {
 
     node.num.textContent = `${idx + 1}`;
 
-    const badgeState = p.error ? "error" : p.pending ? "pending" : p.is_cropped ? "cropped" : "uncropped";
-    node.badge.className = `crop-badge ${badgeState}`;
-    node.badge.textContent = p.error ? "!" : p.pending ? "…" : p.is_cropped ? "✓" : "✕";
+    const b = badge(p);
+    node.badge.className = b.className;
+    node.badge.textContent = b.glyph;
     // A badge that cannot be acted on has to say so on the badge. "✕" alone said
     // only that no mosquito was detected, which reads as a crop failure rather
     // than as "this control is off, and here is why" - the whole of which was the
     // report that started this: a tile that looks inert and does not explain.
-    node.badge.title = p.error
-      ? p.error
-      : p.pending
-        ? "Still classifying - not yet part of the combined result"
-        : p.is_cropped
-          ? poolExclusionReason(p) || "Mosquito detected & cropped"
-          : poolExclusionReason(p) || "No mosquito detected in this photo";
+    node.badge.title = b.title;
 
     // The one place a photo's own verdict is visible without selecting it, so an
-    // excluded photo is never only knowable from the contribution table.
-    const abstained = p.verdict?.state === "unsure";
-    node.label.title = abstained
-      ? "Not confident enough to name a genus - excluded from the pooled result"
-      : poolExclusionReason(p) || "Include this photo in pooled result";
-
+    // excluded photo is never only knowable from the contribution table. The
+    // same string is the checkbox's accessible name and its tooltip, so the two
+    // cannot disagree - and a closed checkbox never claims it can be included.
+    const why = checkLabel(p, idx + 1);
+    node.chk.setAttribute("aria-label", why);
+    node.chk.title = why;
     node.chk.checked = includedIndices.has(idx);
     node.chk.disabled = !contributesToPool(p);
-    // The CSS gives every opt-in box `cursor: pointer`, so a disabled one still
-    // invites a click it cannot accept. Set here rather than in the stylesheet
-    // because the state is per-photo and set per render; the cost is one style
-    // write on an element that is already being written to.
-    node.chk.style.cursor = contributesToPool(p) ? "pointer" : "not-allowed";
-    // The tooltip on the control itself, not only on the label wrapping it: a
-    // pointer over the checkbox is where someone who has just found it dead looks
-    // for the explanation.
-    node.chk.title = contributesToPool(p)
-      ? "Include this photo in the combined result"
-      : poolExclusionReason(p) || "Not part of the combined result";
 
     // One appendChild on an already-present child moves it to the end, which is
     // how the strip is put into index order after a deletion.
     strip.appendChild(node.tile);
   });
+
+  scrollSelectedIntoView();
+}
+
+/**
+ * Bring the selected tile inside the strip's own scroll box.
+ *
+ * A selection the user cannot see is a selection that did not happen as far as
+ * the page is concerned. With a dozen photos the strip overflows, and the arrow
+ * keys or the gallery arrows walked the selection straight off the end of it.
+ *
+ * The strip's `scrollLeft` is written directly rather than through
+ * `scrollIntoView`, which walks up the tree and scrolls whatever ancestor it
+ * finds - including the page, which is a layout shift the strip has no business
+ * causing.
+ */
+function scrollSelectedIntoView() {
+  const strip = document.getElementById("thumbnail-strip");
+  const node = tileNodes.get(previews[selectedIndex]);
+  if (!strip || !node) return;
+  const pad = 8;
+  const stripBox = strip.getBoundingClientRect();
+  const tileBox = node.tile.getBoundingClientRect();
+  // Rects, not `offsetLeft`: an element's offsetParent is the nearest positioned
+  // ancestor, which is not the scrolling box, so offsetLeft is not an offset into
+  // this strip's content and scrolling by it lands somewhere else entirely.
+  if (tileBox.left < stripBox.left + pad) {
+    strip.scrollLeft -= stripBox.left + pad - tileBox.left;
+  } else if (tileBox.right > stripBox.right - pad) {
+    strip.scrollLeft += tileBox.right - (stripBox.right - pad);
+  }
 }
 
 function setAllSelected(on) {
   previews.forEach((p, i) => {
-    if (isSelectable(p) && on) includedIndices.add(i);
+    if (contributesToPool(p) && on) includedIndices.add(i);
     else includedIndices.delete(i);
   });
   renderThumbnails();
@@ -1366,12 +1409,21 @@ function deleteAllPhotos() {
 }
 
 // Nothing to select, deselect or delete without photos, so the buttons say so
-// rather than sitting there as no-ops.
+// rather than sitting there as no-ops. A disabled control that does not say why
+// is indistinguishable from a broken one.
+const STRIP_ACTIONS = {
+  "btn-select-all": ["Check all photos that can be pooled", "No photos to act on"],
+  "btn-select-none": ["Uncheck all photos", "No photos to act on"],
+  "btn-delete-all": ["Delete all photos", "No photos to act on"],
+};
 function updateStripActions() {
   const empty = previews.length === 0;
-  for (const id of ["btn-select-all", "btn-select-none", "btn-delete-all"]) {
+  for (const [id, [label, why]] of Object.entries(STRIP_ACTIONS)) {
     const el = document.getElementById(id);
-    if (el) el.disabled = empty;
+    if (!el) continue;
+    el.disabled = empty;
+    el.setAttribute("aria-label", label);
+    el.title = empty ? why : label;
   }
 }
 
@@ -1419,6 +1471,23 @@ function fitSurface(surface, cv) {
   // paint and no photo state can change it.
   surface.style.width = "100%";
   surface.style.height = "100%";
+}
+
+/**
+ * What the zoomed panel says when there is no image to put in it.
+ *
+ * Reaching this branch means the photo has no pixels at all - a decode that has
+ * not finished, or one that failed. It used to say "Using full photo" or "No
+ * mosquito detected" here, and both are statements about a classification that
+ * has not happened: a photo still queued was reported as one where no mosquito
+ * was found, and two queued photos were indistinguishable in the viewer, so
+ * selecting one of them changed nothing the user could see. The message names the
+ * photo and says what is actually true about it.
+ */
+function emptyPanelMessage(p) {
+  if (p.error) return `${p.name || "This photo"} could not be analysed: ${p.error}`;
+  if (p.pending) return `${p.name || "This photo"} has not been analysed yet`;
+  return `${p.name || "This photo"} could not be displayed`;
 }
 
 function renderActivePhoto() {
@@ -1479,7 +1548,7 @@ function renderActivePhoto() {
     // Only ever a statement about the photo, never about our machinery. There is
     // deliberately no "Crop unavailable" here: a failed classification is not a
     // missing photo, and the panel already has an image in that case.
-    cropEmpty.textContent = p.manual_full_photo ? "Using full photo" : "No mosquito detected";
+    cropEmpty.textContent = emptyPanelMessage(p);
     if (zoomedActiveBox) zoomedActiveBox.style.display = "none";
   }
 
@@ -2204,6 +2273,11 @@ window.addEventListener("DOMContentLoaded", () => {
   };
 
   // Arrow Key Navigation
+  //
+  // Focus follows the selection. Moving the selection with the keyboard while
+  // focus stayed on the tile button that was left behind is how a keyboard user
+  // ends up pressing Enter on a different photo than the one the highlight is
+  // on, which is the same defect as a click landing on the wrong tile.
   window.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLInputElement) return;
     if (e.key === "ArrowRight") {
@@ -2212,7 +2286,14 @@ window.addEventListener("DOMContentLoaded", () => {
     } else if (e.key === "ArrowLeft") {
       e.preventDefault();
       selectPhoto(selectedIndex - 1);
+    } else if (e.key === "Home" || e.key === "End") {
+      if (!previews.length) return;
+      e.preventDefault();
+      selectPhoto(e.key === "Home" ? 0 : previews.length - 1);
+    } else {
+      return;
     }
+    tileNodes.get(previews[selectedIndex])?.btn.focus();
   });
 
   // Init Engine

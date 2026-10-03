@@ -93,7 +93,8 @@ test.describe("tile states", () => {
           disabled: chk.disabled,
           badge: badge.textContent,
           badgeTitle: badge.title,
-          labelTitle: (tile.querySelector(".include") as HTMLElement).title,
+          labelTitle: (tile.querySelector(".thumb-optin") as HTMLInputElement).title,
+          accessibleName: (tile.querySelector(".thumb-optin") as HTMLInputElement).getAttribute("aria-label"),
         };
       });
     }, CASES);
@@ -144,7 +145,8 @@ test.describe("tile states", () => {
         return {
           disabled: chk.disabled,
           chkTitle: chk.title,
-          labelTitle: (tile.querySelector(".include") as HTMLElement).title,
+          labelTitle: (tile.querySelector(".thumb-optin") as HTMLInputElement).title,
+          accessibleName: (tile.querySelector(".thumb-optin") as HTMLInputElement).getAttribute("aria-label"),
           badgeTitle: (tile.querySelector(".crop-badge") as HTMLElement).title,
           cursor: getComputedStyle(chk).cursor,
         };

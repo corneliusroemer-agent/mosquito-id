@@ -46,10 +46,10 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Tier 1. `test:e2e` excludes `strip-index-stability.spec.ts`, which is
-      # committed RED as the reproduction for the wrong-tile bug recorded in
-      # docs/THUMBNAIL-STRIP-SPEC.md R5. A known failure with a known cause, not
-      # a flaky one.
+      # Tier 1. This includes `strip-index-stability.spec.ts`, which was committed
+      # RED as the reproduction for the wrong-tile bug in
+      # docs/THUMBNAIL-STRIP-SPEC.md R5 and is green now that the strip's handlers
+      # read a tile's index at event time instead of capturing it at build.
       - name: Install the browser
         run: npx playwright install --with-deps chromium
 

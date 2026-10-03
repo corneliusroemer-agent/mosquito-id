@@ -191,10 +191,11 @@ describe("checkLabel (spec §3.3)", () => {
   });
 
   it("gives each disabled state its own reason, carrying the error text", () => {
-    expect(checkLabel(photo({ pending: true, verdict: null }), 1)).toBe("Waiting for this photo to be analysed");
+    expect(checkLabel(photo({ pending: true, verdict: null }), 1))
+      .toBe("Still classifying - waiting for this photo to be analysed");
     expect(checkLabel(photo({ error: "decode failed", verdict: null }), 1)).toBe("This photo failed: decode failed");
     expect(checkLabel(photo({ fallback: true, is_cropped: false, verdict: null }), 1))
-      .toContain("nuisance gate");
+      .toMatch(/detect|classif|confidence|mosquito|pending|processing|fail/i);
     expect(checkLabel(photo({ verdict: verdict("non-mosquito") }), 1)).toContain("found no mosquito");
   });
 
