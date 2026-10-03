@@ -34,6 +34,7 @@ import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
+import { downloadCSV, renderResultsTable } from "./resultsTable";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -221,7 +222,7 @@ const ASYNC = (window.__mosqAsync = {
   renderThumbnails,
   renderActivePhoto,
   updatePooling,
-  renderResultsTable
+  renderResultsTable: () => renderResultsTable(previews)
 });
 (function countFrames() {
   requestAnimationFrame(() => { ASYNC.frames++; countFrames(); });
@@ -918,7 +919,7 @@ async function processFiles(fileList) {
   renderThumbnails();
   renderActivePhoto();
   updatePooling();
-  renderResultsTable();
+  renderResultsTable(previews);
 
   // Decode with bounded concurrency, inference effectively serial. Decoding a
   // JPEG is independent per file and releases the GIL-free browser work queue, so
@@ -1030,7 +1031,7 @@ async function processFiles(fileList) {
     renderThumbnails();
     renderActivePhoto();
     updatePooling();
-    renderResultsTable();
+    renderResultsTable(previews);
   }
 
   // Inference, one photo at a time, each result painted as it lands.
@@ -1051,7 +1052,7 @@ async function processFiles(fileList) {
   renderThumbnails();
   renderActivePhoto();
   updatePooling();
-  renderResultsTable();
+  renderResultsTable(previews);
   sendLog("process_files_completed", { added: slots.length, total: previews.length });
 
   // Anything dropped or queued while this batch ran goes next, before the
@@ -1109,7 +1110,7 @@ function deletePhoto(idx) {
     renderThumbnails();
     renderActivePhoto();
     updatePooling();
-    renderResultsTable();
+    renderResultsTable(previews);
   }
 }
 
@@ -1769,7 +1770,7 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
     renderThumbnails();
     renderActivePhoto();
     updatePooling();
-    renderResultsTable();
+    renderResultsTable(previews);
   }
 
   if (dropped) {
@@ -1840,7 +1841,7 @@ async function executeCrop(p, idx, cropBox, t0) {
   renderThumbnails();
   renderActivePhoto();
   updatePooling();
-  renderResultsTable();
+  renderResultsTable(previews);
 
   const rec = {
     what: "crop", cropBox, cw, ch, rev,
@@ -1895,7 +1896,7 @@ async function executeCrop(p, idx, cropBox, t0) {
   renderThumbnails();
   renderActivePhoto();
   updatePooling();
-  renderResultsTable();
+  renderResultsTable(previews);
   sendLog("crop_executed", {
     engine: currentEngine, cropBox, cw, ch,
     topSpecies: Object.keys(p.scores)[0] || null
@@ -1922,7 +1923,7 @@ async function revertToFullPhoto(idx) {
   renderThumbnails();
   renderActivePhoto();
   updatePooling();
-  renderResultsTable();
+  renderResultsTable(previews);
 
   const rec = {
     what: "revert", rev,
@@ -1966,7 +1967,7 @@ async function revertToFullPhoto(idx) {
   renderThumbnails();
   renderActivePhoto();
   updatePooling();
-  renderResultsTable();
+  renderResultsTable(previews);
 }
 
 // ---- Pooling / Evidence Aggregation ----
@@ -2092,88 +2093,6 @@ function updatePooling() {
   });
 }
 
-// ---- Results Table & CSV Export ----
-function renderResultsTable() {
-  const tbody = document.getElementById("results-table").querySelector("tbody");
-  tbody.innerHTML = "";
-  document.getElementById("table-summary").textContent = `Processed ${previews.length} images.`;
-
-  previews.forEach(p => {
-    const tr = document.createElement("tr");
-    // Every row is five cells wide, whatever state its photo is in. A pending
-    // or failed row leaves the four unknown cells empty rather than filling
-    // them with a word: a colspan here changed the table's column widths, and
-    // the replaced text changed the row's height, so the row below it moved
-    // twice over as each photo finished. The photo's own state is already
-    // visible as its tile and its entry in the score panel; a third copy of it
-    // in this table was the layout cost of saying it again.
-    if (p.pending || p.error) {
-      tr.className = "row-pending";
-      tr.innerHTML = `
-        <td title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
-        <td></td>
-        <td></td>
-        <td></td>
-        <td></td>
-      `;
-      tbody.appendChild(tr);
-      return;
-    }
-    const sortedGenus = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
-    const topGenus = sortedGenus[0] || ["-", 0];
-    const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
-    const topSpec = sortedSpec[0] || ["-", 0];
-
-    // What the app would claim about the photo. It is a coarser claim than the
-    // ranking when the species gate abstains, never a fabricated one: a photo
-    // the classifier cannot place shows the genus it did place, or nothing.
-    const v = p.verdict || { state: "species" };
-    const topCell = v.state === "species" ? String(topSpec[0])
-      : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
-    const specPct = (topSpec[1] || 0) * 100;
-    tr.innerHTML = `
-      <td title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</td>
-      <td title="${escapeHtml(topGenus[0])}">${escapeHtml(topGenus[0])}</td>
-      <td style="text-align:right">${(topGenus[1] * 100).toFixed(1)}%</td>
-      <td title="${escapeHtml(String(topCell))}">${escapeHtml(String(topCell))}</td>
-      <td style="text-align:right">${specPct.toFixed(1)}%</td>
-    `;
-    tbody.appendChild(tr);
-  });
-}
-
-function downloadCSV() {
-  if (!previews.length) return;
-  sendLog("download_csv");
-  let csv = "Filename,Status,Cropped,Top Genus,Genus Score (%),Top Species,Species Score (%)\n";
-  previews.forEach(p => {
-    if (p.pending || p.error) {
-      // Exporting the previous crop's numbers under the new crop's name would be
-      // a wrong result, not a stale one.
-      csv += `"${p.name}","${(p.error || "classifying").replace(/"/g, "'")}",${p.is_cropped},"-","-","-","-"\n`;
-      return;
-    }
-    const sortedGenus = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
-    const topGenus = sortedGenus[0] || ["-", 0];
-    const sortedSpec = Object.entries(p.detail).sort((a, b) => b[1] - a[1]);
-    const topSpec = sortedSpec[0] || ["-", 0];
-    // Same rule as the results table: the export carries the claim the app made,
-    // so a photo the app would not name cannot leave the machine looking named.
-    const v = p.verdict || { state: "species" };
-    const claim = v.state === "species" ? String(topSpec[0])
-      : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
-    const specPct = ((topSpec[1] || 0) * 100).toFixed(1);
-    csv += `"${p.name}","${p.status}",${p.is_cropped},"${topGenus[0]}",${(topGenus[1] * 100).toFixed(1)},"${claim}",${specPct}\n`;
-  });
-
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `mosquito_identification_${Date.now()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 // Sample Photos Loader
 const SAMPLE_NAMES = [
@@ -2367,7 +2286,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-samples").onclick = loadSamplePhotos;
   document.getElementById("btn-prev").onclick = () => selectPhoto(selectedIndex - 1);
   document.getElementById("btn-next").onclick = () => selectPhoto(selectedIndex + 1);
-  document.getElementById("btn-csv").onclick = downloadCSV;
+  document.getElementById("btn-csv").onclick = () => downloadCSV(previews, sendLog);
 
   const savedPooling = localStorage.getItem("mosquito_pooling");
   if (savedPooling) {
