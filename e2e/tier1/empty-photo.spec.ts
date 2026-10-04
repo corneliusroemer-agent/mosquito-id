@@ -86,7 +86,37 @@ test.describe("a photo with no mosquito in it", () => {
     await settle(page);
 
     await expect(page.locator("#thumbnail-strip .tile").nth(2).locator(".thumb-optin")).toBeDisabled();
-    await expect(page.locator("#contribution-table tbody tr")).toHaveCount(2);
+
+    // One row per CHECKED photo, not one per pooled photo. The wall is checked -
+    // its box is ticked, `populate` puts it in `includedIndices` - and a checked
+    // photo that contributes nothing is LISTED with its reason, because a row that
+    // is silently absent reads as an app bug rather than as a decision the card
+    // already reports in `#inclusion-summary` (R4.10). So three photos are three
+    // rows: the two mosquitoes with shares, and the wall marked excluded.
+    //
+    // Asserting the shares and the excluded marker is what makes this a claim
+    // about the wall's exclusion rather than about the number three; a bare count
+    // passed here while `poolingPanel.ts` changed what it listed, because nothing
+    // in it said which rows were required to be there.
+    const rows = page.locator("#contribution-table tbody tr");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(2)).toHaveClass(/row-excluded/);
+    await expect(rows.nth(2)).toContainText("not a mosquito");
+    // The two mosquitoes split the pool evenly between them; the wall's row
+    // carries a dash, not a share, so it cannot be read as having contributed.
+    const shares = await rows.evaluateAll((r) =>
+      r.map((x) => (x as HTMLTableRowElement).cells[1]!.textContent!.trim()),
+    );
+    expect(shares, "the two mosquitoes pool at equal shares and the wall at none").toEqual([
+      "50.0%",
+      "50.0%",
+      "-",
+    ]);
+
+    // The card states both counts itself, so the table listing three rows beside a
+    // header claiming three checked is not a contradiction the user has to resolve.
+    await expect(page.locator("#inclusion-summary")).toContainText("3");
+
     expect(errors(page)).toHaveLength(0);
   });
 
