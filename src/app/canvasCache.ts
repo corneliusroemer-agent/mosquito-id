@@ -6,7 +6,6 @@
  * a replaced canvas cannot serve a stale one.
  */
 
-/** JPEG quality to encode a full photo's <img> at. Cheap to view, not archival. */
 // A canvas -> data: URL memo, keyed on the canvas object.
 //
 // Every render re-encodes the same canvases: `renderThumbnails` runs after each
@@ -37,6 +36,133 @@ export function canvasUrl(cv: HTMLCanvasElement | null, quality: number): string
     url = cv.toDataURL("image/jpeg", quality);
     byQuality.set(key, url);
   }
+  return url;
+}
+
+/**
+ * The width of a tile's image box, in CSS px, at the widest breakpoint the
+ * stylesheet sets (`index.html`: 84px under the phone breakpoint, 64px above).
+ */
+const TILE_CSS_PX = 84;
+
+/**
+ * Device pixels to encode a thumbnail at: `TILE_CSS_PX` at 3x, the densest
+ * display the strip is used on. Anything above this is pixels no display shows.
+ */
+const THUMB_PX = TILE_CSS_PX * 3;
+
+/**
+ * Long edge of the intermediate a large source is shrunk through before it
+ * reaches thumbnail size. A single 12 MP -> 252 px `drawImage` is a ~50x
+ * reduction, and a one-step box filter that wide aliases on fine detail; two
+ * steps of at most this much each are what the browser's own downscale does
+ * internally. Costs one extra ~1 MP resample, which is invisible next to the
+ * 12-50 MP read it replaces.
+ */
+const INTERMEDIATE_PX = 1024;
+
+/**
+ * The size to shrink a `w` x `h` source to for a thumbnail, at its own aspect
+ * ratio.
+ *
+ * Sizing on the *short* edge is what makes the tile's `object-fit: cover` crop
+ * identical to the un-downscaled one: cover scales by `max(boxW/w, boxH/h)`, so
+ * for the square tile the short edge is the one that always fills it, and a
+ * thumbnail is large enough to render exactly when its short edge is.
+ *
+ * A source already at or below `THUMB_PX` on its short edge is returned
+ * unchanged, so a small canvas is never enlarged (and never loses sharpness to a
+ * resample it did not need).
+ */
+export function thumbnailSize(w: number, h: number, shortEdge = THUMB_PX): { w: number; h: number } {
+  if (!(w > 0) || !(h > 0)) return { w, h };
+  const short = Math.min(w, h);
+  if (short <= shortEdge) return { w, h };
+  const scale = shortEdge / short;
+  return { w: Math.max(1, Math.round(w * scale)), h: Math.max(1, Math.round(h * scale)) };
+}
+
+/** The two resample steps a full-resolution source takes to reach thumbnail size. */
+export function thumbnailSteps(w: number, h: number, shortEdge = THUMB_PX, intermediatePx = INTERMEDIATE_PX): { w: number; h: number }[] {
+  const steps: { w: number; h: number }[] = [];
+  let cur = { w, h };
+  if (Math.max(w, h) > intermediatePx) {
+    const scale = intermediatePx / Math.max(w, h);
+    cur = { w: Math.max(1, Math.round(w * scale)), h: Math.max(1, Math.round(h * scale)) };
+    steps.push(cur);
+  }
+  const fin = thumbnailSize(cur.w, cur.h, shortEdge);
+  if (fin.w !== cur.w || fin.h !== cur.h) steps.push(fin);
+  return steps;
+}
+
+/**
+ * One shared scratch canvas, resized per call and never read back, so the
+ * downscale costs an allocation of nothing. `canvasUrl`'s callers run on the
+ * main thread inside a render, which is exactly where a per-thumbnail
+ * `createElement("canvas")` would show up.
+ */
+let scratch: HTMLCanvasElement | null = null;
+function scratchCtx(w: number, h: number): CanvasRenderingContext2D | null {
+  if (!scratch) scratch = document.createElement("canvas");
+  if (scratch.width !== w || scratch.height !== h) { scratch.width = w; scratch.height = h; }
+  return scratch.getContext("2d");
+}
+
+// Thumbnails get their own memo, in their own key space, so an encode made for
+// the 64 px strip can never be served to the full-size viewer - which is the
+// failure the shared cache would otherwise make possible now that two sizes of
+// encode exist for the same canvas.
+const thumbUrlCache = new WeakMap<HTMLCanvasElement, Map<number, string>>();
+
+/**
+ * A JPEG data: URL of `cv` at thumbnail size, for a tile.
+ *
+ * `canvasUrl` encodes at whatever size the canvas happens to be, which for a
+ * photo is 12-50 megapixels, and the tile then displays it at 84 CSS px. The
+ * browser downsamples the decoded frame at composite time, so the full
+ * resolution is only ever paying for the encode: on the 30-photo corpus that
+ * was 16.8 s of synchronous JPEG encoding, twice per photo (once before its
+ * crop exists, once after), of which the strip shows 84 pixels.
+ *
+ * Downscaling first makes the encode cost proportional to what is displayed.
+ * The JPEG quality argument is the caller's and unchanged, so the only visible
+ * difference is the source resolution of the tile's own downsample - measured
+ * against the un-downscaled render in `docs/THUMBNAIL-ENCODE.md`.
+ */
+export function thumbnailUrl(cv: HTMLCanvasElement | null, quality: number): string | null {
+  if (!cv) return null;
+  let byQuality = thumbUrlCache.get(cv);
+  if (!byQuality) { byQuality = new Map(); thumbUrlCache.set(cv, byQuality); }
+  const hit = byQuality.get(quality);
+  if (hit !== undefined) return hit;
+
+  const steps = thumbnailSteps(cv.width, cv.height);
+  if (steps.length === 0) {
+    // Already thumbnail-sized (or smaller): encoding it directly is the same
+    // pixels the downscale would produce, without the resample.
+    const url = cv.toDataURL("image/jpeg", quality);
+    byQuality.set(quality, url);
+    return url;
+  }
+  let src: HTMLCanvasElement = cv;
+  let ok = false;
+  for (const s of steps) {
+    const ctx = scratchCtx(s.w, s.h);
+    // No 2d context means no downscale is available; encode the source as-is,
+    // which is what this did before.
+    if (!ctx) break;
+    ctx.drawImage(src, 0, 0, s.w, s.h);
+    src = scratch!;
+    ok = true;
+  }
+  if (!ok) {
+    const url = cv.toDataURL("image/jpeg", quality);
+    byQuality.set(quality, url);
+    return url;
+  }
+  const url = src.toDataURL("image/jpeg", quality);
+  byQuality.set(quality, url);
   return url;
 }
 
