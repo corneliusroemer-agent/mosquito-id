@@ -9,6 +9,7 @@
  * each constant at its use.
  */
 import { PER_GENUS_COSINE_OFFSET } from "../confidence/calibration";
+import { DEFAULT_FLOORS, type Floors } from "../confidence/types";
 import type { Capability } from "./granularity";
 
 /** Detector input is a square of this side, in pixels. */
@@ -72,6 +73,46 @@ export const CALIBRATED_ENGINES: ReadonlySet<string> = new Set(["webgpu-fp16"]);
  */
 export function cosineOffsetsFor(engineKey: string): Readonly<Record<string, number>> {
   return CALIBRATED_ENGINES.has(engineKey) ? PER_GENUS_COSINE_OFFSET : EMPTY_OFFSETS;
+}
+
+/**
+ * The floors each engine is scored at, where they differ from the shipped ones.
+ *
+ * `DEFAULT_FLOORS` were fitted on BioCLIP H/14's posteriors. An engine whose head
+ * is a different kind of object does not produce posteriors on that scale, and a
+ * floor is an absolute threshold on a posterior, so inheriting one is a claim the
+ * engine has never been tested for. The per-engine opt-in is the same shape as
+ * `CALIBRATED_ENGINES` above: absent means the shipped floors, explicitly.
+ *
+ * culico's head was refitted in 2026-10-04 (see docs/HEADS.md). It is a trained
+ * probe, its posterior is much sharper than the head it replaced, and on the
+ * corpora it was fitted on it clears a 0.373 species floor on 70% of photographs
+ * at 72% accuracy - against the ~88% the floor was fitted to deliver. Its floors
+ * were re-derived from its own selective-accuracy curves, fitted on one half of a
+ * held-out corpus and read on the other:
+ *
+ *   species 0.80   on-corpus 96.7% at 17% coverage; off-corpus 91.6% at 12%
+ *   genus   0.90   on-corpus 99.3% at 30% coverage; off-corpus 94.4% at 23%
+ *
+ * Both meet the ~88% accuracy target the shipped floors were chosen against. The
+ * cost is coverage: the app names a species far less often on this engine, which
+ * is the correct behaviour for a head this far from its training distribution and
+ * not a tuning choice.
+ */
+const ENGINE_FLOORS: Readonly<Record<string, Floors>> = Object.freeze({
+  "webgpu-culico": Object.freeze({
+    ...DEFAULT_FLOORS,
+    species: 0.80,
+    genus: 0.90,
+  }),
+});
+
+/**
+ * The floors to score an engine at. An engine with no entry of its own is scored
+ * at `DEFAULT_FLOORS` - the shipped values, on the models they were fitted on.
+ */
+export function floorsFor(engineKey: string): Floors {
+  return ENGINE_FLOORS[engineKey] ?? DEFAULT_FLOORS;
 }
 
 export const MODEL_BASE_URL =

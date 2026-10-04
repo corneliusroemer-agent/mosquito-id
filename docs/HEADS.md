@@ -267,6 +267,60 @@ being unsafe and the new one being less so.
 
 The two blocks the gate reads were not touched:
 
+### Per-engine floors
+
+`DEFAULT_FLOORS` were fitted on BioCLIP H/14's posteriors. A floor is an absolute
+threshold on a posterior, so inheriting one across engines is a claim the
+inheriting engine has never been tested for. `floorsFor(engineKey)` sits beside
+`cosineOffsetsFor` in `../app/modelConfig` with the same shape: absent means the
+shipped floors, explicitly, and only culico has an entry.
+
+Its values were fitted on **one half** of a held-out corpus and read on the other,
+because the decision is about how the head behaves on photographs it was not
+fitted on:
+
+| | fitted on half A | reported on half B | in-corpus |
+| --- | ---: | ---: | ---: |
+| species accuracy at 0.80 | 91.6% | 91.6% | 96.7% |
+| genus accuracy at 0.90 | 99.7% | 99.8% | 99.3% |
+
+Both meet the ~88% accuracy target the shipped floors were chosen against, which
+is what a floor is for. The cost is coverage. Through the app's own gate and
+floors, on 2,450 in-corpus test rows and on 2,361 held-out off-corpus rows:
+
+| head / floors | slice | `species` | `genus` | abstains |
+| --- | --- | --- | --- | ---: |
+| refitted, shipped floors | in-corpus | 74.0% of rows, 71% correct | 5.9%, 94% | 20.1% |
+| refitted, `floorsFor(culico)` | in-corpus | 20.2%, **93% correct** | 19.8%, **99%** | 60.0% |
+| refitted, shipped floors | off-corpus | 65.8%, 25% | 4.4%, 93% | 29.8% |
+| refitted, `floorsFor(culico)` | off-corpus | 12.1%, 40% | 17.1%, **97%** | 70.8% |
+
+Two of those numbers need their denominators, which are not the same number:
+
+- **The off-corpus 40% species figure is a floor imposed by the corpus's
+  labelling, not by the model.** 56% of the 6,264-row cache carries a genus-only
+  label, and on those rows no species answer can be right. Restricted to the rows
+  whose label *is* one of the sixteen columns, the same head at the same 0.80
+  floor is **91.6% correct at 11.9% coverage**.
+- The in-corpus figures are over the 2,450 test rows whose label is one of the
+  sixteen columns, which is every row in that split's denominator.
+
+So the refitted head names a species far less often than it did under the shipped
+floors, and is far more often right when it does. That is the correct behaviour
+for a head this far from its training distribution, and it is the reason the
+`reports: "species"` declaration and the floors are separate things: the head can
+name a species, and 0.80 is how sure it has to be before the app does.
+
+**What the per-engine floors do not fix.** The off-corpus *genus* regression in
+the section above is a property of the head, measured on the argmax: at the
+shipped 0.80 and matched coverage of ~38%, the refitted head answers 87.3% and
+the previous head 99.2% on photographs neither was fitted on. Raising culico's
+genus floor to 0.90 recovers the accuracy contract - 97% where it fires - but by
+abstaining on the rows it would get wrong, which takes genus coverage from 44.2%
+of photographs to 17.1%. That is a **mitigation, not a fix**, and it is the whole
+reason the off-corpus genus numbers stay in this file rather than being tuned
+away.
+
 ### The two blocks the gate reads were not touched
 
 | | previous head | refitted |

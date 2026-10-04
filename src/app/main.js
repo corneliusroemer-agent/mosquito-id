@@ -28,7 +28,7 @@ import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { activeGroups, claimSentence, mergeUnresolvable, resolvableGroups, setActiveHead } from "./granularity";
 import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
          FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, capabilityNote,
-         cosineOffsetsFor, resolveModelUrl } from "./modelConfig";
+         cosineOffsetsFor, floorsFor, resolveModelUrl } from "./modelConfig";
 import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
@@ -61,13 +61,14 @@ const localViewScale = () => _localViewScale(EMB);
 const serverViewScale = () => _serverViewScale(EMB);
 const adjacentNames = () => _adjacentNames(EMB);
 const genusScores = (spP) => _genusScores(EMB, spP);
-const fuseViews = (viewResults) => _fuseViews(EMB, viewResults);
+const fuseViews = (viewResults) => _fuseViews(EMB, viewResults, floorsFor(currentEngine));
 // `nuP` is forwarded because the non-mosquito gate reads the nuisance block, not
 // only the adjacent one: without it this adapter silently drops the evidence for
 // "this photo is a wall", which is the case the gate exists to catch.
-const verdictFrom = (spP, agreement, adP, nuP) => _verdictFrom(EMB, spP, agreement, adP, undefined, nuP);
+const verdictFrom = (spP, agreement, adP, nuP) => _verdictFrom(EMB, spP, agreement, adP, floorsFor(currentEngine), nuP);
 const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
-const pooledVerdictOf = (aggLogits, included, aggAdjLogits) => _pooledVerdictOf(EMB, aggLogits, included, aggAdjLogits);
+const pooledVerdictOf = (aggLogits, included, aggAdjLogits) =>
+  _pooledVerdictOf(EMB, aggLogits, included, aggAdjLogits, floorsFor(currentEngine));
 
 
 // ---- Confidence gating ----
