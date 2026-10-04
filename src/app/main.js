@@ -26,7 +26,7 @@ import { pooledPosterior as _pooledPosterior,
          pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { activeGroups, claimSentence, mergeUnresolvable, resolvableGroups, setActiveHead } from "./granularity";
-import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE, DETECTOR_SIZE,
+import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTOR_SIZE,
          FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, capabilityNote,
          cosineOffsetsFor, floorsFor, resolveModelUrl } from "./modelConfig";
 import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
