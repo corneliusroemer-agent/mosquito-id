@@ -83,6 +83,13 @@ issues, and a short SHA for a commit that reached `main` directly.
   ([#65](https://github.com/corneliusroemer-agent/mosquito-id/pull/65), `a224f28`).
 - **The crop's geometry and the whole-frame toggle are pinned**, including during a re-run
   ([#67](https://github.com/corneliusroemer-agent/mosquito-id/pull/67), `a6c7931`).
+- **The whole-frame specs' confident-crop guard now reads the posterior the router reads**
+  ([#89](https://github.com/corneliusroemer-agent/mosquito-id/pull/89)) — it compared a
+  renormalised max against a threshold applied to the joint posterior, which coincides on the
+  fp16 head and is ~2x inflated on a head with adjacent rows
+  ([#85](https://github.com/corneliusroemer-agent/mosquito-id/issues/85)). The one-view
+  precondition is now asserted rather than stated in a comment, and an assertion that could not
+  fail is deleted.
 - **The head JSON is versioned on the build SHA**, so a stale head cannot be served, and a
   cache write no longer costs the download
   ([#69](https://github.com/corneliusroemer-agent/mosquito-id/pull/69), `302e710`).
@@ -98,6 +105,9 @@ issues, and a short SHA for a commit that reached `main` directly.
 ### Documentation
 
 - **The Playwright exit-code claim in `TESTING.md` corrected**
+- **A repo-level skills directory**, with a `writing-style` skill (linkify code references,
+  commits and sources; permalinks pinned to `main` outside a branch) and a `creating-skills`
+  skill ([#87](https://github.com/corneliusroemer-agent/mosquito-id/pull/87)).
   ([#54](https://github.com/corneliusroemer-agent/mosquito-id/pull/54), `93bfa76`), and the
   CORS port constraint and silent-pass trap documented (`098027b`,
   [#33](https://github.com/corneliusroemer-agent/mosquito-id/issues/33)).
