@@ -124,6 +124,39 @@ async function installPixelKeyedClassifier(page: Page, lean = 3): Promise<void> 
   }, lean);
 }
 
+/** One photo as the helper below needs it: the fused posterior and the adjacent mass. */
+interface CropReading {
+  name: string;
+  detail: Record<string, number>;
+  adP: number[] | null;
+}
+
+/**
+ * The top JOINT species posterior - the number the confidence router reads.
+ *
+ * `fuseViews` gates on `Math.max(...viewResults[0].spP)`, which is the species
+ * slice of the one softmax `softmaxJoint` runs over species, nuisance and
+ * adjacent together. `detail` is not that: `fuseViews` renormalises the pooled
+ * species block over species+nuisance only, so every species posterior on the
+ * record is inflated by whatever mass the adjacent block took. On the shipped
+ * H/14 head the two coincide only when that mass is ~0 - which is exactly the
+ * regime this file's `lean = 3` fixture sits in, and the reason the mismatch has
+ * never failed here. On a head carrying live adjacent rows the inflation is real
+ * (measured 2.03x on a 16+8+7 head), and a helper reading `detail` would certify
+ * a crop the router rejects at 0.44 - the same scale error
+ * `tests/router-scale.test.ts` exists to catch, one layer out.
+ *
+ * So the joint scale is recovered rather than read off `detail`. With one view
+ * the renormalisation divides the species block by `1 - sum(adjacent)`, so
+ * `max(spP) = max(detail) * (1 - sum(adP))` exactly - checked to 1e-12 against
+ * the shipped head across `lean` 0, 1.5 and 3 and five hash seeds. `adP` is on
+ * the photo record (`commitScores` files it), so this costs no production code.
+ */
+function jointTopPosterior(p: CropReading): number {
+  const adjacentMass = (p.adP ?? []).reduce((a, b) => a + b, 0);
+  return Math.max(...Object.values(p.detail)) * (1 - adjacentMass);
+}
+
 /**
  * The crop-only posterior must sit above the confidence router's threshold.
  *
@@ -131,13 +164,15 @@ async function installPixelKeyedClassifier(page: Page, lean = 3): Promise<void> 
  * whole frame, so every "the two views disagree" assertion in this file would be
  * measuring the router rather than the fusion. Asserted against the threshold
  * imported from the source rather than a copy of the number, so a change to the
- * router that puts this fixture back under it fails here with the reason.
+ * router that puts this fixture back under it fails here with the reason, and on
+ * the joint scale the router reads rather than the renormalised `detail` - see
+ * `jointTopPosterior`.
  */
-function expectConfidentCrop(cropOnly: { name: string; detail: Record<string, number> }[]) {
+function expectConfidentCrop(cropOnly: CropReading[]) {
   for (const p of cropOnly) {
     expect(
-      Math.max(...Object.values(p.detail)),
-      `${p.name}: the crop-only top posterior is below CROP_ONLY_MAX_POSTERIOR ` +
+      jointTopPosterior(p),
+      `${p.name}: the crop's top joint species posterior is below CROP_ONLY_MAX_POSTERIOR ` +
         `(${CROP_ONLY_MAX_POSTERIOR}), so the confidence router answers this photo from the ` +
         "crop alone and the whole-frame view is never pooled - these specs cannot see a " +
         "fusion bug through that",
@@ -159,7 +194,9 @@ async function toggleAndSettle(page: Page, checked: boolean, budgetMs = 10_000) 
  * What the gallery is showing, read off the app's own photo objects.
  *
  * `detail` is the fused species posterior the score panel and the results table
- * both render, so it is the displayed number rather than an intermediate.
+ * both render, so it is the displayed number rather than an intermediate - but
+ * the router reads the joint scale `detail` was renormalised away from, so `adP`
+ * comes along with it and `jointTopPosterior` puts the two back together.
  */
 async function shownScores(page: Page) {
   return page.evaluate(() =>
@@ -167,6 +204,7 @@ async function shownScores(page: Page) {
       name: p.name,
       viewsTotal: p.viewsTotal,
       detail: p.detail as Record<string, number>,
+      adP: (p.adP ?? null) as number[] | null,
       verdict: p.verdict,
       // What `viewAgreement` reported about the views that were actually pooled,
       // which is what the score panel renders any claim about a second view from.
@@ -290,17 +328,25 @@ test.describe("the whole-frame toggle moves the scores", () => {
     expect(errors(page)).toHaveLength(0);
   });
 
-  test("an unconfident crop is answered on its own, and the app does not claim a second opinion", async ({ page }) => {
+  test("the router answers an unconfident crop from the crop alone, and no agreement is reported", async ({ page }) => {
     // The branch the other three specs must stay out of.
     //
-    // A crop whose top posterior is below CROP_ONLY_MAX_POSTERIOR is fused from
-    // that one view: equal weighting would spend the whole frame half the
+    // A crop whose top joint posterior is below CROP_ONLY_MAX_POSTERIOR is fused
+    // from that one view: equal weighting would spend the whole frame half the
     // decision on rows where the crop is the view carrying the signal. That is
     // worth measuring on real data (report 80) and it is invisible here, because
     // the app then shows exactly the crop-only numbers whether the toggle is
     // checked or not. It landed and two specs above started failing on it, and
     // nothing here pinned it: this is the branch where the toggle is checked, a
     // second view IS classified, and the answer does not move.
+    //
+    // What this pins is the ROUTER, and it says nothing about what the user is
+    // told. The name it used to carry - "the app does not claim a second opinion"
+    // - asserted a product guarantee that does not exist: `viewsTotal` is written
+    // to the photo record and never rendered, and the agreement box is cleared
+    // and left empty, so a user who checks the box on this branch is told nothing
+    // at all. That silence is [#85], tracked there; whether the app should
+    // surface it is a product decision, not something a test should bless.
     //
     // So the classifier is installed with `lean = 0` - the same pixel-keyed
     // direction with no species row behind it, which is what "the crop is not
@@ -315,18 +361,26 @@ test.describe("the whole-frame toggle moves the scores", () => {
     const both = await shownScores(page);
 
     // The fixture is what makes this the router's branch: below the threshold,
-    // asserted against the source constant so a threshold change that lifts this
-    // fixture above it says so here instead of quietly voiding the test.
+    // on the joint scale the router reads, asserted against the source constant
+    // so a threshold change that lifts this fixture above it says so here
+    // instead of quietly voiding the test.
     for (const c of cropOnly) {
       expect(
-        Math.max(...Object.values(c.detail)),
+        jointTopPosterior(c),
         `${c.name}: this fixture is only interesting BELOW CROP_ONLY_MAX_POSTERIOR ` +
           `(${CROP_ONLY_MAX_POSTERIOR}); above it the two views pool and this is the first test`,
       ).toBeLessThan(CROP_ONLY_MAX_POSTERIOR);
     }
 
-    // Not vacuous: the toggle really did classify a second view. "Nothing moved"
-    // only means something if something ran.
+    // Not vacuous: the whole frame WAS classified and its answer discarded.
+    // `viewsTotal` is the count of views the pass was asked for, written by
+    // `applyViews` before `fuseViews` runs, so this establishes that a second
+    // view was scored and not that it was pooled - the pooling half is what the
+    // sub-1e-12 assertion below pins, and it pins it tautologically on this
+    // branch, because the router returns the crop's own softmax and the number
+    // cannot move. `fuseViews`'s `nViews` is the direct signal and it is not on
+    // the photo record; surfacing it is a `src/` change, so it is not asserted
+    // here.
     expect(
       both.every((p) => p.viewsTotal === 2),
       "the whole frame was never classified, so the router cannot have suppressed it",
@@ -341,10 +395,11 @@ test.describe("the whole-frame toggle moves the scores", () => {
       ).toBeLessThan(1e-12);
       expect(b.verdict, `${c.name}: the verdict moved on a branch that must not move it`)
         .toEqual(c.verdict);
-      // And nothing claims a second opinion was consulted. `viewAgreement` is
-      // computed over the views that were POOLED, so a crop-only answer reports
-      // no agreement at all - it cannot say the views disagree when it never
-      // compared them, and the score panel renders nothing about a second view.
+      // And no agreement is reported, because `viewAgreement` is computed over
+      // the views that were POOLED and none were: a crop-only answer cannot say
+      // the views disagree when it never compared them. This is a statement
+      // about the fused result, not about what the app shows - the agreement box
+      // is cleared and nothing fills it either way.
       expect(
         b.agreement,
         `${c.name}: the app reported an agreement between views it never pooled`,
