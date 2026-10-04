@@ -138,3 +138,61 @@ export function fixtureHead(species: string[], opts: Partial<Head> = {}): Head {
     ...opts,
   };
 }
+
+/**
+ * A head whose species share weight rows in the given groups; a name in no group
+ * gets its own row.
+ *
+ * This is the shape culico's head had before the 2026-10-04 refit and the only
+ * shape the group machinery exists for. It is built rather than read from a
+ * file because no shipped head has it any more: after the refit all sixteen
+ * culico rows are distinct, `resolvableGroups` on any shipped file is empty,
+ * and a test that wants a group would otherwise have nothing to ask. The
+ * grouping falls out of the weights, so the tests that use this are still
+ * testing the derivation rather than a list.
+ */
+export function groupedHead(
+  species: readonly string[],
+  groups: readonly (readonly string[])[],
+  dim = 8,
+): Head {
+  const head: Head = {
+    species: [...species],
+    adjacent: [],
+    adjacent_common: [],
+    nuisance: [],
+    dim,
+    logit_scale: 100,
+  };
+  const emb = new Float32Array(species.length * dim);
+  const rowOf = new Map<string, number>();
+  groups.forEach((g, i) => { for (const s of g) rowOf.set(s, i + 1); });
+  species.forEach((sp, i) => {
+    // Deterministic on the ROW index, so every member of a group writes the same
+    // bytes - which is the only thing `equivalenceGroups` looks at.
+    const g = rowOf.get(sp) ?? -(i + 1);
+    for (let j = 0; j < dim; j++) emb[i * dim + j] = Math.sin(g * 7 + j);
+  });
+  head.species_emb = emb;
+  return head;
+}
+
+/**
+ * The groups culico's 16-row head collapsed into before the refit: four sets of
+ * three, named by the genus they sit in.
+ */
+export const CULICO_PRE_REFIT_GROUPS: readonly (readonly string[])[] = [
+  ["Aedes albopictus"],
+  ["Aedes aegypti"],
+  ["Aedes japonicus"],
+  ["Aedes koreicus"],
+  ["Aedes vexans", "Aedes geniculatus", "Aedes cinereus"],
+  ["Culex pipiens", "Culex torrentium", "Culex quinquefasciatus"],
+  ["Culiseta annulata", "Culiseta morsitans", "Culiseta longiareolata"],
+  ["Anopheles maculipennis", "Anopheles claviger", "Anopheles plumbeus"],
+];
+
+/** culico's pre-refit head, rebuilt: same sixteen labels, four collapsed groups. */
+export function culicoPreRefitHead(species: readonly string[], dim = 8): Head {
+  return groupedHead(species, CULICO_PRE_REFIT_GROUPS, dim);
+}

@@ -52,6 +52,11 @@
 // same offsets are worth -1.52 pp to a probe trained on these embeddings, because
 // there a per-genus additive term is a pure class-prior correction and cannot
 // move an argmax.
+//
+// culico's head is now a trained probe (2026-10-04, see docs/HEADS.md), so it is
+// the case this paragraph describes - and it is already handled: `CALIBRATED_ENGINES`
+// in ../app/modelConfig opts in per engine, and culico is not in it, so these four
+// numbers are never added to a fitted head's cosines.
 export const PER_GENUS_COSINE_OFFSET: Readonly<Record<string, number>> = Object.freeze({
   Aedes: -0.008713391998031056,
   Anopheles: 0.022077688488589337,
