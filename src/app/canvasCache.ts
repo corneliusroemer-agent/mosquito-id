@@ -86,10 +86,18 @@ export function thumbnailSize(w: number, h: number, shortEdge = THUMB_PX): { w: 
 export function thumbnailSteps(w: number, h: number, shortEdge = THUMB_PX, intermediatePx = INTERMEDIATE_PX): { w: number; h: number }[] {
   const steps: { w: number; h: number }[] = [];
   let cur = { w, h };
-  if (Math.max(w, h) > intermediatePx) {
-    const scale = intermediatePx / Math.max(w, h);
-    cur = { w: Math.max(1, Math.round(w * scale)), h: Math.max(1, Math.round(h * scale)) };
-    steps.push(cur);
+  const long = Math.max(w, h);
+  if (long > intermediatePx) {
+    const scale = intermediatePx / long;
+    const next = { w: Math.max(1, Math.round(w * scale)), h: Math.max(1, Math.round(h * scale)) };
+    // An intermediate that leaves less than `shortEdge` on the short side is not
+    // an intermediate, it is the whole downscale done badly: the second step
+    // would have nothing left to work from and the tile would be encoded at
+    // whatever width the panorama happened to leave. Skip it and resample once.
+    if (Math.min(next.w, next.h) >= shortEdge) {
+      cur = next;
+      steps.push(next);
+    }
   }
   const fin = thumbnailSize(cur.w, cur.h, shortEdge);
   if (fin.w !== cur.w || fin.h !== cur.h) steps.push(fin);
@@ -97,16 +105,22 @@ export function thumbnailSteps(w: number, h: number, shortEdge = THUMB_PX, inter
 }
 
 /**
- * One shared scratch canvas, resized per call and never read back, so the
- * downscale costs an allocation of nothing. `canvasUrl`'s callers run on the
- * main thread inside a render, which is exactly where a per-thumbnail
- * `createElement("canvas")` would show up.
+ * Scratch canvases, one per resample step, reused across every thumbnail.
+ *
+ * These have to be *one canvas per step*, not one canvas reused for the whole
+ * chain: assigning `width`/`height` clears the canvas, so a single canvas would
+ * erase step n's output at the start of step n+1 and then draw that empty
+ * canvas onto itself. The result is a correctly sized, entirely black tile.
+ *
+ * Allocated on first use and then grown, never reallocated, because the callers
+ * run on the main thread inside a render.
  */
-let scratch: HTMLCanvasElement | null = null;
-function scratchCtx(w: number, h: number): CanvasRenderingContext2D | null {
-  if (!scratch) scratch = document.createElement("canvas");
-  if (scratch.width !== w || scratch.height !== h) { scratch.width = w; scratch.height = h; }
-  return scratch.getContext("2d");
+const scratches: HTMLCanvasElement[] = [];
+function stepCanvas(i: number, w: number, h: number): CanvasRenderingContext2D | null {
+  let cv = scratches[i];
+  if (!cv) { cv = document.createElement("canvas"); scratches[i] = cv; }
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  return cv.getContext("2d");
 }
 
 // Thumbnails get their own memo, in their own key space, so an encode made for
@@ -146,22 +160,25 @@ export function thumbnailUrl(cv: HTMLCanvasElement | null, quality: number): str
     return url;
   }
   let src: HTMLCanvasElement = cv;
-  let ok = false;
-  for (const s of steps) {
-    const ctx = scratchCtx(s.w, s.h);
-    // No 2d context means no downscale is available; encode the source as-is,
-    // which is what this did before.
-    if (!ctx) break;
+  let out: HTMLCanvasElement | null = null;
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (!s) break;
+    const ctx = stepCanvas(i, s.w, s.h);
+    const dest = scratches[i];
+    // No 2d context means no downscale is available; leave `out` null so the
+    // source is encoded as-is, which is what this did before.
+    if (!ctx || !dest) break;
     ctx.drawImage(src, 0, 0, s.w, s.h);
-    src = scratch!;
-    ok = true;
+    src = dest;
+    out = dest;
   }
-  if (!ok) {
+  if (!out) {
     const url = cv.toDataURL("image/jpeg", quality);
     byQuality.set(quality, url);
     return url;
   }
-  const url = src.toDataURL("image/jpeg", quality);
+  const url = out.toDataURL("image/jpeg", quality);
   byQuality.set(quality, url);
   return url;
 }
