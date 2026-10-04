@@ -50,6 +50,10 @@ issues, and a short SHA for a commit that reached `main` directly.
 
 ### Bug Fix
 
+- **The footer stops shifting as the per-step timing text changes width**
+  ([#88](https://github.com/corneliusroemer-agent/mosquito-id/pull/88)) — each timing gets a
+  fixed-width slot with tabular figures, so `81` → `144` cannot re-flow the line
+  ([#83](https://github.com/corneliusroemer-agent/mosquito-id/issues/83)). CLS 0.0026 → 0.
 - **The model progress bar no longer reads 100% before the model can run**
   ([#73](https://github.com/corneliusroemer-agent/mosquito-id/pull/73), `3c35106`).
 - **A rejected crop no longer costs a photo its place in the pool** — fixed in
