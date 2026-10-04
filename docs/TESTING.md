@@ -96,10 +96,25 @@ Full reasoning: `docs/CI-TEST-SIGNAL.md`.
 
 ## CI
 
-Two workflows run on every push to `main`:
+Two workflows run on every push to `main`: **`CI`** (actionlint, `tsc --noEmit`, vitest,
+`vite build`, then the tier-1 browser suite) and **`Deploy to GitHub Pages`**. Both are
+expected to be **green on every commit**. A red CI means something is wrong and it gets
+fixed — it is never accepted as background noise.
 
-- **`CI`** — red on every commit, for the reasons above.
-- **`Deploy to GitHub Pages`** — green on every commit.
+**The convention when CI is red and it is not your change:**
 
-They are independent. **Red CI is not evidence that a change broke something**, and a
-green CI would not currently be evidence that it didn't.
+1. **File an issue** with the failing job, the test name, the assertion, and what you
+   verified (does it reproduce on a clean `origin/main`? does it fail in isolation?).
+2. **Flag it to the coordinator immediately** rather than at the end of a run — do not sit
+   on it, and do not treat it as a known condition.
+3. Do **not** merge into a red `main`, and do **not** relax an assertion to get green. A
+   green tick bought by widening a budget or deleting a check is worse than a red run,
+   because it removes the signal.
+
+A wall-clock threshold on shared hardware is a **test-design** problem, not an excuse.
+The previous one was fixed by fixing the measurement (`docs/CI-TEST-SIGNAL.md`), not by
+moving the number.
+
+If the suite is genuinely flaky under load, the answer is to make the assertion robust —
+scope the measurement to the window it claims, or compare against a baseline measured in
+the same run — not to accept intermittent red.
