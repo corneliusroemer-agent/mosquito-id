@@ -19,7 +19,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { renderReprocessButton, sourceFileFor, stalePhotos } from "../src/app/reprocess";
+import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "../src/app/reprocess";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HTML = readFileSync(join(root, "index.html"), "utf8");
@@ -55,6 +55,51 @@ function fakeButton() {
   };
   return view;
 }
+
+describe("what a re-run costs each photo", () => {
+  /**
+   * A photo as the split reads it: the two fields that decide whether the
+   * detector has anything left to do. The canvas is a stand-in - only its
+   * presence is read, never its pixels.
+   */
+  function cropped(box: number[] | null | undefined, hasCanvas = true, name = "p.jpg") {
+    return { name, cropBox: box, cropCanvas: hasCanvas ? { width: 200, height: 200 } : null };
+  }
+
+  it("does not re-detect a photo that already has a crop box", () => {
+    // The whole point of the change. A crop box means detection already ran and
+    // produced this answer; running YOLO over the photo again spends minutes of
+    // phone inference to reach the same box, and replaces a crop the user drew.
+    const { classify, detect } = splitForRerun([cropped([10, 20, 300, 400])]);
+    expect(classify).toHaveLength(1);
+    expect(detect).toHaveLength(0);
+  });
+
+  it("still detects a photo with no crop box at all", () => {
+    // The path that has to keep working: no box means nothing to classify but the
+    // whole frame, and getting a crop is what makes a second view possible.
+    const { classify, detect } = splitForRerun([cropped(null)]);
+    expect(detect).toHaveLength(1);
+    expect(classify).toHaveLength(0);
+    // A box with no canvas is half a crop, and classification from it would fail.
+    expect(splitForRerun([cropped([0, 0, 10, 10], false)]).detect).toHaveLength(1);
+    expect(splitForRerun([cropped([0, 0])]).detect).toHaveLength(1);
+  });
+
+  it("puts each photo in exactly one group, keeping gallery order", () => {
+    const photos = [
+      cropped([0, 0, 5, 5], true, "detected.jpg"),
+      cropped(null, true, "no-box.jpg"),
+      cropped([1, 1, 9, 9], true, "manual.jpg"),
+    ];
+    const { classify, detect } = splitForRerun(photos);
+    expect(classify.map((p) => p.name)).toEqual(["detected.jpg", "manual.jpg"]);
+    expect(detect.map((p) => p.name)).toEqual(["no-box.jpg"]);
+    // No photo is scored twice and none is dropped, so the gallery cannot end up
+    // split across two engines by a photo appearing in both passes.
+    expect(classify.length + detect.length).toBe(photos.length);
+  });
+});
 
 describe("which photos need re-running", () => {
   it("offers the photos scored by an engine that is not the one selected", () => {
@@ -133,9 +178,12 @@ describe("the button", () => {
     expect(btn.disabled).toBe(false);
     expect(btn.attrs["aria-label"]).toContain("3 photos");
     expect(btn.attrs["aria-label"]).toContain("culico-net-cls-v1");
-    // Detection and classification are named because the button re-runs the
-    // whole cascade, not just the classifier the engine dropdown names.
-    expect(btn.attrs["aria-label"]).toContain("detection and classification");
+    // The name says the crops already on screen are what it re-scores. It used to
+    // promise "detection and classification", which was true while a re-run
+    // re-detected every photo - and made the button sound far more expensive than
+    // it now is, against work it no longer does on a photo that already has a crop.
+    expect(btn.attrs["aria-label"]).toContain("from the crops already on screen");
+    expect(btn.attrs["aria-label"]).not.toContain("detection");
   });
 
   it("says nothing about a photo count in its text", () => {
@@ -320,12 +368,45 @@ describe("the button's wiring in main.js", () => {
       MAIN.indexOf("async function reprocessLoadedPhotos"),
       MAIN.indexOf("/** The button's one listener"),
     );
-    expect(fn).toMatch(/const kept = \[\]/);
+    // `kept` starts as the photos that are re-classified in place rather than
+    // re-dropped, and the photos the batch cannot re-drop join it.
+    expect(fn).toMatch(/const kept = \[\.\.\.classify\]/);
     expect(fn).toMatch(/else kept\.push\(p\)/);
     expect(fn).toMatch(/previews = \[\.\.\.kept\]/);
     // And it is not the old event, whose counts downstream reads as deletions.
     expect(fn).toContain('sendLog("reprocess_replaced"');
     expect(fn).not.toContain('sendLog("delete_all_photos"');
+  });
+
+  it("re-classifies the already-cropped photos through the shared serial runner", () => {
+    // Not through a private loop. `reclassifyRunner` is what holds the single
+    // inference slot; a second scheduler beside it would put two runs on one
+    // onnxruntime session, which is the page freeze the runner exists to prevent.
+    const fn = MAIN.slice(
+      MAIN.indexOf("async function reprocessLoadedPhotos"),
+      MAIN.indexOf("/** The button's one listener"),
+    );
+    expect(fn).toMatch(/await reclassifyRunner\.request\(\)/);
+    // Scoped, so the pass does not also re-fuse the photos the batch has just
+    // scored - that would run the classifier a second time over fresh results.
+    expect(fn).toMatch(/rerunPhotos = new Set\(classify\)/);
+    expect(MAIN).toMatch(/!rerunPhotos \|\| rerunPhotos\.has\(p\)/);
+  });
+
+  it("leaves a manual crop alone: nothing in a re-run rewrites the photo's own box", () => {
+    // A crop the user drew is destroyed by re-running detection over the photo.
+    // The fix is that a photo with a box never reaches detection, and the only
+    // things a re-run writes onto a photo are scores and bookkeeping. `cropBox`
+    // and `cropCanvas` are set by `executeCrop` (the user's release) and by
+    // detection inside `classifyImage`, and by neither of the re-run paths.
+    const fn = MAIN.slice(
+      MAIN.indexOf("async function reprocessLoadedPhotos"),
+      MAIN.indexOf("/** The button's one listener"),
+    );
+    expect(fn).not.toMatch(/\.cropBox\s*=/);
+    expect(fn).not.toMatch(/\.cropCanvas\s*=/);
+    const runner = MAIN.slice(MAIN.indexOf("const reclassifyRunner"), MAIN.indexOf("function selectPhoto"));
+    expect(runner).toMatch(/classifyViews\(p, idx, rev, p\.cropCanvas, p\.cropBox\)/);
   });
 });
 

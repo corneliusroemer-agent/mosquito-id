@@ -47,7 +47,7 @@ import { badge, canView, checkLabel, contributesToPool,
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
-import { renderReprocessButton, sourceFileFor, stalePhotos } from "./reprocess";
+import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -665,17 +665,23 @@ function updateReprocessButton() {
 }
 
 /**
- * Re-run every loaded photo through the batch a fresh drop takes.
- *
- * `processFiles` is the whole of it, deliberately: detection, both views, the
- * fusion, the pending bookkeeping and the serial scheduling all come with it,
- * and a parallel path would be a second thing to keep in step with the first.
+ * Re-run every loaded photo against the engine now selected.
  *
  * Every loaded photo is re-run, not only the stale ones: selecting a subset
  * would leave a gallery half on each engine, which is the mixed state this
- * exists to remove. Detection runs again as a consequence, which means a crop
- * box the user drew and refined is replaced by the detector's - there is no undo
- * for it, and the same is true of every fresh drop.
+ * exists to remove. What each one costs is not the same, and the split is what
+ * the button's job requires rather than what a fresh drop happens to do.
+ *
+ * A photo that already carries a crop box - the detector's, or one the user drew
+ * - has everything the classifier needs, so it is re-classified from the box it
+ * has. Re-running the detector over it is minutes of inference for a box that was
+ * already correct, and it replaces a manual crop with the detector's, which is a
+ * crop the user drew being destroyed by an action that never said it would.
+ *
+ * A photo with no box has no crop to classify, and getting one is what makes a
+ * second view possible at all, so those still go through `processFiles`: the
+ * detection, the batch scheduling and the pending bookkeeping all come with it,
+ * because a parallel path would be a second thing to keep in step with that one.
  */
 async function reprocessLoadedPhotos() {
   if (isProcessingBatch || !window.modelsReady || reprocessRunning) return;
@@ -697,25 +703,33 @@ async function reprocessLoadedPhotos() {
   updateReprocessButton();
 
   try {
-    // Every photo that can be re-dropped, and every one that cannot - kept
-    // aside rather than dropped. A photo is un-re-droppable only if it has
-    // neither a File nor decoded pixels, and the batch below empties the whole
-    // gallery, so a photo left out of the drop without being kept would vanish
-    // from the strip with nothing said: a decode that failed, a photo whose
-    // canvas backing store was lost. Both are rare and both are someone's photo.
+    // The two groups, split by the work each one actually needs. Everything the
+    // user asked for is scores from the current engine; a photo that already has
+    // a crop has all it takes to produce them, so it never reaches the detector.
+    const { classify, detect } = splitForRerun(sources);
+
+    // Of the photos that DO need detection, every one that can be re-dropped, and
+    // every one that cannot - kept aside rather than dropped. A photo is
+    // un-re-droppable only if it has neither a File nor decoded pixels, and the
+    // batch below empties the gallery, so a photo left out of the drop without
+    // being kept would vanish from the strip with nothing said: a decode that
+    // failed, a photo whose canvas backing store was lost. Both are rare and both
+    // are someone's photo. `classify` is kept for the same reason and never
+    // needed a File at all: it re-classifies the pixels it is already holding.
     const files = [];
-    const kept = [];
-    for (const p of sources) {
+    const kept = [...classify];
+    for (const p of detect) {
       const f = await sourceFileFor(p);
       if (f) files.push(f);
       else kept.push(p);
     }
-    if (!files.length) {
+    if (!files.length && !classify.length) {
       sendLog("reprocess_impossible", { photos: kept.length });
       return;
     }
-    if (kept.length) {
-      console.warn("Re-running without", kept.length, "photo(s) that have no source image left");
+    if (kept.length > classify.length) {
+      console.warn("Re-running without", kept.length - classify.length,
+        "photo(s) that have no source image left");
     }
 
     // Only the photos the batch is about to replace are marked removed; `kept`
@@ -727,14 +741,30 @@ async function reprocessLoadedPhotos() {
     previews = [...kept];
     includedIndices = new Set(kept.map((_, i) => i));
     selectedIndex = 0;
-    sendLog("reprocess_replaced", { replaced: files.length, kept: kept.length });
+    sendLog("reprocess_replaced", {
+      replaced: files.length, reclassified: classify.length, kept: kept.length,
+    });
     renderThumbnails();
     updatePooling(EMB, previews, includedIndices);
     renderResultsTable(previews);
     // Awaited, so the guard is held until the batch has run: the photos on
     // screen between this point and its end are the batch's, and the button
     // must not offer to replace them again.
-    await processFiles(files);
+    if (files.length) await processFiles(files);
+
+    // The already-cropped photos go through the SAME serial runner the whole-frame
+    // toggle uses, and not a private loop: that runner is what holds the single
+    // inference slot, and a second scheduler beside it would put two runs on one
+    // session - the page freeze it exists to prevent. It reads `due` fresh at the
+    // start of every pass, so the indices it works on are the post-batch ones.
+    if (classify.length) {
+      rerunPhotos = new Set(classify);
+      try {
+        await reclassifyRunner.request();
+      } finally {
+        rerunPhotos = null;
+      }
+    }
   } finally {
     reprocessRunning = false;
     updateReprocessButton();
@@ -1771,9 +1801,16 @@ function wireWholeFrameToggle() {
 const reclassifyRunner = createReclassifyRunner({
   // Photos that were never classified, or whose classification failed, are left
   // alone: there is nothing to re-fuse, and their tile already says why.
+  //
+  // `rerunPhotos` narrows a pass to the photos an engine-switch re-run is
+  // re-classifying. Without it a re-run would be indistinguishable from a
+  // whole-frame toggle and would re-fuse the photos the batch has just scored -
+  // running the classifier a second time over results it produced moments ago.
+  // A whole-frame toggle sets it to null, and so re-classifies the whole gallery.
   due: () => previews
     .map((p, idx) => ({ p, idx }))
-    .filter(({ p }) => p && !p.removed && !p.pending && !p.error && p.fullCanvas),
+    .filter(({ p }) => p && !p.removed && !p.pending && !p.error && p.fullCanvas
+      && (!rerunPhotos || rerunPhotos.has(p))),
   currentSetting: () => includeWholeFrame,
   classify: async ({ p, idx }) => {
     const rev = beginRecompute(p);
@@ -1791,9 +1828,24 @@ const reclassifyRunner = createReclassifyRunner({
     renderActivePhoto();
     updatePooling(EMB, previews, includedIndices);
     renderResultsTable(previews);
-    sendLog("whole_frame_reclassified", { passes: reclassifyRunner.passes, photos: previews.length });
+    // A re-run settles through this same runner, so the event says which of the
+    // two reasons the pass ran - a log line reading "whole frame reclassified"
+    // for a pass the whole-frame setting never changed would be unreadable.
+    if (rerunPhotos) {
+      sendLog("reprocess_reclassified", { passes: reclassifyRunner.passes, photos: rerunPhotos.size });
+    } else {
+      sendLog("whole_frame_reclassified", { passes: reclassifyRunner.passes, photos: previews.length });
+    }
   },
 });
+
+/**
+ * The photos an engine-switch re-run is re-classifying, or null when no re-run
+ * is in progress. Scopes the shared runner to that set, so the batch and the
+ * re-run can use one serial scheduler instead of two racing for the single
+ * inference slot.
+ */
+let rerunPhotos = null;
 
 function selectPhoto(idx) {
   selectedIndex = Math.max(0, Math.min(idx, previews.length - 1));

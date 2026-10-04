@@ -5,10 +5,10 @@
  * Switching the engine changes what the NEXT photo will be scored by and nothing
  * about the photos already loaded, so their scores stay the ones the previous
  * engine gave them while the footer names the new one. Re-running them is not
- * free - detection plus classification over every loaded photo, which is minutes
- * and a lot of battery on the phone this is mostly used on - so it is an
- * explicit action rather than a consequence of the switch, and the button being
- * there is what says the scores are stale.
+ * free - inference over every loaded photo, which is minutes and a lot of
+ * battery on the phone this is mostly used on - so it is an explicit action
+ * rather than a consequence of the switch, and the button being there is what
+ * says the scores are stale.
  *
  * Staleness is read per photo rather than held as one flag, because whether a
  * photo is stale is a fact about that photo: one dropped after the switch was
@@ -43,6 +43,42 @@ export interface ScoredPhoto {
  */
 export function stalePhotos<T extends ScoredPhoto>(photos: readonly T[], engine: string): T[] {
   return photos.filter((p) => p && !p.removed && !!p.scoredBy && p.scoredBy !== engine);
+}
+
+/** What a photo has to offer a re-run: the box it was cropped to, if it has one. */
+export interface CroppedPhoto {
+  /** The box the crop was cut from, in full-frame pixels. Null when there is none. */
+  cropBox?: number[] | null;
+  /** The pixels that box was cut to. Null before the crop is cut, or for a whole photo. */
+  cropCanvas?: unknown | null;
+}
+
+/**
+ * Split the photos a re-run has to cover by the work each one needs.
+ *
+ * The button exists to recompute SCORES against the engine now selected, and
+ * scores come from classification. A photo that already carries a crop box -
+ * whether the detector's or one the user drew - has everything classification
+ * needs, so the detector is pure waste on it: minutes of inference on a phone, and
+ * a manual crop destroyed by its own re-run.
+ *
+ * A photo with no box has nothing to classify but the whole frame, and getting a
+ * crop is what makes a second view possible at all, so those still go through
+ * detection.
+ */
+export function splitForRerun<T extends CroppedPhoto>(
+  photos: readonly T[],
+): { classify: T[]; detect: T[] } {
+  const classify: T[] = [];
+  const detect: T[] = [];
+  for (const p of photos) {
+    // A four-number box and the pixels it produced. A half-set pair - a box with
+    // no canvas because the crop was never cut - cannot be classified from, so it
+    // takes the detection path rather than failing.
+    if (p && Array.isArray(p.cropBox) && p.cropBox.length === 4 && p.cropCanvas) classify.push(p);
+    else detect.push(p);
+  }
+  return { classify, detect };
 }
 
 /** The button's box, as far as drawing it is concerned. */
@@ -97,7 +133,7 @@ export function renderReprocessButton(el: ReprocessButtonView, state: ReprocessB
     return;
   }
   const photos = `${state.stale} photo${state.stale === 1 ? "" : "s"}`;
-  const why = state.blockedBy ?? `Re-run detection and classification on ${photos} with ${state.engineLabel}, the engine now selected`;
+  const why = state.blockedBy ?? `Re-score ${photos} with ${state.engineLabel}, the engine now selected, from the crops already on screen`;
   el.setAttribute("aria-label", why);
   el.setAttribute("title", why);
 }
