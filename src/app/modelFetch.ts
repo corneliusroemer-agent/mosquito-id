@@ -15,10 +15,22 @@ import type { LogFn } from "./telemetry";
 export type OnBytes = (got: number, total: number, done?: boolean) => void;
 
 /**
- * A `.onnx`, with any query string. Never cache-busted - see
- * `versionedModelUrl` for why that one is the exception.
+ * A path ending in `.onnx`. Matched on the pathname alone, never on the whole
+ * URL: a head fetched as `text_embeds.json?src=weights.onnx` is still a head,
+ * and reading a `.onnx` out of its query would leave it un-versioned - the
+ * original bug, one URL shape away.
  */
-const WEIGHTS = /\.onnx(\?|$)/i;
+const WEIGHTS = /\.onnx$/i;
+
+/** The URL's path, with any query and fragment removed. */
+function pathOf(url: string): string {
+  return new URL(url, documentBase()).pathname;
+}
+
+/** What a relative model URL resolves against. */
+function documentBase(): string {
+  return globalThis.location?.href ?? "http://localhost/";
+}
 
 /**
  * The URL to fetch a model artefact from, carrying the build SHA for anything
@@ -43,7 +55,7 @@ const WEIGHTS = /\.onnx(\?|$)/i;
  * was, which is today's behaviour.
  */
 export function versionedModelUrl(url: string, sha: string | undefined = COMMIT_SHA): string {
-  if (WEIGHTS.test(url)) return url;
+  if (WEIGHTS.test(pathOf(url))) return url;
   const trimmed = sha?.trim();
   if (!trimmed) return url;
   const sep = url.includes("?") ? "&" : "?";
@@ -195,11 +207,6 @@ async function dropSuperseded(
     console.warn("CacheStorage prune warning:", err);
     log?.("cache_prune_failed", { url: stored, error: String(err) });
   }
-}
-
-/** What a relative model URL resolves against. */
-function documentBase(): string {
-  return globalThis.location?.href ?? "http://localhost/";
 }
 
 /** A URL with any `?build=` removed, which is what identifies the artefact. */

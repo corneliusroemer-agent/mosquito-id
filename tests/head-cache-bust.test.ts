@@ -203,3 +203,21 @@ describe("fetchWithCache cache keys", () => {
     expect(JSON.parse(new TextDecoder().decode(buf)).version).toBe(`${HEAD}?build=${SHA_A}`);
   });
 });
+
+describe("versionedModelUrl and the weights rule", () => {
+  it("reads the extension from the path, not from the query", () => {
+    // A head fetched as `?src=weights.onnx` is a head. Testing the whole URL for
+    // `.onnx` would leave it un-versioned, which is the original bug.
+    expect(versionedModelUrl(`${HEAD}?src=weights.onnx`, SHA_A)).toBe(
+      `${HEAD}?src=weights.onnx&build=${SHA_A}`,
+    );
+  });
+
+  it("does not mistake a .onnx.json for weights", () => {
+    expect(versionedModelUrl("model.onnx.json", SHA_A)).toBe(`model.onnx.json?build=${SHA_A}`);
+  });
+
+  it("matches the extension case-insensitively, as the host serves it", () => {
+    expect(versionedModelUrl("Weights.ONNX", SHA_A)).toBe("Weights.ONNX");
+  });
+});
