@@ -214,8 +214,11 @@ issues, and a short SHA for a commit that reached `main` directly.
   every results row has a fixed shape (`2d1b4b0`), the score panel stops shifting when a photo
   enters or leaves pending (`48fa707`), cards stop toggling display (`ef3b388`), and both top
   cards are the same height (`edf4e99`).
-- **INT8 removed** — it cost accuracy and a rejected crop its pool place
-  ([#27](https://github.com/corneliusroemer-agent/mosquito-id/pull/27), `194fa53`).
+- **INT8 removed** ([#27](https://github.com/corneliusroemer-agent/mosquito-id/pull/27),
+  `194fa53`) — the engine was a 609 MB download of an H/14 that already ships in fp16, and
+  onnxruntime-web has no INT8 WebGPU kernels, so a session fell back to WASM CPU and ran an
+  order of magnitude slower. Removal was a download-size and speed decision; nothing in the
+  change measured an accuracy loss.
 - **The crop geometry is drawn from one predicate, so both panels always agree** (`e6a5ff6`),
   and a drag is mapped through the cover window before storing (`bed0010`, `c7c93d0`).
 - **The Svelte rewrite parked**; precision work moved out from under it
