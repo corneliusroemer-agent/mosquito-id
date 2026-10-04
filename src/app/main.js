@@ -431,11 +431,21 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   loadedClipEngine = engineKey;
 
   // 3. Load text embeddings for this model
+  //
+  // Through the same cache as the weights, and on the same build-versioned URL
+  // (`versionedModelUrl`). A refitted head is a few hundred KB at a URL that
+  // does not change, so a browser serves the head it fetched before the refit -
+  // the page runs the old `logit_scale` and the new scores, and a deployed fix
+  // looks like it did not land. Keyed by the build, a deploy fetches the new
+  // head; the weights, which are gigabytes and do not change with the build,
+  // keep the cache that makes a second visit bearable.
   const targetEmbedsPath = clipCfg.embedsPath || "text_embeds.json";
   if (!embedsCache[targetEmbedsPath]) {
     setProgress("model", "Loading species embeddings…", null);
-    const r = await fetch(targetEmbedsPath);
-    const data = await r.json();
+    // No SHA argument: the default is `COMMIT_SHA`, the SHA this bundle was
+    // built from, and that is what makes the head's URL change per deploy.
+    const headBuf = await fetchWithCache(targetEmbedsPath, undefined, sendLog);
+    const data = JSON.parse(new TextDecoder().decode(headBuf));
     for (const k of ["species_emb", "nuisance_emb"]) {
       data[k] = Float32Array.from(data[k]);
     }

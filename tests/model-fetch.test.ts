@@ -159,6 +159,7 @@ describe("fetchWithCache", () => {
   let stored: ArrayBuffer | undefined;
   let storedHeaders: Headers | undefined;
   let puts: number;
+  let putKeys: string[];
   let alloc: ReturnType<typeof countLargeAllocations>;
   let copies: ReturnType<typeof countLargeCopies>;
 
@@ -167,6 +168,7 @@ describe("fetchWithCache", () => {
     stored = undefined;
     storedHeaders = undefined;
     puts = 0;
+    putKeys = [];
     alloc = countLargeAllocations();
     // `fetchWithCache` gates on `"caches" in window`, and the browser's window
     // IS the global object - a stub window of its own would report the feature
@@ -175,11 +177,19 @@ describe("fetchWithCache", () => {
     (globalThis as Record<string, unknown>).caches = {
       open: async () => ({
         match: async () => undefined,   // a miss: the network path
-        put: async (_req: unknown, res: Response) => {
+        put: async (req: RequestInfo | URL, res: Response) => {
           puts++;
+          putKeys.push(String(req));
           storedHeaders = res.headers;
           stored = await res.arrayBuffer();
         },
+        // The prune after the put runs against a real Cache, so the stub has to
+        // answer `keys()`. It reports only what this run stored, which is the
+        // common case: one entry, already the current build's, so nothing is
+        // deleted.
+        keys: async () =>
+          putKeys.length ? [new Request(new URL(putKeys[putKeys.length - 1]!, "https://app.test/"))] : [],
+        delete: async () => true,
       }),
     };
   });
