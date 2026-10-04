@@ -5,8 +5,8 @@
 // `DEFAULT_FLOORS.temperature` = 2.5 that is a scale of 40, and the eight nuisance prompts
 // were live evidence the gate could read - no bias coordinate, so `informativeRows` returns
 // all-true for all of them. On real in-domain mosquitoes the nuisance block cleared the
-// 0.05 nuisance floor on 26.9% of photographs, naming `a photograph of a person` on 127 of
-// 2,450. docs/HEADS.md records what was measured; this file pins it.
+// 0.05 nuisance floor on 22.90% of photographs, naming `a photograph of a person` on 101
+// of 2,450. docs/HEADS.md records what was measured; this file pins it.
 //
 // The fixtures are raw 512-wide features and the tests do the app's own L2 normalisation,
 // because B/16 has NO bias coordinate to rebuild: `EMB.dim` is 512, which is the model's
@@ -31,6 +31,8 @@ const SPECIES = HEAD.species;
 const DIM = HEAD.dim;
 const BIAS = HEAD.biasIndex ?? -1;
 const PERSON = "a photograph of a person";
+const BACKGROUND = "a photograph without a mosquito";
+const BG_ROW = HEAD.nuisance!.indexOf(BACKGROUND);
 
 /** clipEmbed for a 512-wide text head: L2-normalise the feature coordinates, no bias. */
 function appEmbed(features: Float32Array): Float32Array {
@@ -124,12 +126,17 @@ describe("the refitted B/16 head's shape is what the app expects", () => {
     expect(Math.min(...norms)).toBeGreaterThan(1);
   });
 
-  it("leaves the nuisance block byte-for-byte as it shipped", () => {
-    // A fitted probe has no training signal for "a photograph of a person" or for
-    // "a photograph of a wall", and inventing those rows would fabricate evidence
-    // the gate then reads. They stay as they shipped - see the gate tests below for
-    // what that does to them.
-    expect(HEAD.nuisance).toEqual([
+  it("keeps the eight shipped nuisance prompts and adds one fitted background row", () => {
+    // The eight zero-shot prompts stay byte-for-byte. A fitted species probe has no
+    // training signal for "a photograph of a hand" or "a photograph of a wall", and
+    // inventing those rows would fabricate evidence the gate then reads.
+    //
+    // The ninth row is not invented: `a photograph without a mosquito` is the label
+    // culico's head already carries for exactly this, fitted here on the 700
+    // detector-verified background crops against in-domain mosquitoes. Without it
+    // the block is eight rows that all move with the species block's uncertainty,
+    // which is how obvious mosquitoes came to be answered with a person.
+    expect(HEAD.nuisance!.slice(0, 8)).toEqual([
       PERSON,
       "a photograph of a hand",
       "a photograph of a wall",
@@ -139,7 +146,27 @@ describe("the refitted B/16 head's shape is what the app expects", () => {
       "a photograph of a plant",
       "a photograph of an empty background",
     ]);
-    for (const row of HEAD.nuisance_emb!) expect(Math.abs(row)).toBeLessThanOrEqual(1);
+    expect(HEAD.nuisance).toHaveLength(9);
+    expect(BG_ROW).toBe(8);
+    expect(HEAD.nuisance_emb).toHaveLength(9 * DIM);
+    for (const row of HEAD.nuisance_emb!.slice(0, 8 * DIM)) {
+      expect(Math.abs(row)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("fits the background row at a norm inside the species rows' range", () => {
+    // It shares one softmax with sixteen species rows, so a norm far outside theirs
+    // would either never win or always win. 20.2 against a 3.6-28.8 range is inside.
+    const norms = SPECIES.map((_, i) => {
+      let s = 0;
+      for (let k = 0; k < DIM; k++) s += HEAD.species_emb![i * DIM + k]! ** 2;
+      return Math.sqrt(s);
+    });
+    let bg = 0;
+    for (let k = 0; k < DIM; k++) bg += HEAD.nuisance_emb![BG_ROW * DIM + k]! ** 2;
+    bg = Math.sqrt(bg);
+    expect(bg).toBeGreaterThan(Math.min(...norms));
+    expect(bg).toBeLessThan(Math.max(...norms));
   });
 });
 
@@ -182,10 +209,15 @@ describe("the app reproduces the probe's own posterior", () => {
 });
 
 describe("B/16 on obvious mosquitoes does not return a nuisance class", () => {
-  // The defect: 26.9% of 2,450 in-corpus test mosquitoes cleared the 0.05 nuisance
-  // floor on the shipped head, and the block's winner was `a photograph of a person`
-  // on 127 of them. Those are the photographs Cornelius photographed a culex
-  // pipiens in, and the app answered them with a person.
+  // The defect: 22.90% of the 2,450 in-corpus test mosquitoes cleared the 0.05
+  // nuisance floor on the shipped head, and the block's winner was
+  // `a photograph of a person` on 101 of them. Those are the photographs Cornelius
+  // photographed a culex pipiens in, and the app answered them with a person.
+  //
+  // 22.90% and 101, measured through the app's own path. An earlier count of 26.9%
+  // and 127 came from a scoring path that applied H/14's per-genus cosine offsets to
+  // B/16, which `cosineOffsetsFor("webgpu-b16")` does not do - the two files in the
+  // change quoted different numbers because one of them was on the wrong path.
 
   it("returns no nuisance verdict on any of the 64 held-out mosquitoes", () => {
     for (let i = 0; i < MOSQUITOES.n; i++) {
@@ -210,7 +242,7 @@ describe("B/16 on obvious mosquitoes does not return a nuisance class", () => {
     // and the floor it is read against is B/16's own 0.20 rather than the 0.05
     // fitted on H/14. Between them, mosquitoes stopped clearing it.
     const floor = floorsFor("webgpu-b16").nuisance;
-    expect(floor).toBe(0.2);
+    expect(floor).toBe(0.3);
     expect(DEFAULT_FLOORS.nuisance).toBe(0.05);
     let worst = 0;
     for (let i = 0; i < MOSQUITOES.n; i++) {
@@ -222,11 +254,11 @@ describe("B/16 on obvious mosquitoes does not return a nuisance class", () => {
     expect(worst).toBeLessThan(floor);
   });
 
-  it("refused 9 of these same 64 photographs before the refit", () => {
+  it("refused 11 of these same photographs before the refit", () => {
     // The defect this fixes, on exactly these fixtures: the shipped text head at its
-    // shipped scale of 40.0 cleared the inherited 0.05 nuisance floor on 9 of these
-    // 64 held-out in-domain mosquitoes, and the refit clears it on none. Over the
-    // full 2,450-row nameable test split the same measurement is 561 -> 137.
+    // shipped scale of 40.0 cleared the inherited 0.05 nuisance floor on 11 of them,
+    // and the refit clears its own floor on none. Over the full 2,450-row nameable
+    // test split the same measurement is 561 -> 20.
     const shipped = JSON.parse(read("../public/text_embeds_b16.shipped.json")) as Record<string, unknown>;
     const SHIPPED = { ...shipped, biasIndex: shipped.bias_index } as unknown as Head;
     expect(SHIPPED.logit_scale).toBeCloseTo(100, 1);
@@ -238,7 +270,7 @@ describe("B/16 on obvious mosquitoes does not return a nuisance class", () => {
       const mass = j.nuP.reduce((a, b) => a + b, 0);
       if (mass >= DEFAULT_FLOORS.nuisance) fired++;
     }
-    expect(fired).toBe(9);
+    expect(fired).toBe(11);
   });
 });
 
@@ -251,28 +283,36 @@ describe("what the refit costs on the negative side, stated rather than hidden",
   // calling it one. These tests pin the direction and the magnitude so the change
   // cannot pass silently.
 
-  it("still reads all eight nuisance rows as evidence", () => {
+  it("reads all nine nuisance rows as evidence", () => {
+    // No bias coordinate, so `informativeRows` is all-true for all nine. That is what
+    // makes the fitted background row load-bearing rather than inert.
     const informative = informativeRows(HEAD, HEAD.nuisance_emb, HEAD.nuisance!.length);
-    expect(informative.filter(Boolean)).toHaveLength(8);
+    expect(informative.filter(Boolean)).toHaveLength(9);
   });
 
-  it("refuses 23 of these same 64 background crops, against 54 before", () => {
-    // The cost of the fix, on exactly these fixtures. Over the full 700 detector-
-    // verified crops the gate's refusal rate falls from 615 to 255 while the
-    // mosquitoes it wrongly refuses fall from 561 to 137. The two move together
-    // because these eight text rows cannot tell a wall from an uncertain mosquito -
-    // their block mass rises exactly when the species block is unsure - so on this
-    // head there is no setting that catches background without also catching
-    // insects. 23 is what the knee is worth, and it is asserted so a later edit
-    // that moves it has to say so.
+  it("refuses all 64 of these same background crops, and names the fitted row on them", () => {
+    // The point of the fitted row. The shipped head refused 54 of these 64 and named
+    // `a photograph of a person` or `a photograph of a wall` on the ones it did;
+    // the refitted head refuses all 64, naming `a photograph without a mosquito`.
+    //
+    // Over the full 700 detector-verified crops, held out BY SOURCE PHOTO - 538
+    // photographs, up to two crops each - the fitted row refuses 97.9% against the
+    // 87.9% the shipped head managed, and loses 0.8% of in-domain mosquitoes against
+    // 22.9%.
     let fired = 0;
+    let named = 0;
     for (let i = 0; i < NEGATIVES.n; i++) {
       const j = softmaxJoint(HEAD, appEmbed(NEGATIVES.at(i)), {
         offsets: cosineOffsetsFor("webgpu-b16"),
       });
-      if (nonMosquitoGate(HEAD, j.adP, j.nuP, floorsFor("webgpu-b16"))) fired++;
+      const hit = nonMosquitoGate(HEAD, j.adP, j.nuP, floorsFor("webgpu-b16"));
+      if (hit) {
+        fired++;
+        if (hit.kind === "nuisance" && hit.name === BACKGROUND) named++;
+      }
     }
-    expect(fired).toBe(23);
+    expect(fired).toBe(NEGATIVES.n);
+    expect(named).toBe(NEGATIVES.n);
   });
 
   it("refuses 9 of the 64 held-out mosquitoes on the shipped head at the shipped floor", () => {
@@ -288,7 +328,7 @@ describe("what the refit costs on the negative side, stated rather than hidden",
       });
       if (j.nuP.reduce((a, b) => a + b, 0) >= DEFAULT_FLOORS.nuisance) fired++;
     }
-    expect(fired).toBe(9);
+    expect(fired).toBe(11);
     let firedNow = 0;
     for (let i = 0; i < MOSQUITOES.n; i++) {
       if (verdict(MOSQUITOES.at(i)).state === "non-mosquito") firedNow++;

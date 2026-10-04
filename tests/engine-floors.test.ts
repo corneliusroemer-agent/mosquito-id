@@ -46,7 +46,7 @@ describe("per-engine floors", () => {
     const f = floorsFor("webgpu-b16");
     expect(f.species).toBe(0.8);
     expect(f.genus).toBe(0.9);
-    expect(f.nuisance).toBe(0.2);
+    expect(f.nuisance).toBe(0.3);
     expect(DEFAULT_FLOORS.nuisance).toBe(0.05);
     // The floor is not the temperature: `logit_scale` must stay equal to it, or the
     // app's softmax stops being the probe's own.

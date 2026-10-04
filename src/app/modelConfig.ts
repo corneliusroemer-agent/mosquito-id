@@ -103,9 +103,9 @@ export function cosineOffsetsFor(engineKey: string): Readonly<Record<string, num
  * floors were fitted on, and it does not meet them on a second corpus. See above.
  *
  * B/16's head was refitted on the same day and by the same route (see
- * docs/HEADS.md), from a zero-shot text head to a 16-way linear probe. Its floors
- * were re-derived from its own selective-accuracy curves on the held-out corpus,
- * fitted on one half and read on the other:
+ * docs/HEADS.md), from a zero-shot text head to a 16-way linear probe plus one fitted
+ * background row. Its floors were re-derived from its own selective-accuracy curves on
+ * the held-out corpus, fitted on one half and read on the other:
  *
  *   species 0.80   half A 91.6% at 33% coverage; half B 90.6% at 31%
  *   genus   0.90   half A 98.1% at 55% coverage; half B 97.8% at 52%
@@ -117,16 +117,21 @@ export function cosineOffsetsFor(engineKey: string): Readonly<Record<string, num
  * `logit_scale` is 2.5 too and the arithmetic requires their ratio to be 1.0.
  *
  * The `nuisance` floor is this engine's own most consequential number, because B/16
- * has no adjacent block: its eight nuisance rows are the gate's ONLY evidence.
- * They are still the zero-shot text prompts, which were never fitted against a
- * mosquito and cannot tell a wall from an uncertain mosquito - so their block mass
- * rises exactly when the species block is unsure. On the shipped head that mass
- * cleared the inherited 0.05 on 22.9% of real in-domain mosquitoes, naming
- * `a photograph of a person` on 127 of 2,450. Raising it to 0.20 cuts that to 5.6%,
- * at the cost of the gate refusing fewer background crops (87.9% -> 36.4%). Both
- * numbers are the honest trade: the gate's negatives and its mosquitoes move
- * together on this head, so it cannot be tuned to catch background without also
- * catching insects. See docs/HEADS.md.
+ * has no adjacent block: its nuisance rows are the gate's ONLY evidence. The block
+ * carries a ninth row, `a photograph without a mosquito`, fitted on the 700
+ * detector-verified background crops against in-domain mosquitoes (see
+ * docs/HEADS.md); the eight above it are still the zero-shot text prompts, which were
+ * never fitted against a mosquito and move with the species block's uncertainty rather
+ * than with the photograph. Raising the floor to 0.30 is what stops those eight from
+ * carrying the gate on their own.
+ *
+ *   floor 0.05   100.0% of 700 negatives refused, 54.0% of 2,450 mosquitoes
+ *   floor 0.20     99.3% of negatives,  6.4% of mosquitoes
+ *   floor 0.30     97.9% of negatives,  0.8% of mosquitoes, every one of them
+ *                 named `a photograph without a mosquito`
+ *   floor 0.60     90.6% of negatives,  0.04% of mosquitoes
+ *
+ * 0.30 is where the fitted row does the work and the text rows stop mattering.
  */
 const ENGINE_FLOORS: Readonly<Record<string, Floors>> = Object.freeze({
   // H/14 is the engine DEFAULT_FLOORS were fitted on, so inheriting them is the
@@ -157,7 +162,7 @@ const ENGINE_FLOORS: Readonly<Record<string, Floors>> = Object.freeze({
     ...DEFAULT_FLOORS,
     species: 0.80,
     genus: 0.90,
-    nuisance: 0.20,
+    nuisance: 0.30,
   }),
 });
 
