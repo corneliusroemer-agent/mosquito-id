@@ -26,13 +26,14 @@ import { pooledPosterior as _pooledPosterior,
          pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { activeGroups, claimSentence, mergeUnresolvable, resolvableGroups, setActiveHead } from "./granularity";
-import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
+import { CACHE_NAME, CLIP_SIZE, CROP_PAD, DET_CONF, DET_SIZE,
          FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, capabilityNote,
          cosineOffsetsFor, floorsFor, resolveModelUrl } from "./modelConfig";
 import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
 import { decodeDets, letterbox, selectDetection } from "./detector";
+import { clipCHW, clipFit } from "./clipInput";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
 import { downloadCSV, renderResultsTable } from "./resultsTable";
@@ -764,31 +765,27 @@ function applyEngineNotices(engineKey) {
 async function clipEmbed(sourceCanvas) {
   const cw = sourceCanvas.width;
   const ch = sourceCanvas.height;
-  const s = CLIP_SIZE / Math.min(cw, ch);
-  const dw = Math.round(cw * s);
-  const dh = Math.round(ch * s);
+  // The long side is scaled to CLIP_SIZE and the rest of the square is margin, so
+  // the classifier sees the whole photo. The short side used to be scaled up and
+  // the overflow centre-cropped away, which silently deleted a quarter of a 4:3
+  // phone photo and half of a 400x200 detector box. Geometry and its rationale
+  // live in clipInput.ts, which the offline feature pipeline has to match.
+  const fit = clipFit(cw, ch);
 
-  const cv = document.createElement("canvas");
-  cv.width = dw;
-  cv.height = dh;
-  const cx = cv.getContext("2d", { willReadFrequently: true });
-  cx.drawImage(sourceCanvas, 0, 0, cw, ch, 0, 0, dw, dh);
-
-  const l = (dw - CLIP_SIZE) >> 1;
-  const t = (dh - CLIP_SIZE) >> 1;
   const cc = document.createElement("canvas");
   cc.width = CLIP_SIZE;
   cc.height = CLIP_SIZE;
-  cc.getContext("2d").drawImage(cv, l, t, CLIP_SIZE, CLIP_SIZE, 0, 0, CLIP_SIZE, CLIP_SIZE);
+  const cx = cc.getContext("2d", { willReadFrequently: true });
+  // Fill first, exactly as `letterbox` does for the detector. Drawn onto a
+  // transparent canvas, drawImage anti-aliases the edge of the photo against
+  // transparent black and leaves a dark ring where the grey should be - and
+  // clipCHW reads RGB without looking at alpha, so the ring survives.
+  cx.fillStyle = "#727272";
+  cx.fillRect(0, 0, CLIP_SIZE, CLIP_SIZE);
+  cx.drawImage(sourceCanvas, 0, 0, cw, ch, fit.ox, fit.oy, fit.dw, fit.dh);
 
-  const d = cc.getContext("2d").getImageData(0, 0, CLIP_SIZE, CLIP_SIZE).data;
-  const n = CLIP_SIZE * CLIP_SIZE;
-  const out = new Float32Array(3 * n);
-  for (let i = 0; i < n; i++) {
-    for (let c = 0; c < 3; c++) {
-      out[c * n + i] = (d[4 * i + c] / 255 - CLIP_MEAN[c]) / CLIP_STD[c];
-    }
-  }
+  const d = cx.getImageData(0, 0, CLIP_SIZE, CLIP_SIZE).data;
+  const out = clipCHW(d, fit);
 
   const inName = sessClip.inputNames[0];
   const res = await sessClip.run({ [inName]: new ort.Tensor("float32", out, [1, 3, CLIP_SIZE, CLIP_SIZE]) });
