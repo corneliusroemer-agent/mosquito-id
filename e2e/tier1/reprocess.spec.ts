@@ -119,6 +119,87 @@ async function loadPhotos(page: Page, names: string[] = THREE): Promise<void> {
   }, { names, engine: TO, from: FROM });
 }
 
+/**
+ * As `loadPhotos`, but the fake detector FINDS a box.
+ *
+ * An all-zero detection tensor makes `selectDetection` find nothing, which is
+ * right for the staleness cases and useless here: every photo then has no crop,
+ * every photo takes the detection path, and a re-run that skipped detection
+ * could not be told apart from one that did not. So the detector answers with a
+ * confident box in the middle of the frame, and the photos end up cropped.
+ *
+ * The tensor is the shipped `[1, 5, 8400]` layout `decodeDets` reads: four box
+ * coordinates in letterboxed pixels plus a confidence per anchor, one anchor
+ * written and the rest left at zero.
+ */
+async function loadPhotosWithDetection(page: Page, names: string[]): Promise<void> {
+  await page.evaluate(async (photos) => {
+    const A = window.__mosqAsync!;
+    const w = window as any;
+
+    w.__detRuns = 0;
+    w.__clipRuns = 0;
+    A.sessDet = {
+      inputNames: ["images"],
+      async run() {
+        w.__detRuns++;
+        const N = 8400;
+        const data = new Float32Array(5 * N);
+        // One anchor, at the centre, in the 640px letterboxed space `letterbox`
+        // reports back as `r`: cx, cy, w, h at offsets 0..3 of row `i`, and the
+        // class score at row 4 - `decodeDets` reads `(4 + c) * N + i`.
+        data[0] = 260; data[N] = 230; data[2 * N] = 380; data[3 * N] = 410;
+        data[4 * N] = 0.9;
+        return { output0: { dims: [1, 5, N], data } };
+      },
+    };
+    // A real species embedding, not a uniform direction. The uniform fake this
+    // file uses elsewhere is deliberate for the staleness cases - any verdict
+    // will do there - but a crop also has to PASS the nuisance gate to stay
+    // cropped, and a direction equidistant from every species loses that gate.
+    // One species' own embedding makes the gate a decision about arithmetic
+    // rather than about the fake.
+    //
+    // `A.embeds.species_emb` is FLATTENED - `populate` runs the nested rows
+    // through `Float32Array.from`, which concatenates them - so the first
+    // species is a slice of it, not an element. Read at call time because the
+    // engine switch rebinds the head and with it the dimension.
+    A.sessClip = {
+      inputNames: ["pixel_values"],
+      async run() {
+        w.__clipRuns++;
+        const dim = A.embeds.dim as number;
+        return { embedding: { dims: [1, dim], data: Float32Array.from(A.embeds.species_emb.slice(0, dim) as Float32Array) } };
+      },
+    };
+    A.clipSessions[photos.engine] = { sess: A.sessClip, ep: "wasm" };
+    A.clipSessions[photos.from] = { sess: A.sessClip, ep: "wasm" };
+
+    const files: File[] = [];
+    for (let i = 0; i < photos.names.length; i++) {
+      const cv = document.createElement("canvas");
+      cv.width = 1200;
+      cv.height = 900;
+      const ctx = cv.getContext("2d")!;
+      ctx.fillStyle = `hsl(${i * 60}, 45%, 55%)`;
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      const blob = await new Promise<Blob | null>((r) => cv.toBlob(r, "image/jpeg", 0.9));
+      files.push(new File([blob!], photos.names[i]!, { type: "image/jpeg" }));
+    }
+    await A.processFiles(files);
+  }, { names, engine: TO, from: FROM });
+}
+
+/** How many times the fake classifier has been asked for an embedding. */
+function clipRuns(page: Page): Promise<number> {
+  return page.evaluate(() => (window as any).__clipRuns ?? 0);
+}
+
+/** The box each photo is currently cropped to, in gallery order. */
+function cropBoxes(page: Page): Promise<unknown[]> {
+  return page.evaluate(() => window.__mosqAsync!.previews.map((p: any) => p.cropBox ?? null));
+}
+
 /** Boot the app, seed the shipped head, and put `names` on screen. */
 async function gallery(page: Page, names: string[] = THREE): Promise<void> {
   await boot(page);
@@ -304,6 +385,80 @@ test.describe("re-running the loaded photos on another engine", () => {
 
     // Nothing is stale any more, so the button withdraws itself.
     await expect(button(page)).toBeHidden();
+    expect(errors(page)).toHaveLength(0);
+  });
+
+  test("a photo that already has a crop is re-scored without being re-detected", async ({ page }) => {
+    // The cost asymmetry, measured. `loadPhotos` with detection that FINDS a box
+    // gives every photo a crop, and a re-run must then classify those crops
+    // rather than run YOLO over photos it has already cropped correctly.
+    await boot(page);
+    await populate(page, []);
+    await ensureTensor(page);
+    await loadPhotosWithDetection(page, THREE);
+    await expect.poll(() => photoCount(page), { timeout: 30_000 }).toBe(3);
+    await settled(page, 3);
+
+    const before = await state(page);
+    expect(before.isCropped, "the photos start with a detector's crop").toEqual([true, true, true]);
+    // Three detections, one per photo, at intake.
+    expect(await detectorRuns(page)).toBe(3);
+    const cropsBefore = await cropBoxes(page);
+
+    await switchEngine(page, TO);
+    await expect(button(page)).toBeVisible();
+    await button(page).click();
+    await settled(page, 3);
+
+    const after = await state(page);
+    expect(after.names).toEqual(THREE);
+    expect(after.scoredBy, "every photo is now scored by the selected engine").toEqual([TO, TO, TO]);
+    expect(after.errored).toBe(0);
+    // The whole point: no detection ran a second time.
+    expect(await detectorRuns(page), "detection re-ran over photos that already had a crop").toBe(3);
+    // And the classifier did run, on every photo - a re-run that skipped both
+    // stages would leave the scores on the old engine.
+    expect(await clipRuns(page)).toBeGreaterThan(3);
+    // Nothing moved: the crop each photo was scored from is the one it keeps.
+    expect(await cropBoxes(page)).toEqual(cropsBefore);
+    await expect(button(page)).toBeHidden();
+    expect(errors(page)).toHaveLength(0);
+  });
+
+  test("a manual crop survives a re-run", async ({ page }) => {
+    // A crop the user drew is their work, and a re-run used to destroy it by
+    // re-detecting over the photo. Here the photo has a crop already, so the
+    // detector is not consulted at all and the drawn box is still the box.
+    await boot(page);
+    await populate(page, []);
+    await ensureTensor(page);
+    await loadPhotosWithDetection(page, ["a_01.jpg"]);
+    await expect.poll(() => photoCount(page), { timeout: 30_000 }).toBe(1);
+    await settled(page, 1);
+
+    // A box of the user's own, nowhere near the detector's, so a re-detect could
+    // not reproduce it by accident.
+    const drawn = [137, 211, 640, 702];
+    await page.evaluate((box) => {
+      const A = window.__mosqAsync!;
+      const p = A.previews[0];
+      p.cropBox = box;
+      const cv = document.createElement("canvas");
+      cv.width = box[2]! - box[0]!;
+      cv.height = box[3]! - box[1]!;
+      p.cropCanvas = cv;
+      p.fullCanvas.getContext("2d")!.drawImage(p.fullCanvas, box[0]!, box[1]!, cv.width, cv.height, 0, 0, cv.width, cv.height);
+    }, drawn);
+    const detsBefore = await detectorRuns(page);
+
+    await switchEngine(page, TO);
+    await expect(button(page)).toBeVisible();
+    await button(page).click();
+    await settled(page, 1);
+
+    expect(await page.evaluate(() => window.__mosqAsync!.previews[0].cropBox), "the drawn box is intact").toEqual(drawn);
+    expect(await detectorRuns(page), "the detector was not consulted over a manual crop").toBe(detsBefore);
+    expect((await state(page)).scoredBy, "the manual crop's photo was re-scored").toEqual([TO]);
     expect(errors(page)).toHaveLength(0);
   });
 

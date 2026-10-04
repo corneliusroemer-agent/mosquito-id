@@ -35,8 +35,37 @@ verdict.
 
 ## What "as if dropped fresh" meant to wire up
 
-`processFiles` IS the fresh-drop entry point, and the whole of the re-run is a
-call to it. Three things about it are not obvious from the name and cost the
+`processFiles` IS the fresh-drop entry point, and the re-run originally was a
+call to it and nothing else — every loaded photo back through detection as well
+as classification, on the reasoning that a re-run should behave as if the photo
+had just been dropped. That is the one decision here that has since been
+reversed, and the rest of this section describes the wiring it produced.
+
+**The button's job is scores, not detections.** What it exists for is that the
+numbers on screen came from an engine other than the one now selected, so it is
+"recompute these scores with the current engine" — not "re-detect the mosquito
+in every photo I already have crops for". A photo that already carries a crop
+box, whether the detector's or one the user drew, has everything the classifier
+needs, so it is re-classified from that box and never reaches the detector. The
+box is left exactly as it was, which is what makes a manual crop survive a
+re-run; under the old behaviour the detector replaced it and there was no undo.
+A photo with no box still takes `processFiles`, because getting a crop is what
+makes a second view possible at all.
+
+Measured per photo, one engine run each: **detection ~408 ms, classification
+~661 ms, crop cut ~1 ms**, and classification runs *twice* per photo when the
+whole-frame view is on. So detection was ~24% of a re-run's inference and
+classification ~76% — skipping it is worth having, and it is not where the app's
+time goes.
+
+The split itself is `splitForRerun` in `src/app/reprocess.ts`, a pure function
+over two fields, so the rule is checkable without a browser or a model. The
+already-cropped photos are re-classified through `reclassifyQueue`'s runner, the
+same one the whole-frame toggle uses, scoped by `rerunPhotos`: that runner is
+what holds the single inference slot, and a second scheduler beside it would put
+two runs on one onnxruntime session — the page freeze it exists to prevent.
+
+Three things about `processFiles` are not obvious from the name and cost the
 wiring most of the thought:
 
 **It takes `File` objects and it PREPENDS.** It cannot be handed the already
