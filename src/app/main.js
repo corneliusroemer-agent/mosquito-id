@@ -48,6 +48,8 @@ import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
 import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
+import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
+         Superseded } from "./photoRecord";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -297,65 +299,7 @@ if (typeof PerformanceObserver === "function") {
   } catch (e) { /* longtask unsupported: ASYNC.longTasks stays 0 */ }
 }
 
-// Take ownership of a photo's scores for a new crop. Bumping the revision is
-// what makes the last release win: every earlier computation still in flight
-// for this photo now holds a revision that no longer matches and is dropped.
-function beginRecompute(p) {
-  p.rev = (p.rev || 0) + 1;
-  p.pending = true;
-  p.error = null;
-  // The agreement on screen described the previous crop's views. It goes with
-  // them, rather than sitting there next to a pending recompute claiming to be
-  // about the crop now being drawn.
-  p.agreement = null;
-  p.viewsLanded = 0;
-  p.viewsTotal = 0;
-  return p.rev;
-}
 
-// A result may be written back only by the computation that still owns the
-// photo: same revision (no newer release), same object still in previews (not
-// deleted, and not replaced by a batch that finished meanwhile), not removed.
-function ownsRecompute(p, idx, rev) {
-  return p.rev === rev && previews[idx] === p && !p.removed;
-}
-
-// Everything a finished computation commits, in one place, so the local and
-// server paths cannot drift apart in what they mark current. The multi-view
-// paths go through applyViews, which layers the per-view bookkeeping on top.
-function commitScores(p, r, engine = currentEngine) {
-  p.scores = r.labels;
-  p.detail = r.detail;
-  p.logits = r.logits;
-  // Which engine these numbers are filed under, so the re-run button can tell a
-  // photo that is current from one still showing another engine's verdict.
-  // Written here and at the batch commit because those are the two places scores
-  // land. Defaulted to the live engine so a caller that has not pinned one - the
-  // single-view paths - cannot forget to say which engine it meant.
-  p.scoredBy = engine;
-  // The adjacent posteriors, index-aligned with EMB.adjacent, so the pooled card
-  // can carry the pool's non-mosquito evidence through its own softmax. Absent
-  // where the scoring path reports none - the server path has no adjacent
-  // classes - and then the pool has no non-mosquito evidence to speak of.
-  p.adP = r.adP || null;
-  // A verdict that claims nothing must not keep the one it had: pooling reads it.
-  p.verdict = r.verdict || null;
-  // The per-class non-mosquito posteriors, for the score panel to name the winner
-  // from. Cleared with the verdict so a stale one cannot outlive the claim.
-  p.adjacentDetail = r.adjacentDetail || null;
-  p.pending = false;
-  p.error = null;
-}
-
-function markComputeFailed(p, err) {
-  p.pending = false;
-  p.error = `Classification failed: ${err && err.message ? err.message : err}`;
-  sendLog("crop_failed", { name: p.name, error: String(err) });
-}
-
-// Thrown when a release is overtaken before its work starts, so the catch block
-// can tell "nothing to do" from "the model failed".
-class Superseded extends Error {}
 
 
 
@@ -1431,7 +1375,7 @@ async function processFiles(fileList) {
       }
     } catch (err) {
       // One unreadable photo must not take the batch down with it.
-      if (slots[i].pending) markComputeFailed(slots[i], err);
+      if (slots[i].pending) markComputeFailed(slots[i], err, sendLog);
       else slots[i].error = `Analysis failed: ${err.message || err}`;
       console.error("Error processing", slot.name, err);
     }
@@ -1904,9 +1848,9 @@ const reclassifyRunner = createReclassifyRunner({
     try {
       await classifyViews(p, previews.indexOf(p), rev, p.cropCanvas, p.cropBox);
     } catch (err) {
-      if (err instanceof Superseded || !ownsRecompute(p, previews.indexOf(p), rev)) return;
+      if (err instanceof Superseded || !ownsRecompute(p, previews, previews.indexOf(p), rev)) return;
       console.error("Reclassification failed:", err);
-      markComputeFailed(p, err);
+      markComputeFailed(p, err, sendLog);
     }
   },
   onSettled: () => {
@@ -2434,11 +2378,11 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
 
   for (const view of views) {
     await afterNextPaint();
-    if (!ownsRecompute(p, idx, rev)) { dropped = true; break; }
+    if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
     const v = engine === "server-gpu"
       ? await classifyViewServer(p, view.box)
       : await classifyViewLocal(view.canvas, engine);
-    if (!ownsRecompute(p, idx, rev)) { dropped = true; break; }
+    if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
     landed.push(v);
     // Paint what is known so far. The fused verdict is recomputed from the views
     // that have landed, so the first view's paint is that view's own softmax
@@ -2601,12 +2545,12 @@ async function executeCrop(p, idx, cropBox, t0) {
     rec.scoresMs = Math.round(performance.now() - started);
     rec.topSpecies = Object.keys(p.scores)[0];
   } catch (err) {
-    if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) {
+    if (err instanceof Superseded || !ownsRecompute(p, previews, idx, rev)) {
       rec.dropped = true;
       return;
     }
     console.error("Crop classification failed:", err);
-    markComputeFailed(p, err);
+    markComputeFailed(p, err, sendLog);
     p.status = `manual crop: ${cw}x${ch}px · analysis failed`;
     rec.failed = p.error;
     rec.scoresMs = Math.round(performance.now() - started);
@@ -2689,12 +2633,12 @@ async function revertToFullPhoto(idx) {
     rec.scoresMs = Math.round(performance.now() - started);
     rec.topSpecies = Object.keys(p.scores)[0];
   } catch (err) {
-    if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) {
+    if (err instanceof Superseded || !ownsRecompute(p, previews, idx, rev)) {
       rec.dropped = true;
       return;
     }
     console.error("Revert classification failed:", err);
-    markComputeFailed(p, err);
+    markComputeFailed(p, err, sendLog);
     p.status = "manual full photo · analysis failed";
     rec.failed = p.error;
     rec.scoresMs = Math.round(performance.now() - started);
