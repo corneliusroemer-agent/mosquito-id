@@ -49,6 +49,7 @@ import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
 import { createReclassifyRunner } from "./reclassifyQueue";
 import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
 import { embedCanvas as _embedCanvas } from "./embedding";
+import { isUsableIntermediate } from "./downscale";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
          Superseded } from "./photoRecord";
 import { classifyCanvasServer as _classifyCanvasServer,
@@ -822,8 +823,15 @@ function applyEngineNotices(engineKey) {
 }
 
 
-async function clipEmbed(sourceCanvas) {
-  return _embedCanvas(sourceCanvas, sessClip, EMB, (data, dims) => new ort.Tensor("float32", data, dims));
+// `preScaled`, when given, is a smaller copy of `sourceCanvas` at the same
+// aspect ratio - in practice the detector's own unpadded input. Scaling that
+// instead of the photograph reads ~0.3 MP rather than 12-50 MP, which is the
+// whole of the cost of this step. It is refused whenever it would not be the
+// same picture, so a caller that passes the wrong canvas gets the direct read
+// rather than a stretched or enlarged embedding.
+async function clipEmbed(sourceCanvas, preScaled) {
+  const src = preScaled && isUsableIntermediate(preScaled, sourceCanvas, CLIP_SIZE) ? preScaled : sourceCanvas;
+  return _embedCanvas(src, sessClip, EMB, (data, dims) => new ort.Tensor("float32", data, dims));
 }
 
 // Temperature 2.5, applied by dividing the logit scale. Measured on the 112-image
@@ -1024,7 +1032,9 @@ async function classifyImage(imgBitmap, filename) {
   // posterior is ever derived from zero views. The crop is already scored above,
   // so only the whole frame is left to decide here.
   if (viewKinds(Boolean(cropView), includeWholeFrame).includes("whole")) {
-    const wholeEmb = await clipEmbed(fullCv);
+    // `lb.content` is the photograph already resampled for the detector, so
+    // this reads ~0.3 MP rather than reading the 12-50 MP frame a second time.
+    const wholeEmb = await clipEmbed(fullCv, lb.content);
     const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(engine) });
     views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
                  adP: wholeJ.adP, scale: localViewScale() });

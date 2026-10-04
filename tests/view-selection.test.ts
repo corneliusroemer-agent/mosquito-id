@@ -265,7 +265,10 @@ describe("every classify path asks the same question", () => {
     // no model inference, not merely no weight in the sum.
     const src = MAIN.slice(MAIN.indexOf("async function classifyImage"));
     const guard = src.slice(0, src.indexOf("const clipTime"));
-    expect(guard).toMatch(/viewKinds\([^;]*\.includes\("whole"\)\s*\)[\s\S]*clipEmbed\(fullCv\)/);
+    // The second argument is part of what has to stay true: it is the detector's
+    // own downscaled copy of the photograph, so the whole-frame embedding reads
+    // ~0.3 MP rather than reading the full-resolution frame a second time.
+    expect(guard).toMatch(/viewKinds\([^;]*\.includes\("whole"\)\s*\)[\s\S]*clipEmbed\(fullCv,\s*lb\.content\)/);
   });
 
   it("re-classifies the photos already on screen when the setting changes", () => {
