@@ -129,6 +129,8 @@ interface CropReading {
   name: string;
   detail: Record<string, number>;
   adP: number[] | null;
+  /** Views the pass was asked for, written by `applyViews` before `fuseViews` runs. */
+  viewsTotal: number;
 }
 
 /**
@@ -151,8 +153,27 @@ interface CropReading {
  * `max(spP) = max(detail) * (1 - sum(adP))` exactly - checked to 1e-12 against
  * the shipped head across `lean` 0, 1.5 and 3 and five hash seeds. `adP` is on
  * the photo record (`commitScores` files it), so this costs no production code.
+ *
+ * ONE VIEW ONLY. On a pooled record `detail` is the fused posterior, so this
+ * recovers the FUSED joint top, not the crop view's joint top that the router
+ * conditional actually compares - a different quantity, and no rescaling gets
+ * from one to the other, because the pool is a log-linear combination and is not
+ * invertible. Measured on this file's own fixtures: 14 of 14 two-view rows wrong,
+ * errors to 0.37, and 9 of 14 disagree about the 0.80 threshold itself. The
+ * precondition is asserted here rather than stated in prose, because the obvious
+ * refactor - reading a post-toggle score instead of a crop-only one - would
+ * otherwise leave a guard that fails about two thirds of the time for reasons
+ * that read as a drifted fixture.
  */
 function jointTopPosterior(p: CropReading): number {
+  expect(
+    p.viewsTotal,
+    `${p.name}: jointTopPosterior recovers the CROP view's joint posterior, which is ` +
+      "only what fuseViews' router conditional compares when a single view was " +
+      `pooled. This reading came from ${p.viewsTotal} views, so it is the fused ` +
+      "posterior and the router never read it. Read the score with the whole-frame " +
+      "toggle off, or use the fused posterior directly.",
+  ).toBe(1);
   const adjacentMass = (p.adP ?? []).reduce((a, b) => a + b, 0);
   return Math.max(...Object.values(p.detail)) * (1 - adjacentMass);
 }
@@ -375,12 +396,17 @@ test.describe("the whole-frame toggle moves the scores", () => {
     // Not vacuous: the whole frame WAS classified and its answer discarded.
     // `viewsTotal` is the count of views the pass was asked for, written by
     // `applyViews` before `fuseViews` runs, so this establishes that a second
-    // view was scored and not that it was pooled - the pooling half is what the
-    // sub-1e-12 assertion below pins, and it pins it tautologically on this
-    // branch, because the router returns the crop's own softmax and the number
-    // cannot move. `fuseViews`'s `nViews` is the direct signal and it is not on
-    // the photo record; surfacing it is a `src/` change, so it is not asserted
-    // here.
+    // view was scored and not that it was pooled - it does not establish the
+    // pooling was suppressed. `fuseViews`'s `nViews` is the direct signal and it
+    // is not on the photo record; surfacing it is a `src/` change, so it is not
+    // asserted here.
+    //
+    // That is also why there is no "the scores did not move" assertion here. On
+    // this branch `fuseViews` returns the crop's own softmax, so
+    // `cropOnly.detail` and `both.detail` being identical is a property of the
+    // arithmetic rather than of the app, and an assertion comparing them cannot
+    // fail. The verdict and agreement assertions below are kept because they do
+    // read `fuseViews`'s own output rather than restating the posterior.
     expect(
       both.every((p) => p.viewsTotal === 2),
       "the whole frame was never classified, so the router cannot have suppressed it",
@@ -388,11 +414,6 @@ test.describe("the whole-frame toggle moves the scores", () => {
 
     for (const c of cropOnly) {
       const b = both.find((p) => p.name === c.name)!;
-      expect(
-        biggestScoreMove(c.detail, b.detail),
-        `${c.name}: the crop was above CROP_ONLY_MAX_POSTERIOR, so this run pooled rather ` +
-          "than taking the router's branch",
-      ).toBeLessThan(1e-12);
       expect(b.verdict, `${c.name}: the verdict moved on a branch that must not move it`)
         .toEqual(c.verdict);
       // And no agreement is reported, because `viewAgreement` is computed over
