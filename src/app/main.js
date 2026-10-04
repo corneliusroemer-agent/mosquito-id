@@ -739,6 +739,28 @@ async function reprocessLoadedPhotos() {
     // length, which is the same arithmetic a drop over a populated gallery does.
     previews.forEach((p) => { if (!kept.includes(p)) p.removed = true; });
     previews = [...kept];
+
+    // The already-cropped photos are marked pending for the whole re-run, not
+    // from when the classify pass reaches them. Their scores are the PREVIOUS
+    // engine's until that pass lands, and `updatePooling` runs between here and
+    // there - twice, once now and once per batch slot - so leaving them
+    // settled would pool old-engine verdicts together with new ones for the
+    // duration. That is the mixed gallery the button exists to remove, and it is
+    // invisible: a pending photo is simply out of the pool. Inclusion is by
+    // index and sticky, so it comes back when the pass settles them.
+    //
+    // `beginRecompute` marks them again on the way in. An error is cleared by the
+    // runner's `due`, which does not consult one for a re-run's own photos - a
+    // user pressing the button after a failure is asking for that photo to be
+    // retried, and the runner's standing rule is that a photo with an error has
+    // nothing to re-fuse.
+    //
+    // `scoredBy` is deliberately left alone. Clearing it would make the photo
+    // look current - so a press that failed to reach it withdraws the button and
+    // the stale scores stay on screen under a new engine's name, which is the one
+    // outcome worse than a button that offers again.
+    for (const p of classify) p.pending = true;
+
     includedIndices = new Set(kept.map((_, i) => i));
     selectedIndex = 0;
     sendLog("reprocess_replaced", {
@@ -1819,17 +1841,26 @@ const reclassifyRunner = createReclassifyRunner({
   // running the classifier a second time over results it produced moments ago.
   // A whole-frame toggle sets it to null, and so re-classifies the whole gallery.
   due: () => previews
-    .map((p, idx) => ({ p, idx }))
-    .filter(({ p }) => p && !p.removed && !p.pending && !p.error && p.fullCanvas
-      && (!rerunPhotos || rerunPhotos.has(p))),
+    .filter((p) => {
+      if (!p || p.removed || !p.fullCanvas) return false;
+      if (rerunPhotos) return rerunPhotos.has(p);
+      return !p.pending && !p.error;
+    }),
   currentSetting: () => includeWholeFrame,
-  classify: async ({ p, idx }) => {
+  classify: async (p) => {
+    // The index is looked up HERE, not read from `due`'s snapshot. A pass is
+    // seconds long and the strip's delete button stays live throughout it, and
+    // deleting one photo shifts every later one down - so a snapshotted index is
+    // stale for the rest of the pass and `ownsRecompute`'s `previews[idx] === p`
+    // drops the result of every photo behind the deleted one, leaving each stuck
+    // on the `pending` that `beginRecompute` set. The batch path has always
+    // resolved by `indexOf` for exactly this reason.
     const rev = beginRecompute(p);
     renderThumbnails();
     try {
-      await classifyViews(p, idx, rev, p.cropCanvas, p.cropBox);
+      await classifyViews(p, previews.indexOf(p), rev, p.cropCanvas, p.cropBox);
     } catch (err) {
-      if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) return;
+      if (err instanceof Superseded || !ownsRecompute(p, previews.indexOf(p), rev)) return;
       console.error("Reclassification failed:", err);
       markComputeFailed(p, err);
     }
@@ -2486,6 +2517,8 @@ async function executeCrop(p, idx, cropBox, t0) {
   p.status = `manual crop: ${cw}x${ch}px`;
   p.is_cropped = true;
   p.manual_full_photo = false;
+  // Drawing a new crop is the opposite of giving the old one up.
+  p.revertedToFull = false;
   p.crop_rejected = false;
 
   renderThumbnails();
@@ -2571,6 +2604,12 @@ async function revertToFullPhoto(idx) {
   p.status = "manual full photo";
   p.is_cropped = false;
   p.manual_full_photo = true;
+  // The user gave this photo up on its crop, which is a decision about a photo
+  // that HAD one - and nothing else in the app records that. Without it the box
+  // is simply null, indistinguishable from the detector having found nothing,
+  // and an engine-switch re-run re-detects over the photo and takes the
+  // decision back with no undo. `executeCrop` clears it.
+  p.revertedToFull = true;
   p.crop_rejected = false;
 
   renderThumbnails();

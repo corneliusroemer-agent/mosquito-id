@@ -52,6 +52,30 @@ re-run; under the old behaviour the detector replaced it and there was no undo.
 A photo with no box still takes `processFiles`, because getting a crop is what
 makes a second view possible at all.
 
+Two things follow from keeping those photos in the gallery rather than emptying
+it, and both are load-bearing:
+
+- **They are marked pending for the whole re-run**, not from when the classify
+  pass reaches them. Their scores are the previous engine's until it lands, and
+  `updatePooling` runs in between, so leaving them settled would pool two
+  engines' verdicts — the mixed gallery this button exists to remove, and an
+  invisible one, since a pending photo is simply out of the pool. Inclusion is
+  by index and sticky, so they come back when the pass settles them. `scoredBy`
+  is deliberately *not* cleared: a press that failed to reach a photo has to
+  leave the button offering again rather than withdraw over stale scores.
+- **A photo whose earlier classification failed is no longer stranded.** The
+  runner skips photos with an `error` on a whole-frame toggle, because there is
+  nothing there to re-fuse. It does not for a re-run's own photos: the user
+  pressing the button after a failure is asking for that photo to be retried,
+  and `due` is scoped to them.
+
+A photo the user **reverted to the whole frame** is on the classify side too,
+under its own `revertedToFull` flag. `revertToFullPhoto` nulls the box, which on
+the box alone is indistinguishable from the detector having found nothing — and
+would send the photo back to detection, silently taking back a decision the user
+made. `manual_full_photo` does not separate them, because the batch sets it on
+both.
+
 Measured per photo, one engine run each: **detection ~408 ms, classification
 ~661 ms, crop cut ~1 ms**, and classification runs *twice* per photo when the
 whole-frame view is on. So detection was ~24% of a re-run's inference and
@@ -69,23 +93,26 @@ Three things about `processFiles` are not obvious from the name and cost the
 wiring most of the thought:
 
 **It takes `File` objects and it PREPENDS.** It cannot be handed the already
-loaded photos, and it will not replace them. So the re-run empties the gallery
-first — the same emptying `deleteAllPhotos` does, and for the same reason: a
-`removed` mark makes any inference still in flight for a photo drop its result
-instead of writing into a slot that has left `previews` — and then calls
-`processFiles` with the photos' own files. Every loaded photo is re-run, not only
-the stale ones: selecting a subset would leave a gallery half on each engine,
-which is the mixed state the button exists to remove.
+loaded photos, and it will not replace them. So for the photos that need
+detection the re-run marks them removed — the same mark `deleteAllPhotos` makes,
+and for the same reason: it makes any inference still in flight for a photo drop
+its result instead of writing into a slot that has left `previews` — and then
+calls `processFiles` with their own files. The already-cropped photos are kept in
+the gallery and re-classified in place. Every loaded photo is re-run, not only the
+stale ones: selecting a subset would leave a gallery half on each engine, which is
+the mixed state the button exists to remove.
 
 **It releases the slot's `File`.** `commitBatchSlot` used to do
 `slot.file = undefined` alongside `slot.bitmap = undefined`. Only the bitmap goes
-now, because a re-run is a re-drop and releasing the File would make every re-run
-re-encode the photo's own canvas — a second generation of JPEG — instead of
-feeding the batch the bytes that were dropped. `sourceFileFor` in
+now, because a re-run re-drops the photo that needs detection and releasing the
+File would make it re-encode the photo's own canvas — a second generation of
+JPEG — instead of feeding the batch the bytes that were dropped. `sourceFileFor` in
 `src/app/reprocess.ts` keeps the canvas fallback for a photo that never had a
 File.
 
-What retaining it costs is bounded but not zero, and not for every intake. A
+What retaining it costs is bounded but not zero, and not for every intake. It
+applies only to the photos a re-run detects again; an already-cropped one never
+asks for its bytes back, since it is re-classified from the canvas it holds. A
 dropped or picked file is a reference to bytes the browser holds outside its
 heap. A **zip entry**, a **clipboard paste** and a **sample fetch** each build
 their File from an in-memory Blob, so a session that keeps those photos on screen
