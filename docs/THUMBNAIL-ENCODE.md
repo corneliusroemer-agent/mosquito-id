@@ -119,3 +119,43 @@ node bench/thumb.mjs     # OUT=/tmp/run.json
 `bench/thumb.mjs` wraps `toDataURL`, `drawImage`, `getImageData`, `createImageBitmap`
 and the two inference sessions at runtime, and captures every tile `src`
 assignment the app makes. It modifies nothing in `src/`.
+
+## Review findings, and what was done about them
+
+An adversarial review was run against this change. Its findings and the
+responses:
+
+**`imageSmoothingQuality` is left at the default `"low"`.** The review reported
+that forcing `"high"` was "strictly better and smaller" (PSNR@192 min
+31.81 → 35.34 dB, worst-case max-abs error 101 → 53). **Re-measured and not
+reproduced.** Rendering both arms from the same full-res decode over all 30
+photos:
+
+| | min PSNR @1× | median @1× | mean @1× | min PSNR @3× | median @3× | worst max-diff |
+|---|---|---|---|---|---|---|
+| `low` (default) | 27.97 | **46.72** | **44.56** | 30.09 | **40.86** | **156** |
+| `high` | **28.42** | 46.09 | 44.30 | **31.27** | 40.58 | **93** |
+
+`high` improves the *worst case* (max per-pixel error 156 → 93 at 3×) and the
+minimum PSNR, and slightly lowers the median and the mean. It is a wash, not the
+clear win reported, so it is not applied — a change to visible output needs a
+demonstrated benefit, and there isn't one.
+
+**A black tile could pass the test suite.** Correct, and the worst of the
+findings: the geometry tests never called `thumbnailUrl`, so the black-tile
+regression passed all fourteen. Fixed by `tests/thumbnail-url.test.ts`, which
+drives `thumbnailUrl` over a fake canvas that clears on a `width`/`height`
+assignment. Verified by reintroducing the shared-scratch bug — two of the eight
+tests fail, and pass again when it is reverted.
+
+**A stale thumbnail could be served after an in-place repaint.** The memo is
+keyed on canvas identity, so a canvas mutated in place would serve a stale
+encode. Not reachable in `main.js`: every canvas is drawn once at creation and
+only read afterwards, and both `p.cropCanvas = …` assignments replace the canvas
+rather than repaint it. Left as is, with the structural caveat already stated in
+the file's header.
+
+**The 1024 px intermediate is unmeasured on real panoramas.** The corpus has none.
+The skip branch (taken when the intermediate would leave under 252 px on the short
+edge, as on a 16384×600 panorama) is exercised only by a synthetic checkerboard.
+Reasoned and unit-tested, not measured at the pixel level on a real panorama.
