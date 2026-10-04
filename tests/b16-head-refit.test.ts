@@ -275,6 +275,27 @@ describe("what the refit costs on the negative side, stated rather than hidden",
     expect(fired).toBe(23);
   });
 
+  it("refuses 9 of the 64 held-out mosquitoes on the shipped head at the shipped floor", () => {
+    // The other half of the decomposition, pinned. On these same 64 fixtures the
+    // shipped text head at its shipped scale of 40.0 clears the inherited 0.05 floor
+    // on 9 photographs; the refit clears this engine's 0.20 on none.
+    const shipped = JSON.parse(read("../public/text_embeds_b16.shipped.json")) as Record<string, unknown>;
+    const SHIPPED = { ...shipped, biasIndex: shipped.bias_index } as unknown as Head;
+    let fired = 0;
+    for (let i = 0; i < MOSQUITOES.n; i++) {
+      const j = softmaxJoint(SHIPPED, appEmbed(MOSQUITOES.at(i)), {
+        offsets: cosineOffsetsFor("webgpu-b16"),
+      });
+      if (j.nuP.reduce((a, b) => a + b, 0) >= DEFAULT_FLOORS.nuisance) fired++;
+    }
+    expect(fired).toBe(9);
+    let firedNow = 0;
+    for (let i = 0; i < MOSQUITOES.n; i++) {
+      if (verdict(MOSQUITOES.at(i)).state === "non-mosquito") firedNow++;
+    }
+    expect(firedNow).toBe(0);
+  });
+
   it("keeps the nuisance floor on this engine only", () => {
     // The other two engines keep the shipped 0.05. A floor is an absolute threshold
     // on a posterior, so raising a global default to fix one engine would impose a
