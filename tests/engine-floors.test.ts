@@ -1,12 +1,15 @@
-// Which floors each engine is scored at, and why culico is not scored at the
-// shipped ones.
+// Which floors each engine is scored at, and why two engines are not scored at
+// the shipped ones.
 //
 // The floors are absolute thresholds on a posterior, so inheriting one across
-// engines is a claim the inheriting engine has never been tested for. culico's
-// head was refitted on 2026-10-04 (docs/HEADS.md) and is a trained probe whose
-// posterior is far sharper than the text head DEFAULT_FLOORS were fitted on; at
-// the shipped 0.373 it clears a species floor on 70% of in-corpus photographs at
-// 72% accuracy, against the ~88% the threshold was chosen to deliver.
+// engines is a claim the inheriting engine has never been tested for. Two heads were
+// refitted from zero-shot text heads to trained probes on 2026-10-04 (docs/HEADS.md),
+// and both produce posteriors DEFAULT_FLOORS was not fitted on.
+//
+// culico at the shipped 0.373 species floor clears on 70% of in-corpus photographs
+// at 72% accuracy, against the ~88% the threshold was chosen to deliver. B/16 has the
+// sharper problem that its nuisance floor governs its non-mosquito gate outright,
+// because it carries no adjacent block.
 //
 // The values were fitted on one half of a held-out corpus and read on the other,
 // then checked against the corpus the head was fitted on. This file pins the
@@ -24,15 +27,30 @@ const raw = JSON.parse(readFileSync(join(here, "..", "public", "text_embeds_culi
 const CULICO = { ...raw, biasIndex: raw.bias_index } as unknown as Head;
 
 describe("per-engine floors", () => {
-  it("leaves every other engine on the shipped floors", () => {
+  it("leaves the engines with no override on the shipped floors", () => {
     for (const key of Object.keys(WEBGPU_MODELS)) {
-      // culico and H/14 both carry an entry of their own; see below and
-      // modelConfig.ts. Neither may leak to the third engine.
-      if (key === "webgpu-culico" || key === "webgpu-fp16") continue;
+      // culico, H/14 and B/16 each carry an entry of their own; see below and
+      // modelConfig.ts. None may leak to an engine that has no entry.
+      if (key === "webgpu-culico" || key === "webgpu-fp16" || key === "webgpu-b16") continue;
       expect(floorsFor(key), key).toBe(DEFAULT_FLOORS);
     }
     expect(floorsFor("server-gpu")).toBe(DEFAULT_FLOORS);
     expect(floorsFor("an-engine-that-does-not-exist")).toBe(DEFAULT_FLOORS);
+  });
+
+  it("scores B/16 at floors fitted against its own posterior, including a nuisance floor", () => {
+    // B/16's head was refitted on 2026-10-04 (docs/HEADS.md). Its `nuisance` floor is
+    // the one that matters most: B/16 carries no adjacent block, so those eight rows
+    // are the gate's only evidence, and the shipped 0.05 was fitted on H/14. Every
+    // other engine keeps 0.05 - a global default is not widened to fix one engine.
+    const f = floorsFor("webgpu-b16");
+    expect(f.species).toBe(0.8);
+    expect(f.genus).toBe(0.9);
+    expect(f.nuisance).toBe(0.2);
+    expect(DEFAULT_FLOORS.nuisance).toBe(0.05);
+    // The floor is not the temperature: `logit_scale` must stay equal to it, or the
+    // app's softmax stops being the probe's own.
+    expect(f.temperature).toBe(DEFAULT_FLOORS.temperature);
   });
 
   it("scores culico at its own, higher, floors", () => {
