@@ -80,7 +80,7 @@ describe("toggling the whole-frame view moves the fused posterior", () => {
   it("lands nearer the crop than the whole frame, on a disagreement", () => {
     // Direction, and the reason the ordering of the two views matters: `viewKinds`
     // puts the crop first because the nuisance gate is a statement about the
-    // crop. Pooled, the crop's 0.7 has to still be the stronger of the two.
+    // crop. Pooled, the crop's 0.9 has to still be the stronger of the two.
     const c = crop();
     const w = whole();
     const fused = fuseViews(head, [c, w])!;
@@ -91,7 +91,7 @@ describe("toggling the whole-frame view moves the fused posterior", () => {
     // which is what "the second view was pooled in" means from the outside. The
     // species the two views DISAGREE about is the one that moves most, so it is
     // the one worth pinning; a species both views rate alike barely moves, and a
-    // regression that pooled the crop with itself would leave this at 0.7.
+    // regression that pooled the crop with itself would leave this at 0.9.
     expect(got).toBeLessThan(c.spP[i]!);
     expect(got).toBeGreaterThan(w.spP[i]!);
 

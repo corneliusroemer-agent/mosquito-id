@@ -20,10 +20,21 @@ import type { Page } from "@playwright/test";
  * pool. That is the whole difference from the freeze spec, and it is what makes
  * the assertions below able to fail.
  *
+ * Keyed on the pixels ALONE it is not enough. `fuseViews` routes an unconfident
+ * crop (`CROP_ONLY_MAX_POSTERIOR`) to a crop-only verdict, so a fake that leans
+ * on no species row leaves the crop near-flat, the router fires, the whole frame
+ * is never pooled, and "the toggle changed nothing" is the router working rather
+ * than a fusion bug - which is how two of the specs below failed the moment the
+ * router landed. The fake therefore leans on a species row chosen by the hash,
+ * which keeps the views genuinely different AND puts the crop above the
+ * threshold. `expectConfidentCrop` asserts that, so the fixture cannot quietly
+ * drift back under the router.
+ *
  * The model is still not downloaded: the fake replaces the ONNX session, so
  * `softmaxJoint`, `fuseViews`, `viewKinds`, `commitScores` and every render run
  * for real against the shipped head.
  */
+import { CROP_ONLY_MAX_POSTERIOR } from "../../src/confidence/fuseViews";
 
 /** Two photos, both cropped, so each offers two views and the toggle can bite. */
 const TWO: { name: string; state: "species" }[] = [
@@ -35,17 +46,29 @@ const TWO: { name: string; state: "species" }[] = [
  * Install a classifier whose answer depends on the picture it was given.
  *
  * `run` receives the normalised tensor for one view. A cheap FNV-1a over a
- * strided sample of it seeds a direction in the head's dimension, so two views
- * of one photo land on different directions with overwhelming probability and
- * the fused posterior differs from either view's own. The full tensor is walked
- * at a stride rather than hashed whole because a view is 150528 floats and this
- * runs on every view of every photo in the pass.
+ * strided sample of it picks a species row out of the SHIPPED head and seeds a
+ * direction from it, so two views of one photo land on different rows with
+ * overwhelming probability and the fused posterior differs from either view's
+ * own. The full tensor is walked at a stride rather than hashed whole because a
+ * view is 150528 floats and this runs on every view of every photo in the pass.
+ *
+ * The species row matters as much as the pixel key. A direction that leans on no
+ * row scores every species at the same near-zero cosine, `softmaxJoint` returns
+ * an almost flat posterior, and `fuseViews` then routes the photo to its crop
+ * alone - `CROP_ONLY_MAX_POSTERIOR` - without ever pooling the whole frame. The
+ * specs here are about pooling, so the fake has to be confident enough to reach
+ * it: `LEAN` is the cosine the chosen row is given against a hash-keyed
+ * direction of comparable size, which puts the crop's top posterior far above the
+ * router threshold while leaving every other species an order of magnitude below
+ * it. `expectConfidentCrop` is what keeps that true.
  */
-async function installPixelKeyedClassifier(page: Page): Promise<void> {
-  await page.evaluate(() => {
+async function installPixelKeyedClassifier(page: Page, lean = 3): Promise<void> {
+  await page.evaluate((LEAN) => {
     const A = window.__mosqAsync!;
-    const dim = (A.embeds as { dim: number }).dim;
     const w = window as any;
+    // The head is read per run, not captured: `populate` is what installs it, and
+    // an engine switch mid-test rebinds `A.embeds`.
+    const head = () => A.embeds as { dim: number; species: string[]; species_emb: Float32Array };
     w.__fakeClip = { runs: 0 };
     A.sessClip = {
       inputNames: ["pixel_values"],
@@ -54,26 +77,72 @@ async function installPixelKeyedClassifier(page: Page): Promise<void> {
         f.runs++;
         // A macrotask, so a second run could start if the caller let one.
         await new Promise((r) => setTimeout(r, 0));
+        const H = head();
+        const dim = H.dim;
+        const S = H.species.length;
         const src = feeds["pixel_values"]!.data;
         let h = 0x811c9dc5;
         for (let i = 0; i < src.length; i += 97) {
           h ^= Math.round(src[i]! * 1000) | 0;
           h = Math.imul(h, 0x01000193) >>> 0;
         }
+        // The species this view votes for, and that row unit-length so `lean`
+        // means the same thing whatever the head's embedding norms are. A lean of
+        // 0 is the same hash-keyed direction with no species row behind it: a
+        // classifier with no opinion, which is what the confidence router reacts
+        // to.
+        const k = h % S;
+        const rows = H.species_emb;
+        let norm = 0;
+        for (let i = 0; i < dim; i++) norm += rows[k * dim + i]! * rows[k * dim + i]!;
+        norm = Math.sqrt(norm) || 1;
         // A direction that depends only on the hash, but is not a fixed one.
-        const data = new Float32Array(dim);
+        const noise = new Float32Array(dim);
+        let noiseNorm = 0;
         for (let i = 0; i < dim; i++) {
           let x = (h ^ Math.imul(i + 1, 0x9e3779b1)) >>> 0;
           x ^= x >>> 15;
           x = Math.imul(x, 0x2545f491) >>> 0;
-          data[i] = ((x >>> 8) / 8388608) - 1;
+          noise[i] = ((x >>> 8) / 8388608) - 1;
+          noiseNorm += noise[i]! * noise[i]!;
+        }
+        // Unit-normalised, so `lean` is the cosine the chosen species row is
+        // given against the hash direction and means the same at any dim. Left
+        // un-normalised the hash direction's norm grows as sqrt(dim/3) and the
+        // species row is simply drowned - which is what a flat posterior looks
+        // like from inside the app, and what this fixture must not be.
+        noiseNorm = Math.sqrt(noiseNorm) || 1;
+        const data = new Float32Array(dim);
+        for (let i = 0; i < dim; i++) {
+          data[i] = LEAN * (rows[k * dim + i]! / norm) + noise[i]! / noiseNorm;
         }
         // clipEmbed L2-normalises over the first `dim` coordinates anyway, so
         // the returned vector only has to be non-degenerate.
         return { embedding: { dims: [1, dim], data } };
       },
     };
-  });
+  }, lean);
+}
+
+/**
+ * The crop-only posterior must sit above the confidence router's threshold.
+ *
+ * Below it, `fuseViews` answers the photo from the crop alone and never pools the
+ * whole frame, so every "the two views disagree" assertion in this file would be
+ * measuring the router rather than the fusion. Asserted against the threshold
+ * imported from the source rather than a copy of the number, so a change to the
+ * router that puts this fixture back under it fails here with the reason.
+ */
+function expectConfidentCrop(cropOnly: { name: string; detail: Record<string, number> }[]) {
+  for (const p of cropOnly) {
+    expect(
+      Math.max(...Object.values(p.detail)),
+      `${p.name}: the crop-only top posterior is below CROP_ONLY_MAX_POSTERIOR ` +
+        `(${CROP_ONLY_MAX_POSTERIOR}), so the confidence router answers this photo from the ` +
+        "crop alone and the whole-frame view is never pooled - these specs cannot see a " +
+        "fusion bug through that",
+    ).toBeGreaterThan(CROP_ONLY_MAX_POSTERIOR);
+  }
 }
 
 /** Click the checkbox and wait for every photo to settle again. */
@@ -99,6 +168,9 @@ async function shownScores(page: Page) {
       viewsTotal: p.viewsTotal,
       detail: p.detail as Record<string, number>,
       verdict: p.verdict,
+      // What `viewAgreement` reported about the views that were actually pooled,
+      // which is what the score panel renders any claim about a second view from.
+      agreement: p.agreement as unknown,
     })),
   );
 }
@@ -129,6 +201,10 @@ test.describe("the whole-frame toggle moves the scores", () => {
     await toggleAndSettle(page, false);
     const cropOnly = await shownScores(page);
     expect(cropOnly.every((p) => p.viewsTotal === 1), "the crop-only pass ran").toBe(true);
+    // The whole-frame view only gets pooled when the crop is confident enough to
+    // be worth pooling with, so this is a precondition of everything below rather
+    // than part of the claim.
+    expectConfidentCrop(cropOnly);
 
     await toggleAndSettle(page, true);
     const bothViews = await shownScores(page);
@@ -191,6 +267,7 @@ test.describe("the whole-frame toggle moves the scores", () => {
 
     await toggleAndSettle(page, false);
     const cropOnly = await shownScores(page);
+    expectConfidentCrop(cropOnly);
     await toggleAndSettle(page, true);
     const both = await shownScores(page);
 
@@ -208,6 +285,70 @@ test.describe("the whole-frame toggle moves the scores", () => {
         (n) => Math.abs((c.detail[n] ?? 0) - (b.detail[n] ?? 0)) > 1e-9,
       ).length;
       expect(moved, `${c.name}: only ${moved} species moved`).toBeGreaterThan(1);
+    }
+
+    expect(errors(page)).toHaveLength(0);
+  });
+
+  test("an unconfident crop is answered on its own, and the app does not claim a second opinion", async ({ page }) => {
+    // The branch the other three specs must stay out of.
+    //
+    // A crop whose top posterior is below CROP_ONLY_MAX_POSTERIOR is fused from
+    // that one view: equal weighting would spend the whole frame half the
+    // decision on rows where the crop is the view carrying the signal. That is
+    // worth measuring on real data (report 80) and it is invisible here, because
+    // the app then shows exactly the crop-only numbers whether the toggle is
+    // checked or not. It landed and two specs above started failing on it, and
+    // nothing here pinned it: this is the branch where the toggle is checked, a
+    // second view IS classified, and the answer does not move.
+    //
+    // So the classifier is installed with `lean = 0` - the same pixel-keyed
+    // direction with no species row behind it, which is what "the crop is not
+    // sure" looks like from inside the app.
+    await boot(page);
+    await populate(page, TWO);
+    await installPixelKeyedClassifier(page, 0);
+
+    await toggleAndSettle(page, false);
+    const cropOnly = await shownScores(page);
+    await toggleAndSettle(page, true);
+    const both = await shownScores(page);
+
+    // The fixture is what makes this the router's branch: below the threshold,
+    // asserted against the source constant so a threshold change that lifts this
+    // fixture above it says so here instead of quietly voiding the test.
+    for (const c of cropOnly) {
+      expect(
+        Math.max(...Object.values(c.detail)),
+        `${c.name}: this fixture is only interesting BELOW CROP_ONLY_MAX_POSTERIOR ` +
+          `(${CROP_ONLY_MAX_POSTERIOR}); above it the two views pool and this is the first test`,
+      ).toBeLessThan(CROP_ONLY_MAX_POSTERIOR);
+    }
+
+    // Not vacuous: the toggle really did classify a second view. "Nothing moved"
+    // only means something if something ran.
+    expect(
+      both.every((p) => p.viewsTotal === 2),
+      "the whole frame was never classified, so the router cannot have suppressed it",
+    ).toBe(true);
+
+    for (const c of cropOnly) {
+      const b = both.find((p) => p.name === c.name)!;
+      expect(
+        biggestScoreMove(c.detail, b.detail),
+        `${c.name}: the crop was above CROP_ONLY_MAX_POSTERIOR, so this run pooled rather ` +
+          "than taking the router's branch",
+      ).toBeLessThan(1e-12);
+      expect(b.verdict, `${c.name}: the verdict moved on a branch that must not move it`)
+        .toEqual(c.verdict);
+      // And nothing claims a second opinion was consulted. `viewAgreement` is
+      // computed over the views that were POOLED, so a crop-only answer reports
+      // no agreement at all - it cannot say the views disagree when it never
+      // compared them, and the score panel renders nothing about a second view.
+      expect(
+        b.agreement,
+        `${c.name}: the app reported an agreement between views it never pooled`,
+      ).toBeNull();
     }
 
     expect(errors(page)).toHaveLength(0);
