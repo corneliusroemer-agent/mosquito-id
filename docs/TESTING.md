@@ -76,10 +76,23 @@ credential, which is opt-in per task.
 
 ## Known reds that are not yours
 
-| test | why |
-|---|---|
-| `reactivity.spec.ts:81` | asserts worst long task < 110 ms; gets 143–203 ms on a loaded runner. A wall-clock threshold on shared hardware. Reproduces on a clean `origin/main`. **Do not delete the assertion.** |
-| `empty-photo.spec.ts:76` | stale row-count assertion — `poolingPanel.ts` has listed excluded photos as their own rows since `e34d94f`, so 2 mosquitoes + 1 wall gives 3 rows. Diagnosed, not yet fixed. |
+**None at time of writing** — CI is green on `main` (`08f0ba7`: 259 unit tests, build
+clean, tier-1 91 passed / 0 failed). Both entries that used to be here were fixed in
+`08f0ba7`, and the reasons below are kept because they recur:
+
+| test | what it was | why it was not a threshold problem |
+|---|---|---|
+| `reactivity.spec.ts:81` | asserted worst long task < 110 ms; got 143–256 ms | `worstLongTaskMs` is a **lifetime** max — the observer is installed at module load, so the number was dominated by ten 2400x1800 canvas encodes at boot, not by clicking. The observer is now scoped to the window the test names. **The 110 ms budget is unchanged.** |
+| `empty-photo.spec.ts:89` | `toHaveCount(2)`, received 3 | `poolingPanel.ts` lists excluded photos as their own rows, which R4.10 requires, so 3 is correct. The assertion now checks the **property** (an excluded row with its reason, its weight shares, and a summary naming 3) rather than a bare count. |
+
+`reactivity.spec.ts` **can still fail on a heavily loaded box** — it is a wall-clock
+measurement, and shared runners are shared. If it goes red in a way that looks
+unrelated to a change, check whether the runner was busy before treating it as a
+regression. Tier 1 as a whole is flaky under load: it can fail a *different*
+unrelated spec each run (`controls`, `shell`, `tile-states`, each passing 3/3 in
+isolation), which was proven by running untouched upstream `main`.
+
+Full reasoning: `docs/CI-TEST-SIGNAL.md`.
 
 ## CI
 
