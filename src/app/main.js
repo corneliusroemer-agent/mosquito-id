@@ -44,6 +44,8 @@ import { updatePooling } from "./poolingPanel";
 import { badge, canView, checkLabel, contributesToPool,
          removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
          validateIncluded, viewLabel } from "./thumbnailStrip";
+import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
+         readIncludeWholeFrame, viewKinds } from "./viewSelection";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -185,6 +187,14 @@ let previews = [];
 let includedIndices = new Set();
 let selectedIndex = 0;
 let isProcessingBatch = false;
+
+// Whether a cropped photo is fused with its whole frame as well as its crop.
+// Read once at load and written on every change, so it survives a reload; the
+// read cannot throw (see readIncludeWholeFrame). Changing it re-classifies the
+// photos already on screen, because a photo's verdict is a statement about the
+// views it was fused from and a verdict fused from two views is not the verdict
+// for a crop on its own.
+let includeWholeFrame = DEFAULT_INCLUDE_WHOLE_FRAME;
 
 // Bound here rather than at each call site: `currentEngine`, `serverAvailable`
 // and the selection are all read at event time, so the logger takes them as
@@ -818,12 +828,18 @@ async function classifyImage(imgBitmap, filename) {
 
   const views = [];
   if (cropView) views.push(cropView);
-  // The whole frame is always a view: either the second opinion on a crop that
-  // passed the gate, or the only view there is.
-  const wholeEmb = await clipEmbed(fullCv);
-  const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(currentEngine) });
-  views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
-               adP: wholeJ.adP, scale: localViewScale() });
+  // Which views this photo offers is one decision, in `viewKinds`, and it is not
+  // "always both": the whole frame is the second opinion on a crop that passed
+  // the gate, and that second opinion can be turned off. It stays the only view
+  // there is for a photo with no crop, so the list is never empty and no fused
+  // posterior is ever derived from zero views. The crop is already scored above,
+  // so only the whole frame is left to decide here.
+  if (viewKinds(Boolean(cropView), includeWholeFrame).includes("whole")) {
+    const wholeEmb = await clipEmbed(fullCv);
+    const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(currentEngine) });
+    views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
+                 adP: wholeJ.adP, scale: localViewScale() });
+  }
 
   const clipTime = Math.round(performance.now() - tClip0);
   const totalTime = Math.round(performance.now() - t0);
@@ -1070,9 +1086,10 @@ async function processFiles(fileList) {
         // endpoint already classifies whatever box it is given, so the whole
         // frame is one more request with crop_box spanning it. Skipped when the
         // server's own detection found nothing and it classified the whole frame
-        // anyway - then there is only one view to have.
+        // anyway - then there is only one view to have - and when the user has
+        // turned the whole-frame view off.
         const views = [serverView(data)];
-        if (data.is_cropped) {
+        if (viewKinds(Boolean(data.is_cropped), includeWholeFrame).includes("whole")) {
           const fd2 = new FormData();
           fd2.append("file", slot.file);
           fd2.append("crop_box", JSON.stringify([0, 0, data.fullWidth, data.fullHeight]));
@@ -1468,7 +1485,73 @@ function wireStripActions() {
   on("btn-select-all", () => setAllSelected(true));
   on("btn-select-none", () => setAllSelected(false));
   on("btn-delete-all", deleteAllPhotos);
+  wireWholeFrameToggle();
   updateStripActions();
+}
+
+// The whole-frame checkbox in the gallery header row: one control, no panel.
+//
+// A photo's verdict describes the views it was fused from, so turning this off
+// leaves every photo already on screen holding a verdict that was fused from two
+// views while the control says one. The photos are therefore re-classified rather
+// than left to disagree with the setting, and each is marked pending while its
+// views are re-run so the pooled card is never read as settled on a pool that is
+// about to change.
+function wireWholeFrameToggle() {
+  const box = document.getElementById("chk-whole-frame");
+  if (!box) return;
+  includeWholeFrame = readIncludeWholeFrame(
+    // `localStorage` throws in a context where storage is disabled, and reading
+    // the property is itself the throwing access; readIncludeWholeFrame takes
+    // the store as an argument so it can be exercised without one.
+    (() => {
+      try {
+        return localStorage;
+      } catch {
+        return null;
+      }
+    })(),
+  );
+  box.checked = includeWholeFrame;
+  box.addEventListener("change", () => {
+    const on = box.checked;
+    if (on === includeWholeFrame) return;
+    includeWholeFrame = on;
+    try {
+      localStorage.setItem(WHOLE_FRAME_KEY, on ? "true" : "false");
+    } catch {
+      // A preference that cannot be stored is a preference for this session.
+      // Failing to persist it is not worth interrupting the user over, and the
+      // next change reclassifies either way.
+    }
+    sendLog("whole_frame_toggled", { includeWholeFrame: on, photos: previews.length });
+    reclassifyForWholeFrame();
+  });
+}
+
+// Re-run every settled photo's views under the current preference. Photos that
+// were never classified, or whose classification failed, are left alone: there is
+// nothing to re-fuse, and their tile already says why.
+function reclassifyForWholeFrame() {
+  const due = previews
+    .map((p, idx) => ({ p, idx }))
+    .filter(({ p }) => p && !p.removed && !p.pending && !p.error && p.fullCanvas);
+  for (const { p, idx } of due) {
+    const rev = beginRecompute(p);
+    renderThumbnails();
+    classifyViews(p, idx, rev, p.cropCanvas, p.cropBox)
+      .catch((err) => {
+        if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) return;
+        console.error("Reclassification failed:", err);
+        markComputeFailed(p, err);
+      });
+  }
+  if (due.length) {
+    renderThumbnails();
+    renderActivePhoto();
+    updatePooling(EMB, previews, includedIndices);
+    renderResultsTable(previews);
+  }
 }
 
 function selectPhoto(idx) {
@@ -1916,19 +1999,24 @@ async function classifyCanvasServer(p, cropBox) {
   };
 }
 
-// The views of one photo that get classified and pooled: the crop on screen and
-// the whole frame. Two views of the same specimen, because one view of it is
-// fallible - see fuseViews for what the second buy is worth.
+// The views of one photo that get classified and pooled: the crop on screen,
+// and the whole frame unless the user has turned that second opinion off. Two
+// views of the same specimen, because one view of it is fallible - see fuseViews
+// for what the second buy is worth.
 //
 // A photo already showing the whole frame has only one view to offer, and
 // running the same pixels through the model twice would fuse a view with itself.
 // That covers both a photo the detector found nothing in and one the user
 // reverted to whole. Each view carries its crop box because the server path
 // takes a box where the local path takes the already-cut pixels.
+//
+// The decision of which views those are lives in `viewKinds`, shared with the
+// batch paths, so the three places a photo gets classified cannot disagree about
+// what a photo offers.
 function viewsFor(p, cropCv, cropBox) {
   const whole = { canvas: p.fullCanvas, box: [0, 0, p.fullCanvas.width, p.fullCanvas.height] };
-  if (!cropCv || cropCv === p.fullCanvas) return [whole];
-  return [{ canvas: cropCv, box: cropBox }, whole];
+  return viewKinds(Boolean(cropCv) && cropCv !== p.fullCanvas, includeWholeFrame)
+    .map((kind) => (kind === "crop" ? { canvas: cropCv, box: cropBox } : whole));
 }
 
 // Classify every view of one photo and commit the fused verdict, once per view

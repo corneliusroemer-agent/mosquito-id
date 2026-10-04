@@ -369,6 +369,19 @@
     gap: 10px;
   }
   .gallery-arrows { display: flex; gap: 6px; }
+  /* The whole-frame checkbox shares the header row with the bulk actions rather
+     than a panel of its own: it is one setting about how a photo is scored, the
+     same class of thing as the actions beside it, and it belongs where the row
+     already wraps. Sized and aligned to the buttons next to it. */
+  .view-toggle {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 13px;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .view-toggle input { width: 16px; height: 16px; margin: 0; }
 
   .thumbnail-strip {
     display: flex;
@@ -1117,6 +1130,10 @@
       <strong>Photos</strong>
       <span id="gallery-counter">1 / 10</span>
       <div class="gallery-nav-actions">
+        <label class="view-toggle" title="Score every cropped photo twice: on its crop, and on the whole photo. Turn it off to judge a crop on its own. A photo with no crop is always judged on the whole photo.">
+          <input type="checkbox" id="chk-whole-frame" checked>
+          Include the whole photo
+        </label>
         <div class="strip-actions">
           <button id="btn-select-all" class="btn btn-sm" type="button" aria-label="Check all photos that can be pooled">Select all</button>
           <button id="btn-select-none" class="btn btn-sm" type="button" aria-label="Uncheck all photos">Select none</button>
