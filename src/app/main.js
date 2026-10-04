@@ -442,6 +442,8 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   const targetEmbedsPath = clipCfg.embedsPath || "text_embeds.json";
   if (!embedsCache[targetEmbedsPath]) {
     setProgress("model", "Loading species embeddings…", null);
+    // No SHA argument: the default is `COMMIT_SHA`, the SHA this bundle was
+    // built from, and that is what makes the head's URL change per deploy.
     const headBuf = await fetchWithCache(targetEmbedsPath, undefined, sendLog);
     const data = JSON.parse(new TextDecoder().decode(headBuf));
     for (const k of ["species_emb", "nuisance_emb"]) {

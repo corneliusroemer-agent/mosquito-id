@@ -15,10 +15,17 @@ import type { LogFn } from "./telemetry";
 export type OnBytes = (got: number, total: number, done?: boolean) => void;
 
 /**
- * A path ending in `.onnx`. Matched on the pathname alone, never on the whole
- * URL: a head fetched as `text_embeds.json?src=weights.onnx` is still a head,
- * and reading a `.onnx` out of its query would leave it un-versioned - the
- * original bug, one URL shape away.
+ * A path ending in `.onnx`: the weights, which must keep their cache.
+ *
+ * Matched on the pathname alone, never on the whole URL - a head fetched as
+ * `text_embeds.json?src=weights.onnx` is still a head, and reading a `.onnx` out
+ * of its query would leave it un-versioned, which is the bug this exists to fix.
+ *
+ * This one predicate decides two things, because they are the same decision: a
+ * URL it matches is neither versioned nor pruned. So anything large that is NOT
+ * named `.onnx` - a runtime `.wasm`, an extension-less download URL - would be
+ * re-downloaded in full on every deploy. Adding such a file means adding it here
+ * first.
  */
 const WEIGHTS = /\.onnx$/i;
 
@@ -27,9 +34,17 @@ function pathOf(url: string): string {
   return new URL(url, documentBase()).pathname;
 }
 
-/** What a relative model URL resolves against. */
+/**
+ * What a relative model URL resolves against.
+ *
+ * `document.baseURI` rather than `location.href` because that is what Cache and
+ * fetch resolve against - they agree while the page has no `<base>` tag, and
+ * using the real one means a page that adds one does not make the prune quietly
+ * compare the wrong URLs.
+ */
 function documentBase(): string {
-  return globalThis.location?.href ?? "http://localhost/";
+  const doc = (globalThis as { document?: { baseURI?: string } }).document;
+  return doc?.baseURI ?? globalThis.location?.href ?? "http://localhost/";
 }
 
 /**
@@ -58,8 +73,19 @@ export function versionedModelUrl(url: string, sha: string | undefined = COMMIT_
   if (WEIGHTS.test(pathOf(url))) return url;
   const trimmed = sha?.trim();
   if (!trimmed) return url;
-  const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}${BUILD_PARAM}=${encodeURIComponent(trimmed)}`;
+  // Split on the fragment first. Appending to a URL that carries one puts the
+  // query INSIDE the fragment, where it is not a query at all - the request
+  // would be for the un-versioned file and the head would go on being served
+  // stale, which is the bug this exists to fix.
+  const hash = url.indexOf("#");
+  const base = hash === -1 ? url : url.slice(0, hash);
+  const fragment = hash === -1 ? "" : url.slice(hash);
+  // Already versioned: leave it. A second `?build=` would make the key depend on
+  // how many times this ran, and `a.json?build=X&build=X` is not a URL anything
+  // else in the app would ask for.
+  if (new URL(base, documentBase()).searchParams.has(BUILD_PARAM)) return url;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}${BUILD_PARAM}=${encodeURIComponent(trimmed)}${fragment}`;
 }
 
 /** The growth step for a response that arrived without a Content-Length. */
@@ -128,9 +154,10 @@ export async function fetchWithProgress(url: string, onBytes?: OnBytes): Promise
  *
  * The cache is what makes a second visit bearable: the classifier is 1.26 GB,
  * and re-downloading it on every load would make the app unusable after the
- * first. A CacheStorage failure of any kind - a private-mode browser with no
- * caches, a quota error, a corrupted entry - falls through to the network
- * rather than failing the load, so the worst case is a slow first run.
+ * first. Every CacheStorage failure - a private-mode browser with no caches, a
+ * quota error, a corrupted entry - costs the cache and not the load, so the
+ * worst case is a slow first run and never a second download of bytes already
+ * in hand.
  *
  * The versioned URL is used for the cache key AND the request, from one
  * variable. Keying the entry on the bare URL while requesting the versioned one
@@ -146,28 +173,46 @@ export async function fetchWithCache(
 ): Promise<ArrayBuffer> {
   const versioned = versionedModelUrl(url, sha);
   if ("caches" in window) {
+    let cache: Cache | null = null;
+    let cached: Response | undefined;
     try {
-      const cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(versioned);
-      if (cached) {
-        console.log(`[CacheStorage] HIT for ${versioned}`);
-        log?.("cache_hit", { url: versioned });
-        const size = Number(cached.headers.get("content-length")) || 0;
-        onBytes?.(size || 1, size || 1, true);
-        return await cached.arrayBuffer();
-      }
-      console.log(`[CacheStorage] MISS for ${versioned}, fetching from network...`);
-      log?.("cache_miss", { url: versioned });
-      const buf = await fetchWithProgress(versioned, onBytes);
-      const toStore = new Response(bytesAsStream(buf), {
-        headers: { "Content-Type": "application/octet-stream", "Content-Length": String(buf.byteLength) }
-      });
-      await cache.put(versioned, toStore);
-      await dropSuperseded(cache, versioned, log);
-      return buf;
+      cache = await caches.open(CACHE_NAME);
+      cached = await cache.match(versioned);
     } catch (err) {
-      console.warn("CacheStorage read/write warning:", err);
+      // Only the lookup is guarded. A cache we cannot open or read is a cache we
+      // do not have, and the network below is the whole answer.
+      console.warn("CacheStorage read warning:", err);
+      cache = null;
     }
+    if (cached) {
+      console.log(`[CacheStorage] HIT for ${versioned}`);
+      log?.("cache_hit", { url: versioned });
+      const size = Number(cached.headers.get("content-length")) || 0;
+      onBytes?.(size || 1, size || 1, true);
+      return await cached.arrayBuffer();
+    }
+    if (cache) console.log(`[CacheStorage] MISS for ${versioned}, fetching from network...`);
+    log?.("cache_miss", { url: versioned });
+    const buf = await fetchWithProgress(versioned, onBytes);
+    // Written after the bytes are in hand and outside the path that can fall
+    // through to a second fetch. A quota error on the put used to be caught by
+    // the same catch as a network failure, which threw away a finished download
+    // and started it again - 1.26 GB twice for the classifier, every load, since
+    // the put keeps failing. Failing to cache is the worst case here, not
+    // failing to load, so it is reported and the bytes are returned.
+    if (cache) {
+      try {
+        const toStore = new Response(bytesAsStream(buf), {
+          headers: { "Content-Type": "application/octet-stream", "Content-Length": String(buf.byteLength) }
+        });
+        await cache.put(versioned, toStore);
+        await dropSuperseded(cache, versioned, log);
+      } catch (err) {
+        console.warn("CacheStorage write warning:", err);
+        log?.("cache_write_failed", { url: versioned, error: String(err) });
+      }
+    }
+    return buf;
   }
   return await fetchWithProgress(versioned, onBytes);
 }
@@ -209,9 +254,14 @@ async function dropSuperseded(
   }
 }
 
-/** A URL with any `?build=` removed, which is what identifies the artefact. */
+/**
+ * What identifies an artefact for the prune: origin, path, and any query that is
+ * not the build. The origin is part of it because two hosts may serve the same
+ * path - a head on Pages and a mirror on R2 are two artefacts, and deleting one
+ * because the other was refitted would be its own silent breakage.
+ */
 function stripBuildParam(href: string): string {
   const u = new URL(href, documentBase());
   u.searchParams.delete(BUILD_PARAM);
-  return `${u.pathname}${u.search}`;
+  return `${u.origin}${u.pathname}${u.search}`;
 }

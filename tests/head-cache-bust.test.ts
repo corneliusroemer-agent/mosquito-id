@@ -103,6 +103,19 @@ describe("versionedModelUrl", () => {
     }
   });
 
+  it("puts the query before the fragment, not inside it", () => {
+    // Appending to `a.json#x` yields `a.json#x?build=X`, where `?build=X` is
+    // part of the FRAGMENT: the request is for the un-versioned file and the
+    // head goes on being served stale.
+    expect(versionedModelUrl(`${HEAD}#top`, SHA_A)).toBe(`${HEAD}?build=${SHA_A}#top`);
+  });
+
+  it("leaves an already-versioned URL alone rather than versioning it twice", () => {
+    const once = versionedModelUrl(HEAD, SHA_A);
+    expect(versionedModelUrl(once, SHA_A)).toBe(once);
+    expect(versionedModelUrl(once, SHA_B)).toBe(once);
+  });
+
   it("recognises a versioned weights URL as weights, not as a head", () => {
     // The check is on the path, so a URL that already carries a query - which
     // is what this function itself produces - is still recognised.
@@ -129,7 +142,11 @@ describe("fetchWithCache cache keys", () => {
   });
   afterEach(() => {
     globalThis.fetch = realFetch;
-    (globalThis as Record<string, unknown>).caches = realCaches;
+    // `delete`, not assign: the offline branch is gated on `"caches" in window`,
+    // so restoring `undefined` would leave the property present and a later test
+    // would call `caches.open` on nothing instead of taking that branch.
+    if (realCaches === undefined) delete (globalThis as Record<string, unknown>).caches;
+    else (globalThis as Record<string, unknown>).caches = realCaches;
     (globalThis as Record<string, unknown>).window = realWindow;
     (globalThis as Record<string, unknown>).location = realLocation;
   });
@@ -184,6 +201,46 @@ describe("fetchWithCache cache keys", () => {
     expect([...store.entries.keys()].sort()).toEqual([cacheKey(`${HEAD}?build=${SHA_B}`), ONNX].sort());
   });
 
+  it("does not re-download when the cache write fails on a full disk", async () => {
+    // The trap the refactor of `fetchWithCache` closes: a `cache.put` that
+    // throws used to be caught by the same catch as a network failure, so the
+    // bytes already in hand were thrown away and fetched again. On the 1.26 GB
+    // classifier that is 1.26 GB twice, on every load, forever, because the put
+    // keeps failing. Failing to cache must cost the cache, not the download.
+    const failing = fakeCache();
+    failing.cache.put = async () => {
+      throw new DOMException("quota", "QuotaExceededError");
+    };
+    (globalThis as Record<string, unknown>).caches = { open: async () => failing.cache };
+    globalThis.fetch = (async (req: RequestInfo | URL) => {
+      store.requested.push(String(req));
+      return jsonResponse({ version: String(req) });
+    }) as typeof globalThis.fetch;
+
+    const buf = await fetchWithCache(ONNX, undefined, undefined, SHA_A);
+
+    expect(store.requested).toEqual([ONNX]);   // exactly one download
+    expect(JSON.parse(new TextDecoder().decode(buf)).version).toBe(ONNX);
+  });
+
+  it("does not prune the same path on a different host", async () => {
+    // A head on Pages and a mirror of it on R2 share a path but are two
+    // artefacts. Deleting the mirror because the head was refitted would be its
+    // own silent breakage, so the origin is part of what identifies an artefact.
+    // Same path as the relative head resolves to, different host. Without the
+    // origin in the key these are one artefact and the mirror gets deleted.
+    const MIRROR = `https://mirror.example${new URL(HEAD, `${ORIGIN}index.html`).pathname}`;
+    await fetchWithCache(MIRROR, undefined, undefined, SHA_A);
+    await fetchWithCache(HEAD, undefined, undefined, SHA_A);
+    await fetchWithCache(HEAD, undefined, undefined, SHA_B);
+
+    expect([...store.entries.keys()].sort()).toEqual(
+      // The mirror is a JSON, so it is versioned too - what matters is that
+      // refitting the head on Pages left the mirror's own build alone.
+      [cacheKey(`${MIRROR}?build=${SHA_A}`), cacheKey(`${HEAD}?build=${SHA_B}`)].sort(),
+    );
+  });
+
   it("behaves as it did before, when the build carries no SHA", async () => {
     store.entries.set(cacheKey(HEAD), jsonResponse({ logit_scale: 2.5 }));
     await fetchWithCache(HEAD, undefined, undefined, undefined);
@@ -230,7 +287,11 @@ describe("a head that is not there", () => {
 
   afterEach(() => {
     globalThis.fetch = realFetch;
-    (globalThis as Record<string, unknown>).caches = realCaches;
+    // `delete`, not assign: the offline branch is gated on `"caches" in window`,
+    // so restoring `undefined` would leave the property present and a later test
+    // would call `caches.open` on nothing instead of taking that branch.
+    if (realCaches === undefined) delete (globalThis as Record<string, unknown>).caches;
+    else (globalThis as Record<string, unknown>).caches = realCaches;
     (globalThis as Record<string, unknown>).window = realWindow;
     (globalThis as Record<string, unknown>).location = realLocation;
   });
