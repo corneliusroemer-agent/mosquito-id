@@ -31,7 +31,7 @@ import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTO
          cosineOffsetsFor, floorsFor, resolveModelUrl } from "./modelConfig";
 import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
-import { canvasUrl, dataUrlToCanvas, setImgSrc } from "./canvasCache";
+import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
@@ -1582,7 +1582,7 @@ function renderThumbnails() {
     // empty in that state, so the filename does not render over the tile.
     const src = p.cropCanvas || p.fullCanvas;
     if (src) {
-      setImgSrc(node.img, canvasUrl(src, 0.8));
+      setImgSrc(node.img, thumbnailUrl(src, 0.8));
       node.img.className = "";
       node.img.alt = p.name;
     } else {
