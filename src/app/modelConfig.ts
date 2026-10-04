@@ -39,7 +39,7 @@ export const CLIP_SIZE = 224;
  * permissive gate, and indistinguishable on entropy under the rejecting gates
  * (+0.011 [-0.029, +0.052]). It is held back on a proxy, not on a measurement:
  * it doubles wrong boxes to 20.2% of fired images, and a simulated IoU gate
- * is a poor stand-in for the real one. See 68-detconf-entropy.md before
+ * is a poor stand-in for the real one. See 71-detconf-entropy.md before
  * changing this.
  *
  * Do not raise this back on the strength of "of fired": that number is a
