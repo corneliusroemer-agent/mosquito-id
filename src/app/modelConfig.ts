@@ -15,10 +15,43 @@ import type { Capability } from "./granularity";
 /** Detector input is a square of this side, in pixels. */
 export const DET_SIZE = 640;
 export const CLIP_SIZE = 224;
-export const DET_CONF = 0.70;
+/**
+ * The box score below which a detection is discarded, and nothing else.
+ *
+ * Was 0.70, where the detector fired on 55.8% of a 4,172-image gold-box
+ * held-out set while 92.4% of the boxes it did fire on were correct - a
+ * precision-conditional-on-firing figure that reads well and answers the wrong
+ * question. The images the detector is unsure about are the ones that then get
+ * analysed whole, at 69.97% accuracy and 0.356 macro-F1 against 0.480 for the
+ * shipped threshold.
+ *
+ * At 0.50 the detector fires on 71.5%, wrong boxes on 9.9% of fired images
+ * rather than 4.2%, and the downstream macro-F1 gain is +0.064 [+0.008,
+ * +0.143] over 0.70 - 6.4 of the 9.4 points a perfect detector would deliver,
+ * for no retraining and no inference cost. 0.30 adds a further 1.1 pp whose
+ * interval crosses zero and doubles wrong boxes to 20.2%, so it buys nothing
+ * worth having.
+ *
+ * Do not raise this back on the strength of "of fired": that number is a
+ * property of the boxes that survive, and it is maximised by never firing at
+ * all. Measured in `investigations/2026-10-02-mosquito-id/61-detector.md`.
+ */
+export const DET_CONF = 0.50;
 export const NMS_IOU = 0.70;
 export const CROP_PAD = 0.10;
 export const CACHE_NAME = "mosquito-models-v1";
+
+/**
+ * The detector's size in bytes, which the load bar weighs it by.
+ *
+ * The one declared size `WEBGPU_MODELS` does not carry: the detector is fetched
+ * by a bare path rather than as a selectable engine, so nothing else records
+ * how big it is. It is needed because the bar aggregates across the whole load,
+ * and a step with no declared bytes cannot be weighted against a 1.2 GB
+ * classifier. Measured from the bucket's Content-Length, like the sizes beside
+ * it; a stale value here costs accuracy in the bar's middle, never its end.
+ */
+export const DETECTOR_SIZE = 10607017;
 
 // CLIP's channel normalisation, applied to the 0-1 pixel tensor before it is
 // handed to the classifier. Indexed by channel.

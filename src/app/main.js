@@ -26,10 +26,10 @@ import { pooledPosterior as _pooledPosterior,
          pooledCandidates, pooledVerdict as _pooledVerdictOf } from "../confidence/pooling";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { activeGroups, claimSentence, mergeUnresolvable, resolvableGroups, setActiveHead } from "./granularity";
-import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_CONF, DET_SIZE,
+import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTOR_SIZE,
          FP16_AVAILABLE, NMS_IOU, TEMPERATURE, WEBGPU_MODELS, capabilityNote,
          cosineOffsetsFor, floorsFor, resolveModelUrl } from "./modelConfig";
-import { clearProgress, makeTransferProgress, setProgress, setProgressError } from "./progress";
+import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
 import { decodeDets, letterbox, selectDetection } from "./detector";
@@ -48,6 +48,8 @@ import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
 import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
+import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
+         Superseded } from "./photoRecord";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -297,65 +299,7 @@ if (typeof PerformanceObserver === "function") {
   } catch (e) { /* longtask unsupported: ASYNC.longTasks stays 0 */ }
 }
 
-// Take ownership of a photo's scores for a new crop. Bumping the revision is
-// what makes the last release win: every earlier computation still in flight
-// for this photo now holds a revision that no longer matches and is dropped.
-function beginRecompute(p) {
-  p.rev = (p.rev || 0) + 1;
-  p.pending = true;
-  p.error = null;
-  // The agreement on screen described the previous crop's views. It goes with
-  // them, rather than sitting there next to a pending recompute claiming to be
-  // about the crop now being drawn.
-  p.agreement = null;
-  p.viewsLanded = 0;
-  p.viewsTotal = 0;
-  return p.rev;
-}
 
-// A result may be written back only by the computation that still owns the
-// photo: same revision (no newer release), same object still in previews (not
-// deleted, and not replaced by a batch that finished meanwhile), not removed.
-function ownsRecompute(p, idx, rev) {
-  return p.rev === rev && previews[idx] === p && !p.removed;
-}
-
-// Everything a finished computation commits, in one place, so the local and
-// server paths cannot drift apart in what they mark current. The multi-view
-// paths go through applyViews, which layers the per-view bookkeeping on top.
-function commitScores(p, r, engine = currentEngine) {
-  p.scores = r.labels;
-  p.detail = r.detail;
-  p.logits = r.logits;
-  // Which engine these numbers are filed under, so the re-run button can tell a
-  // photo that is current from one still showing another engine's verdict.
-  // Written here and at the batch commit because those are the two places scores
-  // land. Defaulted to the live engine so a caller that has not pinned one - the
-  // single-view paths - cannot forget to say which engine it meant.
-  p.scoredBy = engine;
-  // The adjacent posteriors, index-aligned with EMB.adjacent, so the pooled card
-  // can carry the pool's non-mosquito evidence through its own softmax. Absent
-  // where the scoring path reports none - the server path has no adjacent
-  // classes - and then the pool has no non-mosquito evidence to speak of.
-  p.adP = r.adP || null;
-  // A verdict that claims nothing must not keep the one it had: pooling reads it.
-  p.verdict = r.verdict || null;
-  // The per-class non-mosquito posteriors, for the score panel to name the winner
-  // from. Cleared with the verdict so a stale one cannot outlive the claim.
-  p.adjacentDetail = r.adjacentDetail || null;
-  p.pending = false;
-  p.error = null;
-}
-
-function markComputeFailed(p, err) {
-  p.pending = false;
-  p.error = `Classification failed: ${err && err.message ? err.message : err}`;
-  sendLog("crop_failed", { name: p.name, error: String(err) });
-}
-
-// Thrown when a release is overtaken before its work starts, so the catch block
-// can tell "nothing to do" from "the model failed".
-class Superseded extends Error {}
 
 
 
@@ -389,11 +333,32 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     }
   }
 
+  // The bar is declared for the whole load before anything starts, so it advances
+  // once across every download instead of restarting at 0% per file, and so the
+  // slice it reserves for session setup is known up front. A step is listed only
+  // if this load will actually perform it: an engine already in `clipSessions` or
+  // an embeds file already in memory contributes no step, and listing it anyway
+  // would leave the bar short of 100% for the rest of the session.
+  const clipCfg = WEBGPU_MODELS[engineKey] || WEBGPU_MODELS["webgpu-fp16"];
+  const targetEmbedsPath = clipCfg.embedsPath || "text_embeds.json";
+  const needsDetector = !sessDet;
+  const needsClassifier = !clipSessions[engineKey];
+  const needsEmbeds = !embedsCache[targetEmbedsPath];
+  const steps = [];
+  if (needsDetector) steps.push({ key: "detector", bytes: DETECTOR_SIZE });
+  if (needsDetector) steps.push({ key: "detector-session" });
+  if (needsClassifier) steps.push({ key: "classifier", bytes: clipCfg.size });
+  if (needsClassifier) steps.push({ key: "classifier-session" });
+  // The embeddings are same-origin and under a megabyte, so their transfer is
+  // not worth a byte slice of its own - what the bar reports for them is that
+  // they parsed and the head is now usable.
+  if (needsEmbeds) steps.push({ key: "embeds" });
+  beginModelLoad(steps);
+
   // 1. Load detector if not loaded
-  if (!sessDet) {
-    setProgress("model", "Loading detector (YOLO11n)…", 0);
+  if (needsDetector) {
     const detPath = resolveModelUrl("yolo11n-mosquito-det-640.onnx");
-    const detBuf = await fetchWithCache(detPath, makeTransferProgress("Detector (YOLO11n)"), sendLog);
+    const detBuf = await fetchWithCache(detPath, loadStepProgress("detector", "Detector (YOLO11n)"), sendLog);
     try {
       sessDet = await ort.InferenceSession.create(detBuf, { executionProviders: ["webgpu"] });
       detEP = "webgpu";
@@ -402,20 +367,17 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
       sessDet = await ort.InferenceSession.create(detBuf, { executionProviders: ["wasm"] });
       detEP = "wasm";
     }
+    // Past this the detector can run, which is the only thing that advances the
+    // bar's session slice - the download reaching 100% did not earn it.
+    completeLoadStep("detector-session");
   }
 
   // 2. Load BioCLIP model with cache
-  const clipCfg = WEBGPU_MODELS[engineKey] || WEBGPU_MODELS["webgpu-fp16"];
-  if (clipSessions[engineKey]) {
-    sessClip = clipSessions[engineKey].sess;
-    clipEP = clipSessions[engineKey].ep;
-  } else {
-    setProgress("model", `Loading ${clipCfg.name}…`, 0);
-    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), makeTransferProgress(clipCfg.name), sendLog);
+  if (needsClassifier) {
+    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), loadStepProgress("classifier", clipCfg.name), sendLog);
 
     let sess = null;
     let ep = "wasm";
-    setProgress("model", `Preparing ${clipCfg.name}…`, null);
     try {
       sess = await ort.InferenceSession.create(buf, { executionProviders: ["webgpu"] });
       ep = "webgpu";
@@ -427,6 +389,10 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     clipSessions[engineKey] = { sess, ep };
     sessClip = sess;
     clipEP = ep;
+    completeLoadStep("classifier-session");
+  } else {
+    sessClip = clipSessions[engineKey].sess;
+    clipEP = clipSessions[engineKey].ep;
   }
   loadedClipEngine = engineKey;
 
@@ -439,9 +405,13 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   // looks like it did not land. Keyed by the build, a deploy fetches the new
   // head; the weights, which are gigabytes and do not change with the build,
   // keep the cache that makes a second visit bearable.
-  const targetEmbedsPath = clipCfg.embedsPath || "text_embeds.json";
-  if (!embedsCache[targetEmbedsPath]) {
-    setProgress("model", "Loading species embeddings…", null);
+  //
+  // `needsEmbeds` and `targetEmbedsPath` are declared with the rest of the load
+  // plan above, so this step is one the bar is already counting. No byte
+  // reporter is passed: driving the bar from this transfer would put the final
+  // slice of it - the one reserved for a usable model - at the last byte of the
+  // file, before `JSON.parse` has made the head usable.
+  if (needsEmbeds) {
     // No SHA argument: the default is `COMMIT_SHA`, the SHA this bundle was
     // built from, and that is what makes the head's URL change per deploy.
     const headBuf = await fetchWithCache(targetEmbedsPath, undefined, sendLog);
@@ -454,6 +424,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     // about the artefact and the gate needs it - see Head.biasIndex.
     data.biasIndex = data.bias_index ?? -1;
     embedsCache[targetEmbedsPath] = data;
+    completeLoadStep("embeds");
   }
   EMB = embedsCache[targetEmbedsPath];
   // Bind the species this head cannot separate to the label helpers. Done where
@@ -1404,7 +1375,7 @@ async function processFiles(fileList) {
       }
     } catch (err) {
       // One unreadable photo must not take the batch down with it.
-      if (slots[i].pending) markComputeFailed(slots[i], err);
+      if (slots[i].pending) markComputeFailed(slots[i], err, sendLog);
       else slots[i].error = `Analysis failed: ${err.message || err}`;
       console.error("Error processing", slot.name, err);
     }
@@ -1877,9 +1848,9 @@ const reclassifyRunner = createReclassifyRunner({
     try {
       await classifyViews(p, previews.indexOf(p), rev, p.cropCanvas, p.cropBox);
     } catch (err) {
-      if (err instanceof Superseded || !ownsRecompute(p, previews.indexOf(p), rev)) return;
+      if (err instanceof Superseded || !ownsRecompute(p, previews, previews.indexOf(p), rev)) return;
       console.error("Reclassification failed:", err);
-      markComputeFailed(p, err);
+      markComputeFailed(p, err, sendLog);
     }
   },
   onSettled: () => {
@@ -2407,11 +2378,11 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
 
   for (const view of views) {
     await afterNextPaint();
-    if (!ownsRecompute(p, idx, rev)) { dropped = true; break; }
+    if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
     const v = engine === "server-gpu"
       ? await classifyViewServer(p, view.box)
       : await classifyViewLocal(view.canvas, engine);
-    if (!ownsRecompute(p, idx, rev)) { dropped = true; break; }
+    if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
     landed.push(v);
     // Paint what is known so far. The fused verdict is recomputed from the views
     // that have landed, so the first view's paint is that view's own softmax
@@ -2574,12 +2545,12 @@ async function executeCrop(p, idx, cropBox, t0) {
     rec.scoresMs = Math.round(performance.now() - started);
     rec.topSpecies = Object.keys(p.scores)[0];
   } catch (err) {
-    if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) {
+    if (err instanceof Superseded || !ownsRecompute(p, previews, idx, rev)) {
       rec.dropped = true;
       return;
     }
     console.error("Crop classification failed:", err);
-    markComputeFailed(p, err);
+    markComputeFailed(p, err, sendLog);
     p.status = `manual crop: ${cw}x${ch}px · analysis failed`;
     rec.failed = p.error;
     rec.scoresMs = Math.round(performance.now() - started);
@@ -2662,12 +2633,12 @@ async function revertToFullPhoto(idx) {
     rec.scoresMs = Math.round(performance.now() - started);
     rec.topSpecies = Object.keys(p.scores)[0];
   } catch (err) {
-    if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) {
+    if (err instanceof Superseded || !ownsRecompute(p, previews, idx, rev)) {
       rec.dropped = true;
       return;
     }
     console.error("Revert classification failed:", err);
-    markComputeFailed(p, err);
+    markComputeFailed(p, err, sendLog);
     p.status = "manual full photo · analysis failed";
     rec.failed = p.error;
     rec.scoresMs = Math.round(performance.now() - started);
