@@ -39,6 +39,24 @@ function tensorWith(scores: readonly number[]): OrtTensor {
   return { data, dims: [1, 4 + nc, N] } as unknown as OrtTensor;
 }
 
+/**
+ * Three candidates at one anchor, one of them well above DET_CONF and two well
+ * below, with the two low ones placed to overlap the high one.
+ */
+function spreadTensor(): Float32Array {
+  const N = 3;
+  const data = new Float32Array(5 * N);
+  const xs = [50, 50, 51];
+  for (let i = 0; i < N; i++) {
+    data[i] = xs[i]!;
+    data[N + i] = 50;
+    data[2 * N + i] = 20;
+    data[3 * N + i] = 20;
+    data[4 * N + i] = i === 0 ? DET_CONF + 0.1 : 0.01;
+  }
+  return data;
+}
+
 /** r = 1, dx = dy = 0: the decode is the identity, so the box comes back as written. */
 function decode(scores: readonly number[]): number[] {
   return decodeDets(tensorWith(scores), 1, 0, 0).map((d) => d.conf);
@@ -64,10 +82,20 @@ describe("the detector's confidence gate", () => {
     expect(decode([DET_CONF - 0.01])).toHaveLength(0);
   });
 
-  it("is independent of the NMS threshold", () => {
-    // Both were 0.70 and both are load-bearing. Changing one must not move the
-    // other, which a test that only ever passes one of them could not see.
-    expect(DET_CONF).not.toBe(NMS_IOU);
+  it("is not entangled with the NMS threshold", () => {
+    // Both were 0.70, so "they are different numbers" proved nothing except
+    // that this change moved one of them. What actually has to hold is that
+    // the gate is a per-candidate score comparison, not a suppression
+    // threshold: raising NMS_IOU keeps every well-separated candidate and
+    // drops only overlapping ones, so scores on either side of DET_CONF are
+    // unaffected by it.
+    const spread = (iou: number): number =>
+      decodeDets(
+        { data: spreadTensor(), dims: [1, 5, 3] } as unknown as OrtTensor,
+        1, 0, iou,
+      ).length;
+    expect(spread(0.70)).toBe(spread(0.05));
+    expect(NMS_IOU).toBe(0.70);
   });
 });
 
@@ -81,11 +109,22 @@ describe("where the threshold is declared", () => {
         else if (/\.(ts|js)$/.test(e.name)) out.push(rel);
       }
     };
-    walk(join("src", "app"));
+    walk("src");
     return out;
   };
 
-  it("is declared exactly once in src/app", () => {
+  it("is not shadowed by a literal in the decoder", () => {
+    // A hard-coded `if (bc < 0.50)` instead of the import passes every gate
+    // test above at today's value, because the constant and the literal agree.
+    // It is invisible until one of them moves. So: the gate must read the name.
+    const src = readFileSync(join(root, "src", "app", "detector.ts"), "utf8");
+    const gate = src.split("\n").find((l) => l.includes("DET_CONF") && l.includes("<"));
+    expect(gate).toBeDefined();
+    expect(gate).not.toMatch(/<\s*0\.\d/);
+    expect(gate).toMatch(/\bDET_CONF\b/);
+  });
+
+  it("is declared exactly once across all of src", () => {
     const sites = srcFiles().filter((f) =>
       /^export const DET_CONF\b/m.test(readFileSync(join(root, f), "utf8")));
     expect(sites).toEqual([join("src", "app", "modelConfig.ts")]);
@@ -99,8 +138,16 @@ describe("where the threshold is declared", () => {
     expect(decl).not.toBeNull();
     const value = Number(decl![1]);
     expect(value).toBe(DET_CONF);
+    // `toContain(String(value))` is a near-tautology: String(0.50) is "0.5", and
+    // every comment here contains "0.5", so it passes whether or not the prose
+    // agrees. Match the value as a whole token instead.
     const before = src.slice(0, decl!.index);
     const comment = before.slice(before.lastIndexOf("/**"));
-    expect(comment).toContain(String(value));
+    const quoted = comment.match(/\b0\.\d+\b/g) ?? [];
+    expect(quoted.filter((q) => Number(q) === value).length).toBeGreaterThan(0);
+    // And nothing in the comment may quote a different threshold as the value
+    // of *this* constant, which a second copy of the number would be.
+    const claimed = comment.match(/DET_CONF[^\n]*?\b(0\.\d+)\b/);
+    if (claimed) expect(Number(claimed[1])).toBe(value);
   });
 });

@@ -25,16 +25,29 @@ export const CLIP_SIZE = 224;
  * analysed whole, at 69.97% accuracy and 0.356 macro-F1 against 0.480 for the
  * shipped threshold.
  *
- * At 0.50 the detector fires on 71.5%, wrong boxes on 9.9% of fired images
- * rather than 4.2%, and the downstream macro-F1 gain is +0.064 [+0.008,
- * +0.143] over 0.70 - 6.4 of the 9.4 points a perfect detector would deliver,
- * for no retraining and no inference cost. 0.30 adds a further 1.1 pp whose
- * interval crosses zero and doubles wrong boxes to 20.2%, so it buys nothing
- * worth having.
+ * At 0.50 the detector fires on 71.5%, with 9.9% of fired images boxed wrongly
+ * against 4.2%. Modelled through the app's own two-view pooling rather than a
+ * harness that scores a photo on the crop OR the whole frame, the downstream
+ * gain over 0.70 is +2.3 to +2.6 pp accuracy and +0.027 to +0.029 macro-F1
+ * across three nuisance-gate rules, no interval crossing zero. For no
+ * retraining and no inference cost.
+ *
+ * 0.30 scores higher still (+2.6 to +3.3 pp, +0.043 to +0.048) and is not
+ * shipped: wrong boxes reach 20.2% of fired images against 9.9% here, and
+ * beyond 0.50 the newly-cropped population is majority wrong-box (198 of 350).
+ * How much of that the nuisance gate absorbs is unmeasured - the gate reads a
+ * nuisance posterior these measurements do not carry - so this is the weaker
+ * of the two arguments, not the stronger. Revisit it with gate outputs.
  *
  * Do not raise this back on the strength of "of fired": that number is a
  * property of the boxes that survive, and it is maximised by never firing at
- * all. Measured in `investigations/2026-10-02-mosquito-id/61-detector.md`.
+ * all.
+ *
+ * Every figure above is macro-F1/accuracy over the six coarse genus-level
+ * classes the evaluation head predicts, not the app's 16-species output, and
+ * the app's species floor and genus collapse are not what was measured. The
+ * underlying measurements are `investigations/2026-10-02-mosquito-id/67-detconf.md`
+ * (in the devcontainer repo, not this one) and 61-detector.md beside it.
  */
 export const DET_CONF = 0.50;
 export const NMS_IOU = 0.70;

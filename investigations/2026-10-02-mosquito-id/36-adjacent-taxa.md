@@ -112,8 +112,9 @@ shares the camera, the lighting, the photographer's hands and the surface.
 - **Verification:** every crop is run through the app's *own* detector
   (`yolo11n-mosquito-det-640.onnx`, the shipped release asset) with the app's own
   letterbox and its exact `chwFromCanvas` preprocessing. A crop is kept **only if the
-  detector fires no box at all** — the threshold used is 0.15, an order of magnitude
-  below the app's `DET_CONF` of 0.70, so a mosquito the detector is *unsure* about
+  detector fires no box at all** — the threshold used is 0.15, three times
+  below the app's `DET_CONF` of 0.50 (which was 0.70 when this ran), so a
+  mosquito the detector is *unsure* about
   also disqualifies the crop. Ground truth by a stricter detector is the only kind
   worth having.
 
