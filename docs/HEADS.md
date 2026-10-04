@@ -208,7 +208,7 @@ shipped floors:
 | `species` | 63 (1.01%) | 4,183 (66.83%) |
 | `genus` | 2,564 (40.99%) | 325 (5.19%) |
 | `unsure` | 3,637 (58.15%) | 1,754 (28.01%) |
-| `non-mosquito` | 0 | 2 (0.03%) |
+| `non-mosquito` | 0 | 1 (0.02%) |
 
 The abstention rate more than halves, in the direction that matters: the previous
 head claimed a species on 1 photograph in 100. **No floor was refitted** — these
@@ -321,20 +321,65 @@ of photographs to 17.1%. That is a **mitigation, not a fix**, and it is the whol
 reason the off-corpus genus numbers stay in this file rather than being tuned
 away.
 
-### The two blocks the gate reads were not touched
+### The blocks the gate reads
 
-| | previous head | refitted |
-| --- | ---: | ---: |
-| nuisance rows carrying image information | 0 of 8 | 0 of 8 |
-| adjacent rows carrying image information | 1 of 8 | 1 of 8 |
-| of the 700 negatives, refused as background | 59.14% | 56.29% |
-| of 1,500 in-domain mosquitoes, lost to that row | 0 (0.00%) | 2 (0.13%) |
+| | previous head | refitted, row preserved | refitted, row refitted |
+| --- | ---: | ---: | ---: |
+| nuisance rows carrying image information | 0 of 8 | 0 of 8 | 0 of 8 |
+| adjacent rows carrying image information | 1 of 8 | 1 of 8 | 1 of 8 |
+| of the 700 negatives, refused as background | 59.14% | 56.29% | **86.14%** |
+| of 1,500 in-domain mosquitoes, lost to that row | 0 (0.00%) | 0.13% | **0.00%** |
+| of the 6,264 in-domain cache, falsely refused | 0 | 2 | **1** |
+
+The middle column is the state after the species rows alone were refitted and the
+background row was left exactly as it shipped. The right column is the current
+head. The difference between them is the subject of the next section.
 
 The fifteen placeholder rows are still placeholders, so the nuisance block still
 cannot fire the gate — see `informativeRows` above. Note that their *mass* is not
 zero and never was: they take 0.4%-28% of the joint posterior. `informativeRows`
 is what stops that mattering, and `tests/culico-head.test.ts` is what stops a
 later refit from quietly filling them in.
+
+### The background row had to be refitted, not just preserved
+
+`a photograph without a mosquito` was fitted against the OLD species logits. It
+shares a softmax with them, so moving the species block moves the competition it
+has to win, and preserving it cost 3 points of negative detection (59.14% ->
+56.29%) while the row itself still separated background cleanly.
+
+The obvious repair is to refit the row on the same features at the new scale, and
+it works. The 700 negatives are grouped into four folds **by source photograph** -
+538 photographs, up to two detector crops each - so a crop from a held-out
+photograph is never in the fit and the detector is scored on negatives it has
+never seen:
+
+| row | negatives refused (held out) | in-domain mosquitoes lost |
+| --- | ---: | ---: |
+| shipped with the head | 56.29% | 0.13% |
+| joint refit, C = 10 | 70.57% | 0.00% |
+| joint refit, C = 100 | 84.57% | 0.00% |
+| joint refit, C >= 1000 | **86.14%** | **0.00%** |
+
+The sweep plateaus at the unregularised limit, so the shipped row is a plain
+logistic fit with no L2 penalty at all, and `C` is not a parameter of it. That is
+the right reading of a binary detector with 2,200 rows and 1,153 features.
+
+**What it costs, measured:** nothing on the species side. The row's logit on an
+in-domain mosquito is far enough down that the species block's total posterior
+mass moves by +0.0014 on average and never down. On the 6,264-row cache the
+refusals fall from 2 to 1. On the 2,450-row in-corpus test split the row now
+refuses 5 photographs (0.2%) that it previously let through, which is the price
+of a detector that catches 30 points more background.
+
+**What it does not fix, and what it makes newly open.** The species rows' `C` was
+chosen by a rule whose first clause was "keep the background row alive". That
+clause no longer binds, so the rule should be re-run: on val macro-F1 alone it now
+selects `C = 30` (0.5512) over the shipped `C = 3` (0.5058), worth +0.54 pp
+species and +0.40 pp genus on the test split at 76.57% negative refusal instead
+of 89.57%. **That is not a swap**, because the per-engine floors above were fitted
+against `C = 3`'s posterior scale and would have to be re-derived. It is a full
+re-pass and is recorded here rather than done.
 
 ### One behavioural change nobody asked about, checked anyway
 

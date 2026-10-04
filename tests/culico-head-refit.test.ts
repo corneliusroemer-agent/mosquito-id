@@ -178,17 +178,20 @@ describe("the one fitted adjacent row still detects background", () => {
     expect(HEAD.adjacent![row]).toBe(BACKGROUND);
   });
 
-  it("still refuses 37 of the 64 held-out background crops", () => {
-    // The same 0.60 floor, the same detector row, 64 of the 700 detector-verified
-    // in-domain background crops. The species refit made that block far sharper,
-    // and a sharper species block competes for the same softmax - so this is the
-    // number that says the refit did not quietly kill the non-mosquito gate.
-    // On all 700 it refuses 56.3% against the previous head's 59.1%.
+  it("refuses 60 of the 64 held-out background crops", () => {
+    // The same 0.60 floor, on 64 of the 700 detector-verified in-domain
+    // background crops. This row was refitted on those negatives on 2026-10-04,
+    // jointly with the species rows, because the row that shipped with the head
+    // had been fitted against the OLD species logits and could no longer win the
+    // softmax they shared. Held out by SOURCE PHOTO - 538 photographs, up to two
+    // detector crops each - the refitted row refuses 86.1% of the 700 against
+    // 56.3% for the row it replaced, at 0.00% of 1,500 in-domain mosquitoes lost
+    // against 0.13%.
     let fired = 0;
     for (let i = 0; i < NEGATIVES.n; i++) {
       if (score(NEGATIVES.at(i)).adP[row]! >= DEFAULT_FLOORS.nonMosquito) fired++;
     }
-    expect(fired).toBe(37);
+    expect(fired).toBe(60);
   });
 
   it("still refuses none of the 64 in-domain mosquitoes", () => {
@@ -210,8 +213,8 @@ describe("the one fitted adjacent row still detects background", () => {
         if (hit.kind === "adjacent" && hit.name === BACKGROUND) named++;
       }
     }
-    expect(negativesRefused).toBe(37);
-    expect(named).toBe(37);
+    expect(negativesRefused).toBe(60);
+    expect(named).toBe(60);
     for (let i = 0; i < MOSQUITOES.n; i++) {
       const j = score(MOSQUITOES.at(i));
       expect(nonMosquitoGate(HEAD, j.adP, j.nuP), `row ${i}`).toBeNull();
