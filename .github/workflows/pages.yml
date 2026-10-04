@@ -11,8 +11,14 @@ permissions:
   id-token: write
 
 concurrency:
+  # A half-published Pages build is worse than a cancelled test run, so deploys
+  # queue rather than replace - `deploy-pages` has no lock of its own, and two
+  # concurrent runs can interleave their activation step and leave an older SHA
+  # live. The group stays a constant, not ref-keyed: every trigger here
+  # publishes to the one site, so serialising a `workflow_dispatch` run from
+  # another branch behind the in-flight deploy is the point, not a problem.
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
