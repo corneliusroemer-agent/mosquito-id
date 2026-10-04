@@ -527,8 +527,6 @@ async function initEngine() {
   }
 }
 
-const loadModels = () => initEngine();
-
 /**
  * Name the classifier that is actually running, under the title.
  *
@@ -2350,7 +2348,18 @@ window.addEventListener("DOMContentLoaded", () => {
   // initRouter captures the classifier's own title once and returns the handler
   // that applies a route against it, so both the initial render and every
   // subsequent hashchange go through the same function.
-  const onRouteChange = initRouter();
+  //
+  // The callback is the engine's start signal, and it fires on the first route
+  // that resolves to the classifier - at boot if that is where the page opened,
+  // at the navigation that gets there if it opened on the species guide, which
+  // is a route of this shell and must not pay for 1.2 GB of weights.
+  const onRouteChange = initRouter(() => {
+    initEngine().catch(err => {
+      console.error("Engine initialization error:", err);
+      setProgress("model", null, null);
+      setProgressError(`Error: ${err.message}`);
+    });
+  });
   window.addEventListener("hashchange", onRouteChange);
   onRouteChange();
 
@@ -2460,20 +2469,14 @@ window.addEventListener("DOMContentLoaded", () => {
     tileNodes.get(previews[selectedIndex])?.btn.focus();
   });
 
-  // Init Engine
-  initEngine().catch(err => {
-    console.error("Engine initialization error:", err);
-    setProgress("model", null, null);
-    setProgressError(`Error: ${err.message}`);
-  });
-
   // Warm the sample photos once the page is up, in the background.
   //
   // Deliberately after the engine load is started and never awaited: the model is
   // the long pole and must not queue behind ten images, and the first render
   // must not either. `requestIdleCallback` keeps the download off the frames the
   // user is actually looking at; the setTimeout is the fallback for a browser
-  // without it.
+  // without it. On the species route the engine load has not started, and the
+  // samples are still worth having cached for the navigation that starts it.
   const warmSamples = () => {
     prefetchSamples().catch(err => console.warn("Sample prefetch failed", err));
   };
