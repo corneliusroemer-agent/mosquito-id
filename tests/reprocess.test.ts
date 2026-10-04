@@ -328,3 +328,37 @@ describe("the button's wiring in main.js", () => {
     expect(fn).not.toContain('sendLog("delete_all_photos"');
   });
 });
+
+describe("the test seam's replaceable sessions", () => {
+  // A getter with no setter is the defect this pins. `window.__mosqAsync`
+  // published `sessClip` as a getter/setter pair and `sessDet` as a bare
+  // getter, so a test assigning `A.sessDet = {...}` wrote nothing: outside
+  // strict mode an assignment to an accessor without a setter is a silent
+  // no-op, and `page.evaluate` bodies are not strict. `processFiles` then
+  // queued every photo instead of processing it and the gallery stayed empty,
+  // which reads as a broken batch rather than a broken seam. The re-run is
+  // `processFiles`, so the spec needs both sessions replaceable, not one.
+  const MAIN = readFileSync(join(root, "src", "app", "main.js"), "utf8");
+  const seam = MAIN.slice(
+    MAIN.indexOf("window.__mosqAsync = {"),
+    MAIN.indexOf("(function countFrames()"),
+  );
+
+  for (const name of ["sessClip", "sessDet", "embeds", "selectedIndex"]) {
+    it(`exposes ${name} as a getter/setter pair`, () => {
+      expect(seam).toMatch(new RegExp(`get ${name}\\(\\)`));
+      expect(seam).toMatch(new RegExp(`set ${name}\\(v\\)`));
+    });
+  }
+
+  it("processFiles refuses a batch while either session is missing", () => {
+    // The reason a fake classifier alone is not enough: this guard is an `||`
+    // over both, so a missing detector queues the batch exactly as a missing
+    // classifier does.
+    const fn = MAIN.slice(
+      MAIN.indexOf("async function processFiles"),
+      MAIN.indexOf("async function processFiles") + 2500,
+    );
+    expect(fn).toMatch(/if \(currentEngine !== "server-gpu" && \(!sessDet \|\| !sessClip\)\)/);
+  });
+});
