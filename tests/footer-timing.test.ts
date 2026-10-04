@@ -42,7 +42,7 @@ const TIMING = {
 describe("renderFooterTiming", () => {
   it("gives each of the three timings its own slot, in order", () => {
     const { rendered, slot, doc } = fakeDom();
-    expect(renderFooterTiming(slot, doc, TIMING)).toBe(true);
+    expect(renderFooterTiming(slot, doc as unknown as Document, TIMING)).toBe(true);
 
     expect(rendered.map((n) => n.className)).toEqual([
       "timing-num",
@@ -54,7 +54,7 @@ describe("renderFooterTiming", () => {
 
   it("writes the line the app showed before, slot markup aside", () => {
     const { rendered, texts, slot, doc } = fakeDom();
-    renderFooterTiming(slot, doc, TIMING);
+    renderFooterTiming(slot, doc as unknown as Document, TIMING);
 
     expect(texts.join("|")).toBe(
       "inference: culico-net-cls-v1 (WEBGPU) · |ms/photo (crop: |ms · analyze: |ms",
@@ -70,15 +70,15 @@ describe("renderFooterTiming", () => {
 
   it("replaces the line rather than stacking a second one", () => {
     const { rendered, slot, doc } = fakeDom();
-    renderFooterTiming(slot, doc, TIMING);
-    renderFooterTiming(slot, doc, { ...TIMING, totalMs: 9 });
+    renderFooterTiming(slot, doc as unknown as Document, TIMING);
+    renderFooterTiming(slot, doc as unknown as Document, { ...TIMING, totalMs: 9 });
     expect(rendered).toHaveLength(3);
     expect(rendered[0]!.textContent).toBe("9");
   });
 
   it("rounds to whole milliseconds, so the digit count is bounded", () => {
     const { rendered, slot, doc } = fakeDom();
-    renderFooterTiming(slot, doc, { ...TIMING, totalMs: 223.7 });
+    renderFooterTiming(slot, doc as unknown as Document, { ...TIMING, totalMs: 223.7 });
     expect(rendered[0]!.textContent).toBe("224");
   });
 
@@ -87,7 +87,7 @@ describe("renderFooterTiming", () => {
     // is the defect this line exists to prevent - so a missing timing must not
     // reach the DOM as one.
     const { rendered, slot, doc } = fakeDom();
-    renderFooterTiming(slot, doc, {
+    renderFooterTiming(slot, doc as unknown as Document, {
       ...TIMING,
       totalMs: Number.NaN,
       cropMs: undefined as unknown as number,
@@ -103,7 +103,7 @@ describe("renderFooterTiming", () => {
 
   it("does nothing without a slot or a document", () => {
     const { slot, doc } = fakeDom();
-    expect(renderFooterTiming(null, doc, TIMING)).toBe(false);
+    expect(renderFooterTiming(null, doc as unknown as Document, TIMING)).toBe(false);
     expect(renderFooterTiming(slot, null, TIMING)).toBe(false);
   });
 });
