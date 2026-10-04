@@ -25,6 +25,11 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # Queuing means a wedged run now blocks every later push to this ref
+    # instead of being replaced by it, and `playwright install` plus the e2e
+    # tiers are exactly the steps that hang. 30 min against a measured 1-2 min
+    # run is loose enough not to fire on a slow day.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
