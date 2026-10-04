@@ -2,10 +2,35 @@
 
 ## The one thing that surprises everyone
 
-**`npx playwright test` exits 0 when it never runs.** If the preview server cannot bind
-its port it prints an error and returns success, so any gate scripted on the exit code is
-green having tested nothing. This has happened twice in one session and both times a merge
-went through on a "passing" browser leg that never started.
+**`reuseExistingServer: true` lets the suite pass against someone else's build.** Playwright
+then skips the launch entirely and just probes the `webServer` URL. If another agent's preview
+server is on that port, the probe succeeds, the tests run green, and they have tested a `dist/`
+this working tree never built — with nothing in the output to say so.
+
+This repo is not exposed to it: `playwright.config.ts` sets `reuseExistingServer: false`
+unconditionally and passes `--strictPort` to `vite preview`. Both are load-bearing. See
+`BUILD-VERIFICATION.md` for the incident that motivated them.
+
+Playwright itself reports failures correctly. Measured on 1.63.0 against this repo's own config,
+every one of these exits **1**, not 0:
+
+| situation | what it prints |
+|---|---|
+| port occupied by a server answering HTTP | `Error: http://127.0.0.1:4173 is already used...` |
+| port occupied by a dead listener | `Error: Process from config.webServer was not able to start. Exit code: 1` |
+| `webServer` command exits before the URL is reachable | `Error: Process from config.webServer exited early.` |
+| no tests match the selection | `Error: No tests found` |
+
+The third row is worth knowing: a `webServer` that exits **0** before becoming ready is still an
+error. Playwright does not consult the child's exit code, it checks whether the URL came up.
+
+So a gate on the exit code is sound here. Two things still break it, both outside Playwright:
+
+- **`--pass-with-no-tests`** turns an empty selection into exit 0, printing nothing at all. Do
+  not pass it in a gate.
+- **A shell wrapper.** The same failing run returns `$?` 1 bare, but **0** under `|| true`, under
+  a pipeline without `set -o pipefail`, or when a later command in a compound sets the status. The
+  error text still scrolls past while `$?` says 0.
 
 Check the run actually produced test lines, not just exit status.
 
@@ -93,6 +118,22 @@ unrelated spec each run (`controls`, `shell`, `tile-states`, each passing 3/3 in
 isolation), which was proven by running untouched upstream `main`.
 
 Full reasoning: `docs/CI-TEST-SIGNAL.md`.
+
+## Gating the browser suite
+
+Four things, all already true of this repo's config — recorded so a future change does not
+quietly undo one of them:
+
+1. **`reuseExistingServer` off.** Otherwise a stale `dist/` from another agent's clone can answer
+   the probe and the suite tests that instead of yours.
+2. **`vite preview --strictPort`.** Without it vite silently shifts to the next free port, so the
+   configured URL is not what is actually serving.
+3. **No wrapper that masks the exit code** — no `|| true`, no pipeline without `set -o pipefail`,
+   no trailing command in a compound that resets `$?`.
+4. **No `--pass-with-no-tests`.** It makes an empty selection exit 0.
+
+As an extra safeguard, assert that the JSON or JUnit report contains at least one **executed**
+test, rather than trusting the exit status alone.
 
 ## CI
 
