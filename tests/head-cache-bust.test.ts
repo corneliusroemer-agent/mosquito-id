@@ -221,3 +221,35 @@ describe("versionedModelUrl and the weights rule", () => {
     expect(versionedModelUrl("Weights.ONNX", SHA_A)).toBe("Weights.ONNX");
   });
 });
+
+describe("a head that is not there", () => {
+  const realFetch = globalThis.fetch;
+  const realCaches = (globalThis as Record<string, unknown>).caches;
+  const realWindow = (globalThis as Record<string, unknown>).window;
+  const realLocation = (globalThis as Record<string, unknown>).location;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    (globalThis as Record<string, unknown>).caches = realCaches;
+    (globalThis as Record<string, unknown>).window = realWindow;
+    (globalThis as Record<string, unknown>).location = realLocation;
+  });
+
+  it("names the URL and the status, rather than failing to parse an error page", async () => {
+    // The head used to be read with `fetch(...).json()`, so a 404 surfaced as a
+    // JSON parse error naming nothing. It now surfaces as the HTTP status, which
+    // is the difference between a diagnosable deploy failure and a mystery.
+    const store = fakeCache();
+    (globalThis as Record<string, unknown>).location = { href: `${ORIGIN}index.html` };
+    (globalThis as Record<string, unknown>).window = globalThis;
+    (globalThis as Record<string, unknown>).caches = { open: async () => store.cache };
+    globalThis.fetch = (async () =>
+      ({ ok: false, status: 404, headers: new Headers(), body: null }) as unknown as Response) as
+      typeof globalThis.fetch;
+
+    await expect(fetchWithCache(HEAD, undefined, undefined, SHA_A)).rejects.toThrow(
+      `${HEAD}?build=${SHA_A}: HTTP 404`,
+    );
+    expect([...store.entries.keys()]).toEqual([]);   // nothing half-written
+  });
+});
