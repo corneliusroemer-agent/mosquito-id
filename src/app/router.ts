@@ -38,10 +38,11 @@ function showClassifier(classifierTitle: string): void {
   document.title = classifierTitle;
 }
 
-function applyRoute(classifierTitle: string): void {
+function applyRoute(classifierTitle: string, onClassifier?: () => void): void {
   const route = parseRoute();
   if (route.view === "classifier") {
     showClassifier(classifierTitle);
+    onClassifier?.();
     return;
   }
   document.querySelector(".app-container")?.classList.add("route-off");
@@ -59,9 +60,24 @@ function applyRoute(classifierTitle: string): void {
  * scope, so that reading the page is this function's doing and not something
  * that happens merely because a module was imported. A module script is deferred,
  * so the document has been parsed either way and the value is the same.
+ *
+ * `onClassifier` is how the classifier shell tells its owner it is on screen: it
+ * runs the first time a route resolves to the classifier, at boot if that is where
+ * the page opened and otherwise at the navigation that brings it there. The
+ * species guide is a route of this shell, so booting on `#/species/<slug>` is a
+ * supported way in - and a tab that opens there must not fetch 1.2 GB of weights
+ * and build an ONNX session for a classifier it will not run. The callback fires
+ * once per page load; a later navigation to the species route does not undo it,
+ * because the sessions are already built and the classifier keeps its state.
  */
-export function initRouter(): () => void {
+export function initRouter(onClassifier?: () => void): () => void {
   const classifierTitle = document.title;
-  const onHashChange = (): void => applyRoute(classifierTitle);
+  let engineStarted = false;
+  const onHashChange = (): void =>
+    applyRoute(classifierTitle, () => {
+      if (engineStarted) return;
+      engineStarted = true;
+      onClassifier?.();
+    });
   return onHashChange;
 }
