@@ -5,6 +5,28 @@ import { genusScores } from "./genusScores";
 import { verdictFrom } from "./verdict";
 import { viewAgreement } from "./viewAgreement";
 
+/**
+ * Below this max species posterior the crop is scored on its own, not pooled.
+ *
+ * Equal-weight pooling spends the whole frame a vote it has not earned whenever
+ * the crop is the view that knows something. On 1,199 held-out images in 1,188
+ * specimen groups (n_classes 6, the shipped 2.5 temperature, detector at the
+ * shipped 0.50 confidence), routing on this threshold is worth -0.051 nce
+ * [-0.110, -0.004] out of sample, negative in 15 of 15 group-level partitions
+ * and -0.0509 +- 0.0030 across them; the best fixed pooling weight reaches only
+ * -0.020 with an interval covering zero. macro-F1 moves +0.075 in the same
+ * direction in every partition. Accuracy is flat (+0.25 pp), so this is not an
+ * accuracy win.
+ *
+ * Every threshold from 0.60 to 0.90 is negative (-0.036 to -0.065), so 0.80 is
+ * read as mid-basin rather than as the fitted optimum: the fitted optimum moves
+ * between partitions and a threshold fitted on one half occasionally lands
+ * outside the basin and loses the effect entirely.
+ *
+ * Measurements: investigations/2026-10-02-mosquito-id/80-confidence-router.md.
+ */
+export const CROP_ONLY_MAX_POSTERIOR = 0.8;
+
 export interface FusedResult {
   /** Genus -> summed posterior. */
   labels: Record<string, number>;
@@ -82,6 +104,18 @@ export function fuseViews(
       "fuseViews: views on different scales, not pooling",
       viewResults.map((v) => v.scale),
     );
+    return fuseViews(head, [viewResults[0]!], floors);
+  }
+
+  // An unconfident crop is scored on its own. Equal weighting spends the whole
+  // frame half the decision on rows where the crop is the view carrying the
+  // signal and the frame is close to flat, and the frame's vote is what decides
+  // them. `viewResults[0]` is the crop whenever there is one - every caller
+  // pushes it first and the whole frame second - so this is a statement about
+  // the crop and never about a pool of crops. With one view there is nothing to
+  // pool and the branch cannot fire, which keeps the single-view path the
+  // algebraically identical one the doc comment below describes.
+  if (V > 1 && Math.max(...viewResults[0]!.spP) < CROP_ONLY_MAX_POSTERIOR) {
     return fuseViews(head, [viewResults[0]!], floors);
   }
 

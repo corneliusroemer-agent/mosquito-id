@@ -38,7 +38,13 @@ function view(species: string, top: number): ViewResult {
 // Two views that disagree, which is the only configuration in which pooling can
 // be observed at all. `crop` is the more confident of the two, so the fused
 // posterior must land between them and nearer the crop.
-const crop = () => view("Aedes aegypti", 0.7);
+//
+// The crop sits above `CROP_ONLY_MAX_POSTERIOR` because a crop below it is scored
+// on its own and never reaches the pooling these tests pin (see
+// `confidence-router.test.ts` for that branch). These assertions are about the
+// pooling arithmetic and are unchanged; only the fixture row moved, and it moved
+// onto a row that still pools.
+const crop = () => view("Aedes aegypti", 0.9);
 const whole = () => view("Culex pipiens", 0.4);
 
 describe("toggling the whole-frame view moves the fused posterior", () => {
@@ -64,7 +70,7 @@ describe("toggling the whole-frame view moves the fused posterior", () => {
     // (that would sit 0.55 along the probability axis) and NOT a confidence-
     // weighted one (that would move the ratio by the ratio of the two tops).
     const arithmetic = (c.spP[i]! + w.spP[i]!) / 2;
-    const confWeighted = (0.7 * c.spP[i]! + 0.4 * w.spP[i]!) / 1.1;
+    const confWeighted = (0.9 * c.spP[i]! + 0.4 * w.spP[i]!) / 1.3;
     const sum = fused.spP.reduce((a, b) => a + b, 0);
     const got = fused.spP[i]! / sum;
     expect(got).not.toBeCloseTo(arithmetic, 4);

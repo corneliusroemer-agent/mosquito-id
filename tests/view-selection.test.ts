@@ -103,7 +103,10 @@ describe("which views a photo offers", () => {
 describe("what the view count does to the fused result", () => {
   // Two views that name different species: the case the disagreement veto exists
   // for, and the case that makes the fused top different from either view's.
-  const crop = () => view("Aedes aegypti", 0.6);
+  // Above `CROP_ONLY_MAX_POSTERIOR`: a crop below it is scored on its own and
+  // never reaches the pooling this block is about (`confidence-router.test.ts`
+  // covers that branch). The assertions are unchanged.
+  const crop = () => view("Aedes aegypti", 0.9);
   const whole = () => view("Culex pipiens", 0.45);
 
   it("fuses two disagreeing views into something neither of them said", () => {
