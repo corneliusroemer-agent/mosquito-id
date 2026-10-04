@@ -190,8 +190,9 @@ issues, and a short SHA for a commit that reached `main` directly.
   the extracted modules so the tests exercise what ships
   ([#2](https://github.com/corneliusroemer-agent/mosquito-id/pull/2), `a85b09c`, `6f50cc1`).
 - **`main.js` split into modules**: 12 extractions, 3125 → 2065 lines
-  ([#11](https://github.com/corneliusroemer-agent/mosquito-id/pull/11), `60f14e3`) — closes
-  [#34](https://github.com/corneliusroemer-agent/mosquito-id/issues/34).
+  ([#11](https://github.com/corneliusroemer-agent/mosquito-id/pull/11), `60f14e3`) — addresses
+  [#34](https://github.com/corneliusroemer-agent/mosquito-id/issues/34), partially: the size
+  half is done, the type-checking half is not.
 - **The build's commit SHA is stamped into asset URLs on every deploy** (`0e48727`) and into
   the page URL as `?build=` ([#26](https://github.com/corneliusroemer-agent/mosquito-id/pull/26)).
 - **Layout stability, a long run of shifts removed**: photos no longer resize the page as they

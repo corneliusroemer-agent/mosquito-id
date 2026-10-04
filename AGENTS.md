@@ -61,17 +61,35 @@ so its e2e run fails in a way that looks like an app bug. Do not add a port; wid
 allowlist needs the Cloudflare token. A failed `npx vite preview --strictPort` on an unlisted
 port is a configuration error, not a flake — do not re-run it hoping for a different result.
 
-**Playwright exits 0 when it never starts.** A run that did not bind a port is not a pass. A
-second `@playwright/test` install under another checkout also breaks this one — the shared
-transform cache serves entries recorded against the other tree. Clearing the cache and setting
-a private `TMPDIR` do not fix it; `npm ci` in the repo does. Before concluding a Playwright
-change broke the suite, run `npm ci`.
+**Playwright's real false greens are narrow, and `docs/TESTING.md` measures them.** An earlier
+version of this file claimed `npx playwright test` exits 0 when the preview server fails to
+start. That is **false, and was retracted** in
+[#54](https://github.com/corneliusroemer-agent/mosquito-id/pull/54): measured on 1.63.0 against
+this repo's config, a port held by a live server, a port held by a dead listener, a `webServer`
+that exits before the URL is reachable, and an empty selection each exit **1**. Playwright
+checks whether the URL came up, not the child's exit code. The three real ones:
+
+- **`reuseExistingServer: true`** lets the suite pass against another agent's `dist/`. This repo
+  is immune — `playwright.config.ts` sets `reuseExistingServer: false` and `--strictPort` —
+  which is why it is worth stating rather than assuming.
+- **`--pass-with-no-tests`** exits 0 on an empty selection.
+- **A shell wrapper** — `|| true`, or a pipeline without `pipefail` — makes `$?` read 0 while
+  the error scrolls past. This is the one that bit: a wrapper ending `echo "EXIT=$?"` reports
+  the exit status of the `echo`.
+
+**A second `@playwright/test` install under another checkout also breaks this one**, separately:
+the shared transform cache serves entries recorded against the other tree and every spec fails
+at collection. Clearing the cache and setting a private `TMPDIR` do not fix it; `npm ci` in the
+repo does. Before concluding a Playwright change broke the suite, run `npm ci`.
 
 **Constants fitted in one coordinate system have been applied in another.** The
-`CROP_ONLY_MAX_POSTERIOR` router threshold was fitted on a 6-class species-only
-`predict_proba` posterior and is applied to a 25-class joint `softmaxJoint` posterior, so it
-fires on 10 of 10 shipped example photos. Check that a threshold's *input* is the quantity
-the app actually computes, not merely one with the same name.
+`CROP_ONLY_MAX_POSTERIOR` router threshold was fitted on a **6-class species-only**
+`predict_proba` posterior (report 80: `n = 1,199`, `n_classes = 6`), while the quantity
+`fuseViews` actually reads is `viewResults[0].spP` out of `softmaxJoint` — for the shipped B/16
+head a **25-class** joint softmax in which nine nuisance rows compete for mass. That makes the
+router fire on **10 of 10 shipped example photographs** (report 82), so the whole-frame view is
+never pooled on any of them. Check that a threshold's *input* is the quantity the app computes,
+not merely one with the same name.
 
 **Never `git stash`** in a tree another agent is using: it sweeps every tracked modification
 into the stash, including their uncommitted work.
