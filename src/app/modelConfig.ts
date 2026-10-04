@@ -101,6 +101,32 @@ export function cosineOffsetsFor(engineKey: string): Readonly<Record<string, num
  *
  * H/14 carries an entry too, for a different reason: it is the engine the shipped
  * floors were fitted on, and it does not meet them on a second corpus. See above.
+ *
+ * B/16's head was refitted on the same day and by the same route (see
+ * docs/HEADS.md), from a zero-shot text head to a 16-way linear probe. Its floors
+ * were re-derived from its own selective-accuracy curves on the held-out corpus,
+ * fitted on one half and read on the other:
+ *
+ *   species 0.80   half A 91.6% at 33% coverage; half B 90.6% at 31%
+ *   genus   0.90   half A 98.1% at 55% coverage; half B 97.8% at 52%
+ *
+ * The two values happen to equal culico's. That is a coincidence of where the two
+ * probes' accuracy curves cross the target, not a shared decision: they are fitted
+ * per engine because a floor is an absolute threshold on a posterior and neither
+ * engine produces the other's. `temperature` is unchanged at 2.5, because
+ * `logit_scale` is 2.5 too and the arithmetic requires their ratio to be 1.0.
+ *
+ * The `nuisance` floor is this engine's own most consequential number, because B/16
+ * has no adjacent block: its eight nuisance rows are the gate's ONLY evidence.
+ * They are still the zero-shot text prompts, which were never fitted against a
+ * mosquito and cannot tell a wall from an uncertain mosquito - so their block mass
+ * rises exactly when the species block is unsure. On the shipped head that mass
+ * cleared the inherited 0.05 on 22.9% of real in-domain mosquitoes, naming
+ * `a photograph of a person` on 127 of 2,450. Raising it to 0.20 cuts that to 5.6%,
+ * at the cost of the gate refusing fewer background crops (87.9% -> 36.4%). Both
+ * numbers are the honest trade: the gate's negatives and its mosquitoes move
+ * together on this head, so it cannot be tuned to catch background without also
+ * catching insects. See docs/HEADS.md.
  */
 const ENGINE_FLOORS: Readonly<Record<string, Floors>> = Object.freeze({
   // H/14 is the engine DEFAULT_FLOORS were fitted on, so inheriting them is the
@@ -126,6 +152,12 @@ const ENGINE_FLOORS: Readonly<Record<string, Floors>> = Object.freeze({
     ...DEFAULT_FLOORS,
     species: 0.80,
     genus: 0.90,
+  }),
+  "webgpu-b16": Object.freeze({
+    ...DEFAULT_FLOORS,
+    species: 0.80,
+    genus: 0.90,
+    nuisance: 0.20,
   }),
 });
 
