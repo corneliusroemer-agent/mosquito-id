@@ -6,6 +6,9 @@
  * the page is served. It is put in the URL rather than in the DOM because the
  * address bar is where someone reading a bug report already is, and because a
  * link carrying ?build=<sha> is self-describing when it is shared.
+ *
+ * The same SHA is shown in the footer as a link to the commit, so the deployment
+ * can be identified from the page itself and not only from a URL someone pasted.
  */
 
 export const BUILD_PARAM = "build";
@@ -30,6 +33,65 @@ export function buildUrl(href: string, sha: string | undefined = COMMIT_SHA): st
   // Relative to the document: the site is served from /mosquito-id/ under
   // `base: "./"`, and a bare absolute path would break there.
   return `${url.pathname}${url.search}${url.hash}`;
+}
+
+const COMMIT_URL_BASE = "https://github.com/corneliusroemer-agent/mosquito-id/commit/";
+
+/** A git object name: what VITE_COMMIT_SHA is, and nothing else may become a URL. */
+const SHA_PATTERN = /^[0-9a-f]{7,40}$/;
+
+/**
+ * What the footer shows and links to, or null when the build carries no SHA.
+ *
+ * Same source as the URL stamp and the same rejection of a blank SHA, so the
+ * footer and the address bar can never name different builds. The SHA is
+ * pattern-checked before it goes into the URL: it is the one string here that
+ * comes from the build environment rather than from the page.
+ */
+export function buildLink(
+  sha: string | undefined = COMMIT_SHA,
+  shortLength = 7,
+): { text: string; href: string } | null {
+  const trimmed = sha?.trim();
+  if (!trimmed || !SHA_PATTERN.test(trimmed)) return null;
+  return { text: trimmed.slice(0, shortLength), href: `${COMMIT_URL_BASE}${trimmed}` };
+}
+
+/** The footer slot. `unknown` rather than Node so a plain stub stands in for it. */
+type ParentLike = {
+  replaceChildren(...nodes: unknown[]): void;
+};
+
+/**
+ * Put the commit link in the footer's slot, or leave the slot empty.
+ *
+ * `replaceChildren` rather than append, so a re-run cannot stack a second link
+ * and the absent case leaves nothing behind rather than an orphaned divider.
+ */
+export function renderBuildLink(
+  slot: ParentLike | null,
+  doc: Document | null,
+  sha: string | undefined = COMMIT_SHA,
+): boolean {
+  if (!slot || !doc) return false;
+  const link = buildLink(sha);
+  if (!link) {
+    slot.replaceChildren();
+    return false;
+  }
+  const anchor = doc.createElement("a");
+  anchor.className = "build-link";
+  anchor.href = link.href;
+  // The commit page is on another origin and opens in a new tab; noopener keeps
+  // it from reaching back through window.opener.
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  anchor.textContent = `build ${link.text}`;
+  const divider = doc.createElement("span");
+  divider.className = "divider";
+  divider.textContent = "·";
+  slot.replaceChildren(divider, anchor);
+  return true;
 }
 
 type HistoryLike = {

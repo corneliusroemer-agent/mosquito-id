@@ -709,6 +709,14 @@
   }
   .divider { opacity: 0.6; }
 
+  /* The build slot is a flex item even while it is empty, and `gap` applies
+     between items, so an empty slot would still push the footer text 8px off
+     centre. `display: none` on the empty state keeps a SHA-less build - a local
+     `npm run build` - laid out exactly as before. */
+  #footer-build:empty { display: none; }
+  #footer-build { white-space: nowrap; }
+  .build-link { color: inherit; text-decoration: underline; }
+
   /* ------------------------------------------------------------------
      Species result rows
      main.js emits .species-name-wrap > (.species-wiki, .species-kb-link,
@@ -1226,6 +1234,9 @@
     <span id="footer-device">inference: initializing...</span>
     <span class="divider">·</span>
     <span>Zero-server privacy in WebGPU mode</span>
+    <!-- Filled by renderBuildLink() with `· build <short sha>`, and left empty
+         when the build carries no SHA (a local `npm run build`). -->
+    <span id="footer-build"></span>
   </footer>
 </div>
 
