@@ -25,21 +25,32 @@ export const CLIP_SIZE = 224;
  * analysed whole, at 69.97% accuracy and 0.356 macro-F1 against 0.480 for the
  * shipped threshold.
  *
- * At 0.50 the detector fires on 71.5%, wrong boxes on 9.9% of fired images
- * rather than 4.2%. Measured on 1,199 held-out images under the app's own
- * two-view pooling rule - crop and whole frame combined log-linearly - and
- * paired over report groups, 2,000 resamples, every arm at the shipped
- * temperature of 2.5: against 0.70 it is +2.26 to +2.60 pp accuracy and
- * +0.026 to +0.028 macro-F1, and it is better on prior-corrected entropy
- * (-0.047 [-0.095, -0.004]) wherever the nuisance gate rejects a wrong box.
- * No retraining, no inference cost.
+ * At 0.50 the detector fires on 71.5% of that 4,172-image set, wrong boxes on
+ * 9.9% of fired images rather than 4.2%. On a separate 1,199-image held-out
+ * subsample, measured under the app's own two-view pooling rule - crop and
+ * whole frame combined log-linearly - paired over report groups, 2,000
+ * resamples, every arm at the shipped temperature of 2.5: against 0.70 it is
+ * +2.26 to +2.59 pp accuracy, +0.026 to +0.028 macro-F1, and better on
+ * prior-corrected entropy (-0.047 [-0.095, -0.004]) under both gate rules that
+ * reject a wrong box. No retraining, but not free either: 16 pp more images
+ * get a crop classified beside the whole frame, so each pays a second encoder
+ * pass.
  *
- * 0.30 is the same call made harder and is NOT settled. It is better still on
- * accuracy (+0.33 pp) and macro-F1 (+0.019), worse on entropy under a
- * permissive gate, and indistinguishable on entropy under the rejecting gates
- * (+0.011 [-0.029, +0.052]). It is held back on a proxy, not on a measurement:
- * it doubles wrong boxes to 20.2% of fired images, and a simulated IoU gate
- * is a poor stand-in for the real one. See 71-detconf-entropy.md before
+ * That entropy claim is conditional and the condition is the point. Under the
+ * gate rule that never rejects - every crop pooled however wrong the box - 0.50
+ * is *worse* than 0.70 on entropy (+0.101 [-0.054, +0.333]), and a worse
+ * sign-flip is what a wrong crop being pooled looks like. All three rules
+ * simulate the gate as a box-IoU test against a gold box; the app's real gate
+ * is `max(species) >= max(nuisance)` - is this crop even a mosquito - with no
+ * reference to a gold box at all. Read these as bracket, not as measurement.
+ *
+ * 0.30 is the same call made harder and is NOT settled on accuracy or macro-F1,
+ * where it is better still (+0.33 to +0.75 pp, +0.015 to +0.019). On entropy
+ * it buys nothing: indistinguishable under the rejecting gates (+0.011
+ * [-0.029, +0.052]) and worse under the permissive one. On the headline metric
+ * there is no case for it, and it doubles wrong boxes on the 4,172-image set
+ * to 20.2% of fired images. What holds it back is therefore a measurement and a
+ * proxy together, not a proxy alone. See 71-detconf-entropy.md before
  * changing this.
  *
  * Do not raise this back on the strength of "of fired": that number is a
