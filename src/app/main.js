@@ -39,7 +39,7 @@ import { downloadCSV, renderResultsTable } from "./resultsTable";
 import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
-import { stampBuildSha } from "./buildSha";
+import { renderBuildLink, stampBuildSha } from "./buildSha";
 import { updatePooling } from "./poolingPanel";
 import { badge, canView, checkLabel, contributesToPool,
          removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
@@ -2313,6 +2313,10 @@ window.addEventListener("DOMContentLoaded", () => {
   // First, so the address bar names the build before anything else runs: the
   // whole point is reading the SHA off the URL when the page misbehaves.
   stampBuildSha();
+
+  // The same SHA, this time where it is visible: the footer's build link. It
+  // renders nothing in a local build, which has no VITE_COMMIT_SHA.
+  renderBuildLink(document.getElementById("footer-build"), document);
 
   setupCropSurfaces();
   wireStripActions();
