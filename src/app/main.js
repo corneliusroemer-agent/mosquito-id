@@ -236,6 +236,13 @@ const ASYNC = (window.__mosqAsync = {
   // an inference that returns without downloading 1.26 GB of weights.
   set sessClip(v) { sessClip = v; },
   get sessDet() { return sessDet; },
+  // The detector, replaceable for the same reason and needed for the same
+  // reason: `processFiles` refuses a batch while either session is missing, so a
+  // fake classifier alone leaves every photo queued and the gallery empty. The
+  // getter and the setter have to come as a pair - a getter on its own makes an
+  // assignment to it a silent no-op outside strict mode, and `page.evaluate`
+  // bodies are not strict.
+  set sessDet(v) { sessDet = v; },
   get selectedIndex() { return selectedIndex; },
   set selectedIndex(v) { selectedIndex = v; },
   get includedIndices() { return includedIndices; },

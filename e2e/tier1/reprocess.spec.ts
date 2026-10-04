@@ -96,10 +96,13 @@ async function loadPhotos(page: Page, names: string[] = THREE): Promise<void> {
         return { embedding: { dims: [1, dim], data } };
       },
     };
-    // The entry that makes the switch below complete without a download: keyed by
-    // the engine being switched TO, which is what `loadWebGPUModels` looks up
-    // before it fetches anything.
+    // The entries that make the switches below complete without a download:
+    // keyed by engine, which is what `loadWebGPUModels` looks up before it
+    // fetches anything. Both ends are seeded - the engine being switched TO and
+    // the one switched back to - so switching away and back again is as real as
+    // switching away.
     A.clipSessions[photos.engine] = { sess: A.sessClip, ep: "wasm" };
+    A.clipSessions[photos.from] = { sess: A.sessClip, ep: "wasm" };
 
     const files: File[] = [];
     for (let i = 0; i < photos.names.length; i++) {
@@ -113,7 +116,7 @@ async function loadPhotos(page: Page, names: string[] = THREE): Promise<void> {
       files.push(new File([blob!], photos.names[i]!, { type: "image/jpeg" }));
     }
     await A.processFiles(files);
-  }, { names, engine: TO });
+  }, { names, engine: TO, from: FROM });
 }
 
 /** Boot the app, seed the shipped head, and put `names` on screen. */
@@ -125,7 +128,7 @@ async function gallery(page: Page, names: string[] = THREE): Promise<void> {
   await ensureTensor(page);
   await loadPhotos(page, names);
   await expect.poll(() => photoCount(page), { timeout: 30_000 }).toBe(names.length);
-  await settled(page);
+  await settled(page, names.length);
 }
 
 /** How many times the fake detector has been asked for a detection. */
@@ -225,6 +228,7 @@ test.describe("re-running the loaded photos on another engine", () => {
   });
 
   test("a switch whose weights cannot be fetched leaves the button visible and unusable", async ({ page }) => {
+    await gallery(page);
     // B/16 has no session cached, so this switch cannot complete: the download
     // is what tier 1 aborts. This is the window the button exists to refuse -
     // the dropdown already says B/16 while `sessClip` still holds H/14's session,
@@ -261,9 +265,12 @@ test.describe("re-running the loaded photos on another engine", () => {
     await expect(button(page)).toHaveAttribute("aria-label", /3 photos/);
 
     // Deleting the three the switch left behind takes the button with them,
-    // leaving only a photo the selected engine has already scored.
+    // leaving only a photo the selected engine has already scored. `last`, not
+    // `first`: the strip is newest-first, and the photo dropped after the switch
+    // is the newest one - deleting from the front would take the photo that is
+    // NOT stale and leave the three that are.
     for (let i = 0; i < 3; i++) {
-      await page.locator("#thumbnail-strip .tile").first().locator(".tile-delete-btn").click();
+      await page.locator("#thumbnail-strip .tile").last().locator(".tile-delete-btn").click();
       await settle(page);
     }
     await expect(button(page)).toBeHidden();
