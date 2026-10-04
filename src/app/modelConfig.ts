@@ -119,7 +119,7 @@ export function capabilityNote(reports: Capability): string {
 export const WEBGPU_MODELS: Record<string, ModelConfig> = {
   // culico-net-cls-v1: a 21M-parameter TinyViT, 15x smaller than H/14, which
   // is what makes it the one engine a phone can actually fetch. Its head is a
-  // trained probe rather than a text head, so it is labelled experimental in the
+  // trained linear probe rather than a text head, so it is labelled experimental
   // selector; see the dropdown option text.
   "webgpu-culico": {
     path: "culico-net-cls-v1-17-embed.onnx",
