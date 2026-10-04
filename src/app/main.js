@@ -40,6 +40,7 @@ import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
 import { renderBuildLink, stampBuildSha } from "./buildSha";
+import { renderFooterTiming } from "./footerTiming";
 import { updatePooling } from "./poolingPanel";
 import { badge, canView, checkLabel, contributesToPool, photoRef,
          removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
@@ -1078,9 +1079,12 @@ async function classifyImage(imgBitmap, filename) {
   };
 
   const epLabel = clipEP === "webgpu" ? "WEBGPU" : "WASM CPU";
-  const devText = `inference: ${WEBGPU_MODELS[engine]?.name || "WebGPU"} (${epLabel}) · ${totalTime}ms/photo (crop: ${detTime}ms · analyze: ${clipTime}ms)`;
-  const devElem = document.getElementById("footer-device");
-  if (devElem) devElem.textContent = devText;
+  renderFooterTiming(document.getElementById("footer-device"), document, {
+    engineLabel: `${WEBGPU_MODELS[engine]?.name || "WebGPU"} (${epLabel})`,
+    totalMs: totalTime,
+    cropMs: detTime,
+    analyzeMs: clipTime,
+  });
 
   const fused = fuseViews(views);
   return {
@@ -1326,10 +1330,12 @@ async function processFiles(fileList) {
           manual_full_photo: !data.is_cropped,
           detTime: data.detTime, clipTime: data.clipTime, totalTime: data.totalTime
         });
-        const devElem = document.getElementById("footer-device");
-        if (devElem) {
-          devElem.textContent = `inference: ${data.engine_label} · ${data.totalTime}ms/photo (crop: ${data.detTime}ms · analyze: ${data.clipTime}ms)`;
-        }
+        renderFooterTiming(document.getElementById("footer-device"), document, {
+          engineLabel: data.engine_label,
+          totalMs: data.totalTime,
+          cropMs: data.detTime,
+          analyzeMs: data.clipTime,
+        });
       } else {
         const res = await classifyImage(slot.bitmap, slot.name);
         commitBatchSlot(slots[i], res);
