@@ -1,10 +1,35 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
   <!-- A mask uses only the alpha channel and is tinted by the link's color. -->
-<g fill="#000" transform="rotate(-8 16 16)">
-    <path d="M14.23 13.79L28.36 8.13Q30.16 6.93 30 6.4Q29.84 5.87 27.68 5.87L12.77 9.01Q12.68 11.65 14.23 13.79Z"/>
+  <!--
+    One wing, not two. The far wing used to sit above the body as a shape of
+    its own, and at 16x16 that is all it was worth: a lump on top of the
+    insect, reading as a speck of dirt rather than as anatomy. It is not even
+    detached from the body at that size - the raster is a single connected
+    shape either way - so it bought no separation. It is gone.
+
+    A second wing cannot be attached to the body instead: one flat colour with
+    no gap between merges the two into the wedge an earlier pass removed, and
+    re-opening that gap is what produced the blob in the first place.
+
+    Scaled 1.06x about its own centre. The width sets that ceiling, not the
+    space the deleted wing freed: the body spans 27.3 of the 32 units at -8
+    degrees, so 1.06x is the largest that keeps clearance on every side. It
+    also fixes a clip - a leg reached y=31.95 in the original, on the bottom
+    edge.
+
+    Flat #ea580c, no dark-scheme variant: the tab bar follows the browser
+    theme, which Firefox and Safari set independently of the OS, and this
+    orange holds 3.6:1 on white and 5.4:1 on the app's dark background without
+    having to guess which one it is.
+  -->
+<g fill="#000" transform="rotate(-8 16 16) scale(1.06) translate(0.75000 -6.90625)">
     <path d="M11.26 23.02L27.24 18.12Q29.23 16.58 29 15.5Q28.77 14.42 26.32 13.84L9.74 15.98Q9.57 19.7 11.26 23.02Z"/>
-    <circle cx="10.5" cy="19.5" r="3.4"/><circle cx="7.2" cy="19.9" r="2.5"/>
+    <circle cx="10.5" cy="19.5" r="3.4"/>
+    <circle cx="7.2" cy="19.9" r="2.5"/>
     <path d="M6.6 18.6L0.9 21.2L0.9 23.6L6.6 23Z"/>
-    <path d="M6.5 20.4L0 26.2L1.8 26.2L8.3 20.4Z"/><path d="M7.7 22L3.5 30.4L5.3 30.4L9.5 22Z"/><path d="M9.5 22.6L9.3 31L11.1 31L11.3 22.6Z"/><path d="M11.5 22.4L16.5 29.6L18.3 29.6L13.3 22.4Z"/>
+    <path d="M6.5 20.4L0 26.2L1.8 26.2L8.3 20.4Z"/>
+    <path d="M7.7 22L3.5 30.4L5.3 30.4L9.5 22Z"/>
+    <path d="M9.5 22.6L9.3 31L11.1 31L11.3 22.6Z"/>
+    <path d="M11.5 22.4L16.5 29.6L18.3 29.6L13.3 22.4Z"/>
   </g>
 </svg>
