@@ -222,9 +222,11 @@ describe("a disagreement between the views costs the photo its species claim", (
 
   it("the disagreement measure is computed once, by fuseViews, and is the same object", () => {
     const views = [
-      // Disagreeing, and both above `CROP_ONLY_MAX_POSTERIOR` so the pair still
-      // reaches the pooling: the measure is computed once over the views that
-      // were pooled, which is the point being pinned.
+      // Disagreeing. The router reads `viewResults[0]` alone - always the crop -
+      // so the crop at 0.85 is what has to clear `CROP_ONLY_MAX_POSTERIOR` for
+      // this pair to reach the pooling at all; the second view's own posterior is
+      // irrelevant to that branch. The measure is computed once over the views
+      // that were pooled, which is the point being pinned.
       view({ "Aedes aegypti": 0.85, "Aedes albopictus": 0.1, "Culex pipiens": 0.05 }),
       view({ "Aedes aegypti": 0.6, "Aedes albopictus": 0.35, "Culex pipiens": 0.05 }),
     ];
