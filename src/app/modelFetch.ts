@@ -8,10 +8,47 @@
  */
 
 import { CACHE_NAME } from "./modelConfig";
+import { BUILD_PARAM, COMMIT_SHA } from "./buildSha";
 import type { LogFn } from "./telemetry";
 
 /** Reports bytes received so far, the total when the server sent one, and completion. */
 export type OnBytes = (got: number, total: number, done?: boolean) => void;
+
+/**
+ * A `.onnx`, with any query string. Never cache-busted - see
+ * `versionedModelUrl` for why that one is the exception.
+ */
+const WEIGHTS = /\.onnx(\?|$)/i;
+
+/**
+ * The URL to fetch a model artefact from, carrying the build SHA for anything
+ * that is not a set of weights.
+ *
+ * The head JSONs are a few hundred KB and are rewritten whenever a head is
+ * refitted, which is often. They are served from one stable URL, so a browser
+ * that fetched `text_embeds_b16.json` before a refit keeps being served the
+ * bytes it already has - the app runs the old `logit_scale` against the new
+ * page and a deployed fix looks like it did not land. The host sends them with
+ * a ten-minute `max-age`, so the window is bounded but real, and a tab open
+ * across the deploy sits inside it. Naming the build in the query makes the URL
+ * itself change when the build does, which is what both caches key on.
+ *
+ * `.onnx` is excluded, and it is the exclusion that matters: the weights are
+ * 81 MB to 1.2 GB, and re-downloading one on every deploy is the difference
+ * between a second visit and a second visit that costs a gigabyte. Nothing
+ * about the weights' bytes depends on the build SHA, so versioning them buys
+ * nothing and costs everything.
+ *
+ * A build with no SHA (a local `npm run build`) leaves the URL exactly as it
+ * was, which is today's behaviour.
+ */
+export function versionedModelUrl(url: string, sha: string | undefined = COMMIT_SHA): string {
+  if (WEIGHTS.test(url)) return url;
+  const trimmed = sha?.trim();
+  if (!trimmed) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}${BUILD_PARAM}=${encodeURIComponent(trimmed)}`;
+}
 
 /** The growth step for a response that arrived without a Content-Length. */
 const FIRST_CHUNK = 1 << 16;
@@ -82,30 +119,92 @@ export async function fetchWithProgress(url: string, onBytes?: OnBytes): Promise
  * first. A CacheStorage failure of any kind - a private-mode browser with no
  * caches, a quota error, a corrupted entry - falls through to the network
  * rather than failing the load, so the worst case is a slow first run.
+ *
+ * The versioned URL is used for the cache key AND the request, from one
+ * variable. Keying the entry on the bare URL while requesting the versioned one
+ * is the failure that a cache-busting change invites: the put lands under a key
+ * nothing ever reads, and the match finds an entry from before the version
+ * parameter existed and serves it forever.
  */
-export async function fetchWithCache(url: string, onBytes?: OnBytes, log?: LogFn): Promise<ArrayBuffer> {
+export async function fetchWithCache(
+  url: string,
+  onBytes?: OnBytes,
+  log?: LogFn,
+  sha: string | undefined = COMMIT_SHA,
+): Promise<ArrayBuffer> {
+  const versioned = versionedModelUrl(url, sha);
   if ("caches" in window) {
     try {
       const cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(url);
+      const cached = await cache.match(versioned);
       if (cached) {
-        console.log(`[CacheStorage] HIT for ${url}`);
-        log?.("cache_hit", { url });
+        console.log(`[CacheStorage] HIT for ${versioned}`);
+        log?.("cache_hit", { url: versioned });
         const size = Number(cached.headers.get("content-length")) || 0;
         onBytes?.(size || 1, size || 1, true);
         return await cached.arrayBuffer();
       }
-      console.log(`[CacheStorage] MISS for ${url}, fetching from network...`);
-      log?.("cache_miss", { url });
-      const buf = await fetchWithProgress(url, onBytes);
+      console.log(`[CacheStorage] MISS for ${versioned}, fetching from network...`);
+      log?.("cache_miss", { url: versioned });
+      const buf = await fetchWithProgress(versioned, onBytes);
       const toStore = new Response(bytesAsStream(buf), {
         headers: { "Content-Type": "application/octet-stream", "Content-Length": String(buf.byteLength) }
       });
-      await cache.put(url, toStore);
+      await cache.put(versioned, toStore);
+      await dropSuperseded(cache, versioned, log);
       return buf;
     } catch (err) {
       console.warn("CacheStorage read/write warning:", err);
     }
   }
-  return await fetchWithProgress(url, onBytes);
+  return await fetchWithProgress(versioned, onBytes);
+}
+
+/**
+ * Delete the other builds' copies of the artefact just stored.
+ *
+ * A per-build key means every deploy adds an entry that nothing will ever ask
+ * for again, and the cache is persistent and already holding a gigabyte of
+ * weights - the head entries would pile up until a quota error evicted
+ * something worth keeping. Only the same path is touched, so dropping a stale
+ * head never costs the classifier.
+ *
+ * `cache.keys()` hands back absolute URLs, while the artefact was named
+ * relative to the document, so both sides are resolved against the document
+ * before they are compared. Comparing the strings as given would match nothing
+ * and the prune would be a silent no-op on exactly the cache it exists to keep
+ * tidy.
+ *
+ * Best-effort by design: this runs after the bytes are in the caller's hands,
+ * so a failure here is logged and otherwise ignored rather than allowed to fail
+ * a load.
+ */
+async function dropSuperseded(
+  cache: Cache,
+  stored: string,
+  log?: LogFn,
+): Promise<void> {
+  try {
+    const storedUrl = new URL(stored, documentBase());
+    const path = stripBuildParam(storedUrl.href);
+    for (const key of await cache.keys()) {
+      if (key.url === storedUrl.href) continue;
+      if (stripBuildParam(key.url) === path) await cache.delete(key);
+    }
+  } catch (err) {
+    console.warn("CacheStorage prune warning:", err);
+    log?.("cache_prune_failed", { url: stored, error: String(err) });
+  }
+}
+
+/** What a relative model URL resolves against. */
+function documentBase(): string {
+  return globalThis.location?.href ?? "http://localhost/";
+}
+
+/** A URL with any `?build=` removed, which is what identifies the artefact. */
+function stripBuildParam(href: string): string {
+  const u = new URL(href, documentBase());
+  u.searchParams.delete(BUILD_PARAM);
+  return `${u.pathname}${u.search}`;
 }
