@@ -179,6 +179,34 @@ app whose width is a budget, and the strip lost tiles to horizontal scroll becau
 of it. The header row is allowed to wrap at widths where the actions and the arrows
 cannot fit; the strip's row has nothing in it that can.
 
+**R4.13 The whole-frame view is a control in the header row, and it is on by
+default.** `#chk-whole-frame` is a labelled checkbox in `.gallery-nav`, beside the
+bulk actions. Unchecking it means a cropped photo is judged on its crop alone; it
+does not mean a photo with no crop is judged on nothing, which still uses the whole
+frame because that is all there is. `viewKinds` in `src/app/viewSelection.ts` is the
+single decision, and all three classify paths ask it — the batch, the crop-release
+and the server batch — so they cannot disagree about what a photo offers. The choice
+is persisted under `mosquito_include_whole_frame`, and any other value in that key
+falls back to on rather than becoming a third state.
+
+Changing it re-classifies the photos already on screen. A photo's verdict describes
+the views it was fused from, so a two-view verdict left standing under a one-view
+setting is the disagreement between a photo's own verdict and the pooled card that
+this spec exists to prevent. The photos are marked pending while their views re-run,
+which is the same treatment a crop release gets.
+
+**R4.14 What the toggle costs is measured, not asserted.** On the only labelled
+two-view cache there is (the 07-benchmark's 180 rows, `analysis/whole_frame_ablation.py`),
+turning the whole frame off makes the app *more* conservative, not less: abstention
+rises from 10.0% to 34.6% and accuracy of what is still said rises from 85.7% to
+90.6%. 45 of 180 rows answer on two views and abstain on one, and none goes the other
+way. The intuitive fear — a bad crop with nothing to fall back on, naming itself
+confidently — does not appear on this corpus; a crop is a sharper and less
+well-supported opinion than a crop-and-frame pair. The false-positive side cannot be
+measured at all, because every row in that corpus is a true mosquito, so the claim is
+about what the app says about mosquitoes and not about walls. See
+`docs/WHOLE-FRAME-VIEW.md`.
+
 ## 5. Index stability
 
 A tile's index changes whenever a photo before it is deleted. Tile *nodes* are
