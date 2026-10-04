@@ -250,8 +250,26 @@ describe("every classify path asks the same question", () => {
     // A photo's verdict describes the views it was fused from. Leaving a
     // two-view verdict on screen under a one-view setting is exactly the
     // disagreement the per-photo verdict and the pooled card must not have.
-    expect(body("reclassifyForWholeFrame")).toContain("classifyViews(");
-    expect(body("wireWholeFrameToggle")).toContain("reclassifyForWholeFrame()");
+    //
+    // The pass itself moved into `reclassifyQueue`, which is where the freeze
+    // was; what has to stay true here is that the toggle still drives it and
+    // that the pass still calls the real classifier.
+    expect(body("wireWholeFrameToggle")).toContain("reclassifyRunner.request()");
+    const runner = MAIN.slice(MAIN.indexOf("const reclassifyRunner = createReclassifyRunner"));
+    expect(runner).toContain("classifyViews(");
+    expect(runner).toContain("currentSetting: () => includeWholeFrame");
+  });
+
+  it("does not start a pass per photo", () => {
+    // The freeze: every due photo's inference was launched in the same
+    // synchronous loop, so ten photos put ten runs on the one onnxruntime
+    // session the batch path deliberately keeps to one at a time. The runner
+    // awaits each photo, so `classify` must be reached through it and not
+    // collected into an array of promises.
+    const runner = MAIN.slice(MAIN.indexOf("const reclassifyRunner = createReclassifyRunner"));
+    const body = runner.slice(0, runner.indexOf("\n});"));
+    expect(body).not.toMatch(/\.map\([^)]*async|\.forEach\([^)]*async|Promise\.all/);
+    expect(body).toContain("await classifyViews(");
   });
 
   it("persists the setting under the key it reads", () => {

@@ -46,6 +46,7 @@ import { badge, canView, checkLabel, contributesToPool,
          validateIncluded, viewLabel } from "./thumbnailStrip";
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
+import { createReclassifyRunner } from "./reclassifyQueue";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -219,6 +220,11 @@ const ASYNC = (window.__mosqAsync = {
   worstLongTaskMs: 0,
   get previews() { return previews; },
   get sessClip() { return sessClip; },
+  // The classifier, replaceable. Tier 1 aborts every model request and so has no
+  // session to run a re-classification through, and the one thing that has to be
+  // observable end to end - that a toggle drives inference and settles - needs
+  // an inference that returns without downloading 1.26 GB of weights.
+  set sessClip(v) { sessClip = v; },
   get sessDet() { return sessDet; },
   get selectedIndex() { return selectedIndex; },
   set selectedIndex(v) { selectedIndex = v; },
@@ -1525,34 +1531,47 @@ function wireWholeFrameToggle() {
       // next change reclassifies either way.
     }
     sendLog("whole_frame_toggled", { includeWholeFrame: on, photos: previews.length });
-    reclassifyForWholeFrame();
+    reclassifyRunner.request();
   });
 }
 
-// Re-run every settled photo's views under the current preference. Photos that
-// were never classified, or whose classification failed, are left alone: there is
-// nothing to re-fuse, and their tile already says why.
-function reclassifyForWholeFrame() {
-  const due = previews
+// One pass over the photos already on screen, run under `reclassifyQueue`.
+//
+// The scheduling - one photo at a time, one pass per toggle - is in that module
+// and not here, because the thing that has to hold is "at most one inference in
+// flight", and that is checkable there without the model. This side supplies the
+// three things it needs: which photos are due, how to classify one, and what the
+// setting is at this instant.
+//
+// `onSettled` renders once for the whole pass rather than once per photo: the
+// runner is what makes that possible, and it is why a toggle no longer paints a
+// dozen times before the first inference has started.
+const reclassifyRunner = createReclassifyRunner({
+  // Photos that were never classified, or whose classification failed, are left
+  // alone: there is nothing to re-fuse, and their tile already says why.
+  due: () => previews
     .map((p, idx) => ({ p, idx }))
-    .filter(({ p }) => p && !p.removed && !p.pending && !p.error && p.fullCanvas);
-  for (const { p, idx } of due) {
+    .filter(({ p }) => p && !p.removed && !p.pending && !p.error && p.fullCanvas),
+  currentSetting: () => includeWholeFrame,
+  classify: async ({ p, idx }) => {
     const rev = beginRecompute(p);
     renderThumbnails();
-    classifyViews(p, idx, rev, p.cropCanvas, p.cropBox)
-      .catch((err) => {
-        if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) return;
-        console.error("Reclassification failed:", err);
-        markComputeFailed(p, err);
-      });
-  }
-  if (due.length) {
+    try {
+      await classifyViews(p, idx, rev, p.cropCanvas, p.cropBox);
+    } catch (err) {
+      if (err instanceof Superseded || !ownsRecompute(p, idx, rev)) return;
+      console.error("Reclassification failed:", err);
+      markComputeFailed(p, err);
+    }
+  },
+  onSettled: () => {
     renderThumbnails();
     renderActivePhoto();
     updatePooling(EMB, previews, includedIndices);
     renderResultsTable(previews);
-  }
-}
+    sendLog("whole_frame_reclassified", { passes: reclassifyRunner.passes, photos: previews.length });
+  },
+});
 
 function selectPhoto(idx) {
   selectedIndex = Math.max(0, Math.min(idx, previews.length - 1));
