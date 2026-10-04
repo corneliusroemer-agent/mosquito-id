@@ -86,6 +86,18 @@ describe("what a re-run costs each photo", () => {
     expect(splitForRerun([cropped([0, 0])]).detect).toHaveLength(1);
   });
 
+  it("classifies a photo the user reverted to the whole frame", () => {
+    // `revertToFullPhoto` nulls the box, which on the box test alone is
+    // indistinguishable from the detector having found nothing - and sends the
+    // photo back to detection, destroying a decision the user made and said
+    // nothing about. `revertedToFull` is what tells the two apart.
+    const reverted = { name: "reverted.jpg", cropBox: null, cropCanvas: { width: 1200, height: 900 }, revertedToFull: true };
+    expect(splitForRerun([reverted]).classify.map((p) => p.name)).toEqual(["reverted.jpg"]);
+    // The plain no-box photo still detects: there was never a crop to give up.
+    const never = { name: "no-box.jpg", cropBox: null, cropCanvas: { width: 1200, height: 900 } };
+    expect(splitForRerun([never]).detect.map((p) => p.name)).toEqual(["no-box.jpg"]);
+  });
+
   it("puts each photo in exactly one group, keeping gallery order", () => {
     const photos = [
       cropped([0, 0, 5, 5], true, "detected.jpg"),
@@ -178,12 +190,14 @@ describe("the button", () => {
     expect(btn.disabled).toBe(false);
     expect(btn.attrs["aria-label"]).toContain("3 photos");
     expect(btn.attrs["aria-label"]).toContain("culico-net-cls-v1");
-    // The name says the crops already on screen are what it re-scores. It used to
+    // The name says what the button does - re-score - and not HOW. It used to
     // promise "detection and classification", which was true while a re-run
-    // re-detected every photo - and made the button sound far more expensive than
-    // it now is, against work it no longer does on a photo that already has a crop.
-    expect(btn.attrs["aria-label"]).toContain("from the crops already on screen");
+    // re-detected every photo. It must not now name the crops either: a photo
+    // with no crop is detected again, so "from the crops already on screen" would
+    // be false for part of the gallery the button counts.
+    expect(btn.attrs["aria-label"]).toContain("Re-score");
     expect(btn.attrs["aria-label"]).not.toContain("detection");
+    expect(btn.attrs["aria-label"]).not.toContain("crop");
   });
 
   it("says nothing about a photo count in its text", () => {
@@ -309,6 +323,26 @@ describe("re-dropping a photo", () => {
   });
 });
 
+/**
+ * The body of `reprocessLoadedPhotos`, cut between two anchors.
+ *
+ * The anchors are asserted before the slice, because a negative assertion over
+ * an empty string passes: rename the function or move the comment and
+ * `MAIN.indexOf` returns -1, `slice(x, -1)` yields the tail (or nothing), and
+ * `expect(fn).not.toMatch(/\.cropBox\s*=/)` is green on it. The two tests below
+ * carrying the "a manual crop survives" claim are negative, so they are exactly
+ * the ones that would fail open.
+ */
+const MAIN = readFileSync(join(root, "src", "app", "main.js"), "utf8");
+
+function reprocessBody(): string {
+  const start = MAIN.indexOf("async function reprocessLoadedPhotos");
+  const end = MAIN.indexOf("/** The button's one listener");
+  expect(start, "the re-run handler is still called that").toBeGreaterThan(-1);
+  expect(end, "the button's listener comment still follows it").toBeGreaterThan(start);
+  return MAIN.slice(start, end);
+}
+
 describe("the button's wiring in main.js", () => {
   // Everything above tests the module. This reads the wiring, because two of the
   // defects the module was written to prevent lived there and nowhere else:
@@ -316,7 +350,6 @@ describe("the button's wiring in main.js", () => {
   // button was drawn, which left the button enabled and inert for a whole
   // download; and the button was drawn before `currentEngine` had moved, so the
   // staleness it reported was computed against the engine being left behind.
-  const MAIN = readFileSync(join(root, "src", "app", "main.js"), "utf8");
   const handler = MAIN.slice(
     MAIN.indexOf('engineSelect.addEventListener("change"'),
     MAIN.indexOf("const loadModels"),
@@ -364,10 +397,7 @@ describe("the button's wiring in main.js", () => {
   it("keeps a photo it cannot re-drop instead of dropping it with the gallery", () => {
     // The batch empties `previews`, so a photo left out of the drop and not
     // kept would vanish from the strip with nothing said.
-    const fn = MAIN.slice(
-      MAIN.indexOf("async function reprocessLoadedPhotos"),
-      MAIN.indexOf("/** The button's one listener"),
-    );
+    const fn = reprocessBody();
     // `kept` starts as the photos that are re-classified in place rather than
     // re-dropped, and the photos the batch cannot re-drop join it.
     expect(fn).toMatch(/const kept = \[\.\.\.classify\]/);
@@ -382,15 +412,12 @@ describe("the button's wiring in main.js", () => {
     // Not through a private loop. `reclassifyRunner` is what holds the single
     // inference slot; a second scheduler beside it would put two runs on one
     // onnxruntime session, which is the page freeze the runner exists to prevent.
-    const fn = MAIN.slice(
-      MAIN.indexOf("async function reprocessLoadedPhotos"),
-      MAIN.indexOf("/** The button's one listener"),
-    );
+    const fn = reprocessBody();
     expect(fn).toMatch(/await reclassifyRunner\.request\(\)/);
     // Scoped, so the pass does not also re-fuse the photos the batch has just
     // scored - that would run the classifier a second time over fresh results.
     expect(fn).toMatch(/rerunPhotos = new Set\(classify\)/);
-    expect(MAIN).toMatch(/!rerunPhotos \|\| rerunPhotos\.has\(p\)/);
+    expect(MAIN).toMatch(/if \(rerunPhotos\) return rerunPhotos\.has\(p\)/);
   });
 
   it("leaves a manual crop alone: nothing in a re-run rewrites the photo's own box", () => {
@@ -399,14 +426,11 @@ describe("the button's wiring in main.js", () => {
     // things a re-run writes onto a photo are scores and bookkeeping. `cropBox`
     // and `cropCanvas` are set by `executeCrop` (the user's release) and by
     // detection inside `classifyImage`, and by neither of the re-run paths.
-    const fn = MAIN.slice(
-      MAIN.indexOf("async function reprocessLoadedPhotos"),
-      MAIN.indexOf("/** The button's one listener"),
-    );
+    const fn = reprocessBody();
     expect(fn).not.toMatch(/\.cropBox\s*=/);
     expect(fn).not.toMatch(/\.cropCanvas\s*=/);
     const runner = MAIN.slice(MAIN.indexOf("const reclassifyRunner"), MAIN.indexOf("function selectPhoto"));
-    expect(runner).toMatch(/classifyViews\(p, idx, rev, p\.cropCanvas, p\.cropBox\)/);
+    expect(runner).toMatch(/classifyViews\(p, previews\.indexOf\(p\), rev, p\.cropCanvas, p\.cropBox\)/);
   });
 });
 

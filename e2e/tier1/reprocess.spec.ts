@@ -425,6 +425,73 @@ test.describe("re-running the loaded photos on another engine", () => {
     expect(errors(page)).toHaveLength(0);
   });
 
+  test("the already-cropped photos are pending for the whole re-run, not pooled on the old engine", async ({ page }) => {
+    // The photos kept in the gallery carry the PREVIOUS engine's scores until the
+    // classify pass lands, and `updatePooling` runs between - twice. Leaving them
+    // settled pools two engines' verdicts, which is the mixed gallery the button
+    // exists to remove, and an invisible one: a pending photo is simply out of the
+    // pool, so nothing on screen says the numbers are mixed.
+    await boot(page);
+    await populate(page, []);
+    await ensureTensor(page);
+    await loadPhotosWithDetection(page, THREE);
+    await expect.poll(() => photoCount(page), { timeout: 30_000 }).toBe(3);
+    await settled(page, 3);
+
+    await switchEngine(page, TO);
+    await button(page).click();
+    // Sampled with the batch still running: the classify pass has not started, so
+    // every photo on screen is either the batch's or pending for the re-run.
+    const mid = await page.evaluate(() => window.__mosqAsync!.previews.map((p: any) => ({
+      scoredBy: p.scoredBy ?? null, pending: Boolean(p.pending),
+    })));
+    const settledNow = mid.filter((p) => !p.pending);
+    expect(settledNow.every((p) => p.scoredBy === TO),
+      "a photo that is not pending must be scored by the selected engine").toBe(true);
+    expect(mid.some((p) => p.pending),
+      "the re-run finished before it could be sampled mid-flight").toBe(true);
+
+    await settled(page, 3);
+    expect((await state(page)).scoredBy, "everything lands on the selected engine").toEqual([TO, TO, TO]);
+    expect(errors(page)).toHaveLength(0);
+  });
+
+  test("a photo whose classification failed is retried by a re-run", async ({ page }) => {
+    // The runner skips photos carrying an error, because there is nothing to
+    // re-fuse. Without the re-run clearing it, a photo that failed once would keep
+    // the old engine forever: the button would stay visible with the same count
+    // after the press, and every later press would do the same.
+    await boot(page);
+    await populate(page, []);
+    await ensureTensor(page);
+    await loadPhotosWithDetection(page, ["a_01.jpg"]);
+    await expect.poll(() => photoCount(page), { timeout: 30_000 }).toBe(1);
+    await settled(page, 1);
+
+    // Exactly the state a failed crop release leaves behind: box and canvas set,
+    // error recorded, scoredBy still the previous engine.
+    await page.evaluate(() => {
+      const p = window.__mosqAsync!.previews[0];
+      p.error = "Classification failed: simulated";
+    });
+
+    await switchEngine(page, TO);
+    await expect(button(page)).toBeVisible();
+    await button(page).click();
+    await settled(page, 1);
+
+    const after = await page.evaluate(() => {
+      const p = window.__mosqAsync!.previews[0];
+      return { scoredBy: p.scoredBy ?? null, error: p.error ?? null };
+    });
+    expect(after.scoredBy, "the failed photo was re-scored, not skipped").toBe(TO);
+    expect(after.error).toBeNull();
+    // And the button withdraws, which is the visible proof it is no longer
+    // offering work that it will not do.
+    await expect(button(page)).toBeHidden();
+    expect(errors(page)).toHaveLength(0);
+  });
+
   test("a manual crop survives a re-run", async ({ page }) => {
     // A crop the user drew is their work, and a re-run used to destroy it by
     // re-detecting over the photo. Here the photo has a crop already, so the

@@ -51,6 +51,17 @@ export interface CroppedPhoto {
   cropBox?: number[] | null;
   /** The pixels that box was cut to. Null before the crop is cut, or for a whole photo. */
   cropCanvas?: unknown | null;
+  /**
+   * Set when the USER gave this photo up on its crop and asked for the whole
+   * frame - `revertToFullPhoto`, not the detector finding nothing.
+   *
+   * Distinct from `manual_full_photo`, which the batch also sets on a photo the
+   * detector found no box in: both display the whole frame, but one is the
+   * user's decision about a photo that HAD a crop, and re-detecting over it
+   * silently takes that decision back. Without this field a re-run cannot tell
+   * the two apart, and a deliberate revert is destroyed with no undo.
+   */
+  revertedToFull?: boolean;
 }
 
 /**
@@ -60,10 +71,12 @@ export interface CroppedPhoto {
  * scores come from classification. A photo that already carries a crop box -
  * whether the detector's or one the user drew - has everything classification
  * needs, so the detector is pure waste on it: minutes of inference on a phone, and
- * a manual crop destroyed by its own re-run.
+ * a manual crop destroyed by its own re-run. A photo the user reverted to the
+ * whole frame has a decision to preserve rather than a box, and classifying the
+ * whole frame is both cheaper and what the user asked for.
  *
- * A photo with no box has nothing to classify but the whole frame, and getting a
- * crop is what makes a second view possible at all, so those still go through
+ * A photo with neither has nothing to classify but the whole frame, and getting
+ * a crop is what makes a second view possible at all, so those still go through
  * detection.
  */
 export function splitForRerun<T extends CroppedPhoto>(
@@ -75,7 +88,9 @@ export function splitForRerun<T extends CroppedPhoto>(
     // A four-number box and the pixels it produced. A half-set pair - a box with
     // no canvas because the crop was never cut - cannot be classified from, so it
     // takes the detection path rather than failing.
-    if (p && Array.isArray(p.cropBox) && p.cropBox.length === 4 && p.cropCanvas) classify.push(p);
+    if (!p) continue;
+    const cropped = Array.isArray(p.cropBox) && p.cropBox.length === 4 && p.cropCanvas;
+    if (cropped || p.revertedToFull === true) classify.push(p);
     else detect.push(p);
   }
   return { classify, detect };
@@ -133,7 +148,11 @@ export function renderReprocessButton(el: ReprocessButtonView, state: ReprocessB
     return;
   }
   const photos = `${state.stale} photo${state.stale === 1 ? "" : "s"}`;
-  const why = state.blockedBy ?? `Re-score ${photos} with ${state.engineLabel}, the engine now selected, from the crops already on screen`;
+  // Says the work, not the mechanism. "From the crops already on screen" would
+  // be false for a gallery holding a photo with no crop - that one is detected
+  // again, because a second view needs a crop and there is none - and a label
+  // that is wrong about half the gallery is worse than one that is vaguer.
+  const why = state.blockedBy ?? `Re-score ${photos} with ${state.engineLabel}, the engine now selected`;
   el.setAttribute("aria-label", why);
   el.setAttribute("title", why);
 }
