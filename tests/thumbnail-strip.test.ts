@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   badge, canView, checkLabel, contributesToPool, entersPooledSum, inclusionSummary,
-  photoState, poolExclusionReason, removeLabel, shiftIncluded, shiftIncludedForPrepend,
+  photoRef, photoState, poolExclusionReason, removeLabel, shiftIncluded, shiftIncludedForPrepend,
   shiftSelected, validateIncluded, viewLabel,
 } from "../src/app/thumbnailStrip";
 import { splitPoolable } from "../src/confidence/pooling";
@@ -243,6 +243,42 @@ describe("checkLabel (spec §3.3)", () => {
     const p = photo({ name: undefined });
     expect(viewLabel(p, 1)).toBe("View photo 1: (unnamed)");
     expect(checkLabel(p, 1)).toContain("(unnamed)");
+  });
+});
+
+describe("photoRef", () => {
+  it("carries the number the tile shows and the filename the table shows", () => {
+    expect(photoRef(photo({ name: "PXL_20261002_182754446.jpg" }), 7))
+      .toBe("Photo 7 · PXL_20261002_182754446.jpg");
+  });
+
+  it("puts the number first, so a long filename never pushes it out of reach", () => {
+    // The number is what survives a truncated or scrolled display, so it has to
+    // be in the part that is always shown.
+    expect(photoRef(photo({ name: "PXL_20261002_182754446.jpg" }), 7).startsWith("Photo 7")).toBe(true);
+  });
+
+  it("shows the uninformative ZIP name as-is rather than hiding it", () => {
+    // The number is what identifies the photo in the app; the filename is the
+    // submitter's own handle on it and is the only thing they can look up in
+    // their own files. `image1.jpg` says nothing to us and everything to them.
+    expect(photoRef(photo({ name: "image1.jpg" }), 4)).toBe("Photo 4 · image1.jpg");
+  });
+
+  it("degrades to the number alone when there is no usable filename", () => {
+    expect(photoRef(photo({ name: undefined }), 2)).toBe("Photo 2");
+    expect(photoRef(photo({ name: "   " }), 2)).toBe("Photo 2");
+  });
+
+  it("agrees with the accessible names, which already carry both", () => {
+    const p = photo({ name: "photo_C.jpg" });
+    expect(photoRef(p, 3)).toContain(viewLabel(p, 3).split(": ")[1]);
+    expect(photoRef(p, 3)).toContain(String(3));
+  });
+
+  it("tracks the position it is given, not a stored one", () => {
+    const p = photo({ name: "photo_C.jpg" });
+    expect(photoRef(p, 3)).not.toBe(photoRef(p, 4));
   });
 });
 

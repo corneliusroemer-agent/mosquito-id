@@ -108,6 +108,25 @@ export function entersPooledSum(p: ClassifiedPhoto): boolean {
 const name = (p: ClassifiedPhoto): string => p.name ?? "(unnamed)";
 
 /**
+ * How a photo is referred to in visible text: its number and its filename, in
+ * that order, so a thumbnail can be matched to a filename without counting.
+ *
+ * The number leads because it is the short, always-present handle - it is what
+ * the tile shows and what survives a strip that scrolled. The filename follows
+ * because it is supplementary: a submitter recognises `PXL_20261002_182754446.jpg`
+ * in their own camera roll, but a ZIP of renumbered files gives `image1.jpg`, and
+ * a name that carries no information is not worth pushing the number off screen
+ * for.
+ *
+ * Degrades to the number alone when there is no usable filename, so a photo from
+ * a source that named it nothing is never displayed as "(unnamed)".
+ */
+export function photoRef(p: ClassifiedPhoto, idx: number): string {
+  const label = p.name?.trim();
+  return label ? `Photo ${idx} · ${label}` : `Photo ${idx}`;
+}
+
+/**
  * The checkbox's accessible name and tooltip, in one string, so the two can
  * never disagree. Spec §3.3.
  *

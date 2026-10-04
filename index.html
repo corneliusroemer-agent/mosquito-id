@@ -536,6 +536,19 @@
   }
   .thumb-optin:disabled { cursor: not-allowed; opacity: 0.55; }
   .hint { font-size: 12px; color: var(--body-text-color-subdued); margin: 0 0 12px; }
+  /* The selected photo's number and filename, in the strip's own hint row.
+     Truncated rather than wrapped, with the full value on the element's title,
+     so a long filename costs one line instead of pushing the viewer down. */
+  .photo-ref {
+    display: inline-block;
+    vertical-align: bottom;
+    max-width: 34ch;
+    max-width: 34ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .photo-ref:not(:empty)::before { content: "· "; }
 
   /* 3-Panel Viewer Grid. The scores column is the one people read, and at a
      flat 1fr 1fr 1fr it is too narrow to hold "Aedes albopictus (Asian tiger
@@ -1189,7 +1202,7 @@
     </div>
 
     <div id="thumbnail-strip" class="thumbnail-strip"></div>
-    <p class="hint">Select a photo to inspect it. Check photos of the same mosquito to combine their results.</p>
+    <p class="hint">Select a photo to inspect it. Check photos of the same mosquito to combine their results.<span id="photo-ref" class="photo-ref" tabindex="0"></span></p>
 
     <div class="viewer-grid">
       <!-- 1. Full Photo with Rough Crop -->

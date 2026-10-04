@@ -41,7 +41,7 @@ import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
 import { renderBuildLink, stampBuildSha } from "./buildSha";
 import { updatePooling } from "./poolingPanel";
-import { badge, canView, checkLabel, contributesToPool,
+import { badge, canView, checkLabel, contributesToPool, photoRef,
          removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
          validateIncluded, viewLabel } from "./thumbnailStrip";
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
@@ -1598,7 +1598,10 @@ function renderThumbnails() {
     node.tile.className = "tile" + (selectedIndex === idx ? " active" : "") +
       (!includedIndices.has(idx) ? " excluded" : "") + (p.pending ? " pending" : "");
 
-    node.delBtn.title = `Remove ${p.name}`;
+    // One string for both the tooltip and the accessible name: a delete button
+    // whose tooltip said "Remove photo_C.jpg" while its label said "Remove photo
+    // 3: photo_C.jpg" is the inconsistency this change exists to remove.
+    node.delBtn.title = removeLabel(p, idx + 1);
     node.delBtn.setAttribute("aria-label", removeLabel(p, idx + 1));
 
     node.btn.setAttribute("aria-label", viewLabel(p, idx + 1));
@@ -1894,9 +1897,10 @@ function fitSurface(surface, cv) {
  * photo and says what is actually true about it.
  */
 function emptyPanelMessage(p) {
-  if (p.error) return `${p.name || "This photo"} could not be analysed: ${p.error}`;
-  if (p.pending) return `${p.name || "This photo"} has not been analysed yet`;
-  return `${p.name || "This photo"} could not be displayed`;
+  const ref = p.name || "This photo";
+  if (p.error) return `${ref} could not be analysed: ${p.error}`;
+  if (p.pending) return `${ref} has not been analysed yet`;
+  return `${ref} could not be displayed`;
 }
 
 function renderActivePhoto() {
@@ -2081,8 +2085,14 @@ function renderActivePhoto() {
   const statusText = p.error
     ? `analysis failed: ${p.error.replace(/^Classification failed: /, "")}`
     : (p.pending ? "" : p.status);
+  const ref = photoRef(p, selectedIndex + 1);
   document.getElementById("photo-name").textContent =
-    statusText ? `${p.name} · ${statusText}` : p.name;
+    statusText ? `${ref} · ${statusText}` : ref;
+  // The same reference, in the strip's own hint row, so the filename a submitter
+  // recognises is visible without scrolling past the viewer to find it.
+  const refEl = document.getElementById("photo-ref");
+  refEl.textContent = ref;
+  refEl.title = ref;
   const btnFull = document.getElementById("btn-full-photo");
   if (p.is_cropped) {
     btnFull.style.display = "inline-block";
