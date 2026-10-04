@@ -28,6 +28,7 @@ import type { Head, ViewResult } from "../src/confidence/types";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const MAIN = readFileSync(join(root, "src", "app", "main.js"), "utf8");
+const VIEWS = readFileSync(join(root, "src", "app", "views.ts"), "utf8");
 const HTML = readFileSync(join(root, "index.html"), "utf8");
 
 let head: Head;
@@ -43,11 +44,19 @@ function view(species: string, top: number): ViewResult {
   return { spP, nuTotal: 0.05, scale: head.logit_scale / 2.5 };
 }
 
-/** The body of `fn`, from its declaration to the next top-level `function`. */
-function body(fn: string): string {
-  const start = MAIN.search(new RegExp(`^(async )?function ${fn}\\b`, "m"));
-  expect(start, `${fn} is in main.js`).toBeGreaterThan(-1);
-  const rest = MAIN.slice(start + 1);
+/**
+ * The body of `fn`, from its declaration to the next top-level `function`.
+ *
+ * `src` defaults to main.js; a function that has been extracted to a typed
+ * module is read from there instead, which is the point of the extraction - the
+ * source of truth for a function is wherever it now lives, and reading a stale
+ * copy out of main.js is how a wiring check passes against deleted code.
+ */
+function body(fn: string, src: string = MAIN): string {
+  // `export function` in an extracted module, plain `function` in main.js.
+  const start = src.search(new RegExp(`^(export )?(async )?function ${fn}\\b`, "m"));
+  expect(start, `${fn} is in the file it was looked for in`).toBeGreaterThan(-1);
+  const rest = src.slice(start + 1);
   const next = rest.search(/^(async )?function [A-Za-z_$]/m);
   return next < 0 ? rest : rest.slice(0, next);
 }
@@ -226,7 +235,20 @@ describe("the control", () => {
 
 describe("every classify path asks the same question", () => {
   it("routes the crop-release path through viewKinds", () => {
-    expect(body("viewsFor")).toContain("viewKinds(");
+    // viewsFor was extracted to src/app/views.ts; read it there, not in main.js.
+    expect(body("viewsFor", VIEWS)).toContain("viewKinds(");
+  });
+
+  it("has the crop-release path still calling that viewsFor", () => {
+    // The half that extraction cannot prove on its own: that main.js's crop
+    // release reaches the module's decision rather than a copy of it left
+    // behind. Without this, a renamed or shadowed local `viewsFor` would satisfy
+    // the check above while the shipped path asked no one.
+    // The adapter is a `const` arrow, not a declaration, so it is read as the
+    // statement rather than as a function body.
+    const adapter = around("const viewsFor = (p, cropCv, cropBox) =>");
+    expect(adapter).toMatch(/_viewsFor\(p, cropCv, cropBox, includeWholeFrame\)/);
+    expect(around("async function classifyViews")).toMatch(/viewsFor\(p, cropCv, cropBox\)/);
   });
 
   it("routes the local batch path through viewKinds", () => {
