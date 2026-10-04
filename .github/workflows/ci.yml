@@ -13,8 +13,14 @@ permissions:
   contents: read
 
 concurrency:
+  # Keyed on the ref, so a PR run never queues behind main: `github.ref` is
+  # `refs/pull/<n>/merge` for pull_request and `refs/heads/<branch>` for a push,
+  # which are distinct group names. Several agents merge all session, and a
+  # cancel-in-progress group meant each new push killed the run in flight - a
+  # cancelled run reads as red, and a signal that goes red for no reason is worse
+  # than one that is occasionally wrong. Queue instead.
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   verify:

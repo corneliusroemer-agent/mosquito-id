@@ -11,8 +11,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  # A half-published Pages build is worse than a cancelled test run, so deploys
+  # queue rather than replace. Ref-keyed for the same reason as ci.yml: the
+  # constant group it replaces would serialise a manually dispatched run behind
+  # whatever push was still deploying.
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   deploy:
