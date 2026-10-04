@@ -50,6 +50,11 @@ import { createReclassifyRunner } from "./reclassifyQueue";
 import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
          Superseded } from "./photoRecord";
+import { classifyCanvasServer as _classifyCanvasServer,
+         classifyViewLocal as _classifyViewLocal,
+         classifyViewServer as _classifyViewServer, genusTotals as _genusTotals,
+         posteriorSummary as _posteriorSummary, round4, serverView as _serverView,
+         verdictSummary as _verdictSummary, viewsFor as _viewsFor } from "./views";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -68,6 +73,21 @@ const fuseViews = (viewResults) => _fuseViews(EMB, viewResults, floorsFor(curren
 // only the adjacent one: without it this adapter silently drops the evidence for
 // "this photo is a wall", which is the case the gate exists to catch.
 const verdictFrom = (spP, agreement, adP, nuP) => _verdictFrom(EMB, spP, agreement, adP, floorsFor(currentEngine), nuP);
+// The view-classification adapters, bound to this file's EMB and scale the same
+// way the confidence adapters above are: read at CALL time, so a reloaded
+// embeddings file is picked up. `includeWholeFrame` and `sendLog` are passed at
+// each call site rather than bound, because both are read at event time.
+const viewsFor = (p, cropCv, cropBox) => _viewsFor(p, cropCv, cropBox, includeWholeFrame);
+const serverView = (data) => _serverView(data, EMB, serverViewScale());
+const classifyViewLocal = (canvas, engine) =>
+  _classifyViewLocal(canvas, engine, EMB, clipEmbed, localViewScale());
+const classifyViewServer = (p, cropBox) =>
+  _classifyViewServer(p, cropBox, EMB, serverViewScale(), sendLog);
+const classifyCanvasServer = (p, cropBox) => _classifyCanvasServer(p, cropBox, sendLog);
+const posteriorSummary = (fused) => _posteriorSummary(fused, EMB);
+const verdictSummary = (p) => _verdictSummary(p);
+const genusTotals = (fused, topIdx) => _genusTotals(fused, topIdx, EMB);
+
 const pooledPosterior = (aggLogits) => _pooledPosterior(EMB, aggLogits);
 const pooledVerdictOf = (aggLogits, included, aggAdjLogits) =>
   _pooledVerdictOf(EMB, aggLogits, included, aggAdjLogits, floorsFor(currentEngine));
@@ -2286,73 +2306,7 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
 // posteriors and the nuisance mass they were normalised against) rather than a
 // finished verdict, because the verdict is the fused one.
 //
-// `engine` is passed rather than read, because a two-view pass spans several
-// frames and the engine can be switched inside it; see classifyViews.
-async function classifyViewLocal(canvas, engine) {
-  const emb = await clipEmbed(canvas);
-  const { spP, nuP, adP } = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(engine) });
-  return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), adP, scale: localViewScale() };
-}
-
-// The server's answer for one crop box, in the same shape. `detail` is the
-// species posterior already normalised against the nuisance classes by the
-// server's own joint softmax, so the nuisance mass is whatever the species did
-// not take.
-async function classifyViewServer(p, cropBox) {
-  return serverView(await classifyCanvasServer(p, cropBox));
-}
-
-// The same conversion from a /api/predict response, for the batch path which
-// holds the response rather than a canvas.
-function serverView(data) {
-  const spP = EMB.species.map((name) => data.detail[name] || 0);
-  const speciesMass = spP.reduce((a, b) => a + b, 0);
-  return { spP, nuTotal: Math.max(1 - speciesMass, 1e-12), scale: serverViewScale() };
-}
-
-// Server path: the server owns no geometry decision we need for display, only
-// the scores for a crop box we send it. If it answers with a different box
-// than the one it was given, its labels describe a crop the user is not looking
-// at, so the box is logged and ignored rather than silently re-displayed.
-async function classifyCanvasServer(p, cropBox) {
-  const blob = await new Promise((r) => p.fullCanvas.toBlob(r, "image/jpeg", 0.85));
-  const formData = new FormData();
-  formData.append("file", blob, p.name);
-  formData.append("crop_box", JSON.stringify(cropBox));
-  const res = await fetch("/api/predict", { method: "POST", body: formData });
-  if (!res.ok) throw new Error(`Server inference error ${res.status}`);
-  const data = await res.json();
-  if (JSON.stringify(data.cropBox) !== JSON.stringify(cropBox)) {
-    sendLog("server_crop_box_diverged", { requested: cropBox, returned: data.cropBox });
-  }
-  return {
-    labels: data.labels,
-    detail: data.detail,
-    logits: data.logits,
-  };
-}
-
-// The views of one photo that get classified and pooled: the crop on screen,
-// and the whole frame unless the user has turned that second opinion off. Two
-// views of the same specimen, because one view of it is fallible - see fuseViews
-// for what the second buy is worth.
-//
-// A photo already showing the whole frame has only one view to offer, and
-// running the same pixels through the model twice would fuse a view with itself.
-// That covers both a photo the detector found nothing in and one the user
-// reverted to whole. Each view carries its crop box because the server path
-// takes a box where the local path takes the already-cut pixels.
-//
-// The decision of which views those are lives in `viewKinds`, shared with the
-// batch paths, so the three places a photo gets classified cannot disagree about
-// what a photo offers.
-function viewsFor(p, cropCv, cropBox) {
-  const whole = { canvas: p.fullCanvas, box: [0, 0, p.fullCanvas.width, p.fullCanvas.height] };
-  return viewKinds(Boolean(cropCv) && cropCv !== p.fullCanvas, includeWholeFrame)
-    .map((kind) => (kind === "crop" ? { canvas: cropCv, box: cropBox } : whole));
-}
-
-// Classify every view of one photo and commit the fused verdict, once per view
+// `engine` is passed rather than read, because a two-view pass spans several// Classify every view of one photo and commit the fused verdict, once per view
 // as each lands so a photo shows progress rather than sitting blank until its
 // last inference is done.
 //
@@ -2410,45 +2364,6 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
   });
   return { dropped: false };
 }
-
-// A posterior in a form a log line can be read from. The failure this exists to
-// catch is a distribution that is uniformly zero or uniformly flat, which is
-// indistinguishable from "no result" in every log line that reports only a
-// conclusion - and exact zeros across every photo are the symptom.
-function posteriorSummary(fused) {
-  const sp = fused.spP || fused.species || [];
-  if (!sp.length) return { spN: 0 };
-  const vals = Array.from(sp);
-  const sum = vals.reduce((a, b) => a + b, 0);
-  const max = Math.max(...vals);
-  const nz = vals.filter((v) => v > 0).length;
-  const idx = vals.indexOf(max);
-  return {
-    spN: vals.length,
-    spSum: round4(sum),
-    spMax: round4(max),
-    spNonZero: nz,
-    spTopIdx: idx,
-    adMass: round4(fused.adP ? fused.adP.reduce((a, b) => a + b, 0) : null),
-    genusTotal: round4(genusTotals(fused, idx)),
-  };
-}
-
-function verdictSummary(p) {
-  const v = p.verdict;
-  return v ? { state: v.state, genus: v.genus, topGenusP: round4(v.topGenusP), topSpeciesP: round4(v.topSpeciesP) } : {};
-}
-
-function genusTotals(fused, topIdx) {
-  const head = EMB;
-  if (!head || topIdx < 0) return null;
-  const g = genusOf(head.species[topIdx]);
-  let t = 0;
-  head.species.forEach((name, i) => { if (genusOf(name) === g) t += (fused.spP?.[i] || 0); });
-  return t;
-}
-
-const round4 = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v * 1e4) / 1e4 : null);
 
 // Write the fused verdict for the views that have landed: commitScores for the
 // verdict itself, then the multi-view bookkeeping on top. The photo stays
