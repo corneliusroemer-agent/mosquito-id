@@ -234,6 +234,16 @@
   .btn-primary:hover { background: var(--color-accent-hover); }
   .btn-sm { padding: 4px 12px; font-size: 12px; }
 
+  /* The engine re-run button, and why its space is reserved rather than taken.
+     It is shown exactly when the photos on screen were scored by an engine
+     other than the selected one, and `visibility` is what makes that show and
+     hide without moving anything: the engine row is the header's top-right
+     corner, so any change to its width moves the ENGINE label and the selector,
+     and everything below them. main.js sets the visibility; the rule below is
+     the state before it has run, so the button is never briefly visible on a
+     page whose photos are current. */
+  #btn-reprocess { flex: 0 0 auto; visibility: hidden; }
+
 /* The bulk actions live in the header row beside the paging arrows, not in the
      strip's own row. In the strip's row they took horizontal space from the one
      element that needs it - they narrowed the strip until its tiles scrolled out
@@ -836,6 +846,12 @@
        without this it drags the whole page 160px sideways. */
     .engine-control-box { width: 100%; max-width: 100%; }
     #engine-select { flex: 1 1 auto; min-width: 0; width: 100%; max-width: 100%; }
+    /* The re-run button's space is reserved on a phone as it is on a desktop,
+       and the full-width <select> is what gives: at `.btn-sm`'s mobile padding
+       the button takes 90px off a 390px row, so it drops to the icon alone and
+       the button's own name lives in the tooltip and the accessible name. */
+    #btn-reprocess { padding: 9px 12px; font-size: 13px; }
+    #btn-reprocess .reprocess-label { display: none; }
 
     /* A phone cannot fit "Aedes albopictus (Asian tiger mosquito) 🔗 40.3%"
        on one line, and breaking the binomial across lines is worse than
@@ -1060,6 +1076,12 @@
         <p class="sub" style="margin:0;" id="pipeline-sub">Cascade: YOLO11n crop &rarr; BioCLIP 2.5 H/14 analysis</p>
       </div>
       <div class="engine-control-box" style="display:flex;align-items:center;gap:8px;">
+        <!-- Beside the ENGINE label, on its left. Present from first paint and
+             sized whether or not it is showing (main.js toggles `visibility`,
+             never `display`), so a re-run becoming necessary moves nothing -
+             the engine row is the top-right corner of the header and anything
+             that shifts it moves the whole page under the reader. -->
+        <button id="btn-reprocess" class="btn btn-sm" type="button" style="white-space:nowrap;">↻<span class="reprocess-label"> Re-run</span></button>
         <label for="engine-select" style="font-size:12px;font-weight:600;color:var(--body-text-color-subdued);">ENGINE:</label>
         <select id="engine-select" class="btn" style="padding:6px 12px;font-size:13px;font-weight:500;border-radius:var(--radius-sm);cursor:pointer;background:var(--background-fill-secondary);">
           <option value="webgpu-culico">⚡ culico-net-cls-v1 (experimental · 81 MB)</option>

@@ -1,0 +1,117 @@
+# Re-running the loaded photos after an engine switch
+
+Switching the engine changes what the NEXT photo will be scored by and nothing
+about the photos already loaded. Before this, their scores stayed the ones the
+previous engine gave them while the footer named the new one, so a user who went
+from H/14 to culico read H/14's verdicts under culico's name.
+
+Re-running is minutes of inference and a lot of battery on the phone this is
+mostly used on, so it is not a consequence of the switch. `#btn-reprocess`, beside
+the ENGINE label in the header, is the action, and **its presence is the signal
+that the scores on screen are stale**. Two states, both pinned in
+`tests/reprocess.test.ts` and `e2e/tier1/reprocess.spec.ts`:
+
+- nothing on screen was scored by a different engine — hidden;
+- something was — visible, and it says how many photos and on which engine.
+
+## Staleness is per photo, not a flag
+
+Each photo carries `scoredBy`: the engine whose arithmetic produced the scores it
+is currently showing. It is written where scores land, not where the engine is
+chosen — `commitScores` (every view-fusion commit) and `classifyImage` /
+`commitBatchSlot` (the batch) — so it records what produced the numbers.
+
+A single "the engine has been switched" boolean cannot answer the question the
+button actually asks, and gets two real cases wrong in opposite directions:
+
+- a photo dropped **after** the switch was scored by the new engine and is not
+  stale, so a mixed gallery re-runs only what the switch left behind;
+- switching **back** to the engine that scored the photos makes them current
+  again, so the button withdraws instead of offering to re-run work already done.
+
+A photo with no `scoredBy` is not stale: it is queued, still decoding, or its
+classification failed, so nothing on screen is claiming to be another engine's
+verdict.
+
+## What "as if dropped fresh" meant to wire up
+
+`processFiles` IS the fresh-drop entry point, and the whole of the re-run is a
+call to it. Three things about it are not obvious from the name and cost the
+wiring most of the thought:
+
+**It takes `File` objects and it PREPENDS.** It cannot be handed the already
+loaded photos, and it will not replace them. So the re-run empties the gallery
+first — the same emptying `deleteAllPhotos` does, and for the same reason: a
+`removed` mark makes any inference still in flight for a photo drop its result
+instead of writing into a slot that has left `previews` — and then calls
+`processFiles` with the photos' own files. Every loaded photo is re-run, not only
+the stale ones: selecting a subset would leave a gallery half on each engine,
+which is the mixed state the button exists to remove.
+
+**It releases the slot's `File`.** `commitBatchSlot` used to do
+`slot.file = undefined` alongside `slot.bitmap = undefined`. Only the bitmap goes
+now, because a re-run is a re-drop and releasing the File would make every re-run
+re-encode the photo's own canvas — a second generation of JPEG — instead of
+feeding the batch the bytes that were dropped. `sourceFileFor` in
+`src/app/reprocess.ts` keeps the canvas fallback for a photo that never had a
+File.
+
+What retaining it costs is bounded but not zero, and not for every intake. A
+dropped or picked file is a reference to bytes the browser holds outside its
+heap. A **zip entry**, a **clipboard paste** and a **sample fetch** each build
+their File from an in-memory Blob, so a session that keeps those photos on screen
+now also keeps their encoded bytes. That is bounded by what is already retained
+— `fullCanvas` is an order of magnitude larger and was never released either —
+but larger is not the same as bounded, and a 300-entry zip is the case where it
+would show.
+
+**The name has to carry an extension.** `processFiles` filters on
+`/\.(jpe?g|png|webp|bmp)$/i` and drops a file without one in silence, so
+`sourceFileFor` appends `.jpg` to a name that has no recognised extension rather
+than letting a re-run silently lose the photo.
+
+## The window where a click would run the wrong engine
+
+Between choosing an engine and its weights landing, `sessClip` still holds the
+PREVIOUS engine's session and `EMB` still holds its head. A re-run started in
+that window would re-run the old classifier and stamp the new engine's name on
+the result — the exact confusion this button exists to end.
+
+The button is therefore `disabled` while `!window.modelsReady`, with the reason
+in its tooltip, and stays visible: the scores are still stale while it is
+loading. `loadWebGPUModels` clears `modelsReady` at its first line and sets it at
+its end, so the button unblocks on its own. It is also disabled while a batch is
+running, for the ordinary reason that a batch is writing into the gallery a
+re-run would empty.
+
+`updateReprocessButton()` is called from `renderThumbnails()`, beside
+`updateStripActions()`: staleness changes wherever the photos do. The engine
+change handler and `loadWebGPUModels` call it too, since neither renders the
+strip.
+
+## Where the engine is pinned
+
+Four places read `currentEngine` during a computation, and all four now read it
+once at the start and thread it through:
+
+- `classifyImage` — every `cosineOffsetsFor` in the body.
+- `inferSlot` — which branch the photo takes, and the `scoredBy` it commits.
+- `classifyViews` — a two-view pass spans several frames, so a switch between the
+  crop's view and the whole frame's would fuse two engines: a verdict from
+  neither, stamped with whichever engine the pass ended on.
+- `commitScores` — defaults to the live engine, so a caller that has not pinned
+  one cannot forget to say which engine it meant.
+
+## Two things that are not about this button
+
+**The engine `<select>` change listener now catches a failed load.** It is
+`async`, so a rejected `loadWebGPUModels` was an unhandled rejection with nothing
+on the page, and `modelsReady` stuck false with the dropdown naming an engine that
+could not load. It now reports through the progress slot, the way a failed initial
+load already did.
+
+**`__mosqAsync.clipSessions` is exposed.** Tier 1 cannot download a model, so a
+switch there never completes and nothing downstream of it can be exercised.
+Writing an entry makes `loadWebGPUModels` take its already-loaded branch, so the
+switch rebinds the head, the session and the footer through the shipped code with
+no fetch.

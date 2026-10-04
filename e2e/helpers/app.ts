@@ -18,6 +18,12 @@ export interface MosqAsync {
   previews: any[];
   sessClip: unknown;
   sessDet: unknown;
+  /**
+   * The app's per-engine session cache. Writing an entry for an engine makes a
+   * switch to it take `loadWebGPUModels`'s already-loaded branch, so the switch
+   * runs for real - head, session and footer rebound - with no model download.
+   */
+  clipSessions: Record<string, { sess: unknown; ep: string }>;
   selectedIndex: number;
   includedIndices: Set<number>;
   embeds: any;
@@ -69,7 +75,7 @@ export async function stubModel(page: Page): Promise<void> {
  * is exactly the kind of breakage this tier exists to catch.
  */
 const EXPECTED_STUB_NOISE =
-  /net::ERR_FAILED|net::ERR_ABORTED|Engine initialization error.*Failed to fetch|Failed to fetch|onnx|r2\.dev/i;
+  /net::ERR_FAILED|net::ERR_ABORTED|Engine initialization error.*Failed to fetch|Engine switch failed.*Failed to fetch|Failed to fetch|onnx|r2\.dev/i;
 
 export async function boot(page: Page, url = "/"): Promise<void> {
   const errors: string[] = [];
@@ -167,6 +173,10 @@ function makeCanvas(w, h, hue, label) {
 
 /**
  * Install `n` populated photos and render them.
+ *
+ * With an empty `specs`, this seeds the shipped head onto `A.embeds` and draws
+ * an empty gallery - which is how a test that needs the head but supplies its own
+ * photos gets one without fetching and binding it a second time.
  *
  * The photos carry the fields every render function reads - `detail`, `scores`,
  * `logits`, `adP`, `adjacentDetail`, `verdict` - so `updatePooling` runs the

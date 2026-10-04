@@ -47,6 +47,7 @@ import { badge, canView, checkLabel, contributesToPool,
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
+import { renderReprocessButton, sourceFileFor, stalePhotos } from "./reprocess";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -188,6 +189,9 @@ let previews = [];
 let includedIndices = new Set();
 let selectedIndex = 0;
 let isProcessingBatch = false;
+// A re-run in progress: the window between emptying the gallery and the batch
+// that refills it starting. See reprocessLoadedPhotos.
+let reprocessRunning = false;
 
 // Whether a cropped photo is fused with its whole frame as well as its crop.
 // Read once at load and written on every change, so it survives a reload; the
@@ -220,6 +224,12 @@ const ASYNC = (window.__mosqAsync = {
   worstLongTaskMs: 0,
   get previews() { return previews; },
   get sessClip() { return sessClip; },
+  // The per-engine session cache. A tier-1 test that puts an entry here makes an
+  // engine switch take the already-loaded branch of `loadWebGPUModels`, so the
+  // switch runs for real - rebinding the head, the session and the footer - with
+  // no download. The alternative is a switch that never completes, which cannot
+  // exercise anything downstream of it.
+  get clipSessions() { return clipSessions; },
   // The classifier, replaceable. Tier 1 aborts every model request and so has no
   // session to run a re-classification through, and the one thing that has to be
   // observable end to end - that a toggle drives inference and settles - needs
@@ -243,6 +253,9 @@ const ASYNC = (window.__mosqAsync = {
   selectPhoto,
   processFiles,
   deletePhoto,
+  // The engine re-run, so a test can press the button's action without reaching
+  // into the gallery's internals first.
+  reprocess: () => reprocessLoadedPhotos(),
   // The render entry points, so a probe can time and inspect a render with the
   // same functions the app calls rather than a re-implementation of them. These
   // are the functions the encode cache exists for, so a probe that did not call
@@ -295,10 +308,16 @@ function ownsRecompute(p, idx, rev) {
 // Everything a finished computation commits, in one place, so the local and
 // server paths cannot drift apart in what they mark current. The multi-view
 // paths go through applyViews, which layers the per-view bookkeeping on top.
-function commitScores(p, r) {
+function commitScores(p, r, engine = currentEngine) {
   p.scores = r.labels;
   p.detail = r.detail;
   p.logits = r.logits;
+  // Which engine these numbers are filed under, so the re-run button can tell a
+  // photo that is current from one still showing another engine's verdict.
+  // Written here and at the batch commit because those are the two places scores
+  // land. Defaulted to the live engine so a caller that has not pinned one - the
+  // single-view paths - cannot forget to say which engine it meant.
+  p.scoredBy = engine;
   // The adjacent posteriors, index-aligned with EMB.adjacent, so the pooled card
   // can carry the pool's non-mosquito evidence through its own softmax. Absent
   // where the scoring path reports none - the server path has no adjacent
@@ -432,6 +451,8 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   document.getElementById("footer-device").textContent = deviceLabel;
   clearProgress("model");
   window.modelsReady = true;
+  // The button was blocked for the whole download; it becomes pressable here.
+  updateReprocessButton();
   sendLog("webgpu_models_ready", { engine: engineKey, clipEP, detEP });
   // Photos dropped while this download was running start now.
   drainQueuedBatches();
@@ -491,20 +512,50 @@ async function initEngine() {
       localStorage.setItem("mosquito_engine", chosen);
       sendLog("engine_switched", { from: currentEngine, to: chosen });
       applyEngineNotices(chosen);
+      currentEngine = chosen;
+      // The engine is not usable from this instant: `sessClip` still holds the
+      // PREVIOUS engine's session and `EMB` its head until the weights land, so a
+      // re-run started now would run the old classifier and commit the result
+      // under the new engine's name. Cleared HERE rather than on
+      // `loadWebGPUModels`'s first line, because the button is read in between -
+      // clearing it there left the button enabled and inert for the whole 1.26 GB
+      // download, which is the one state it must never be in.
+      if (chosen !== "server-gpu") window.modelsReady = false;
+      engineLoadError = null;
+      // With `currentEngine` already moved and the engine already marked unusable:
+      // the photos are stale the moment the selection changes, and for the
+      // duration of the download this button - disabled, saying so - is what the
+      // reader has instead.
+      updateReprocessButton();
       if (chosen === "server-gpu") {
-        currentEngine = "server-gpu";
         clearProgress("model");
         if (footerDevice) {
           footerDevice.textContent = `inference: ${serverEngineLabel} · YOLO11n & BioCLIP 2.5 H/14 (Instant)`;
         }
         window.modelsReady = true;
+        updateReprocessButton();
         drainQueuedBatches();
       } else {
-        currentEngine = chosen;
         if (footerDevice) {
           footerDevice.textContent = `inference: ${WEBGPU_MODELS[chosen]?.name || "WebGPU"}`;
         }
-        await loadWebGPUModels(chosen);
+        // Caught, and reported the way a failed initial load is: this listener is
+        // async, so a rejected download was an unhandled rejection and nothing on
+        // the page. A switch whose weights cannot be fetched has to leave the
+        // engine named in the dropdown with the failure on screen, and the
+        // re-run button blocked rather than offering to re-run the PREVIOUS
+        // engine's classifier under the new one's name.
+        try {
+          await loadWebGPUModels(chosen);
+        } catch (err) {
+          console.error("Engine switch failed:", err);
+          engineLoadError = `Could not load ${WEBGPU_MODELS[chosen]?.name || chosen}`;
+          setProgress("model", null, null);
+          setProgressError(`${engineLoadError}: ${err.message}`);
+        }
+        // The button was disabled for the download either way; what it says now
+        // differs, and a failed load leaves it unusable rather than merely slow.
+        updateReprocessButton();
       }
     });
   }
@@ -515,6 +566,7 @@ async function initEngine() {
       footerDevice.textContent = `inference: ${serverEngineLabel} · YOLO11n & BioCLIP 2.5 H/14 (Instant)`;
     }
     window.modelsReady = true;
+    updateReprocessButton();
     sendLog("engine_init", { mode: "server", label: serverEngineLabel });
     drainQueuedBatches();
   } else {
@@ -561,6 +613,132 @@ function labelEngineOptions() {
       ? opt.textContent.replace(/ \u00b7 genus only$/, "")
       : opt.textContent + capabilityNote(cfg.reports);
   }
+}
+
+// ---- Re-running the loaded photos on the selected engine ----
+//
+// Switching the engine changes what the next photo will be scored by and
+// nothing about the photos already on screen, so their scores stay the previous
+// engine's while the footer names the new one. Re-running them is minutes and a
+// lot of battery on the phone this is mostly used on, so it is an explicit
+// action; the button's presence is what says the scores are stale.
+//
+// Both the rule and the button's drawing live in ./reprocess, because which
+// photos are stale is a question about the photos and not about the DOM.
+const REPROCESS_BLOCKED_BATCH = "A batch is being analysed - re-run when it finishes";
+// Set when a switch's weights could not be fetched, and cleared by the next
+// switch. It is the difference between "still loading" and "did not load", which
+// are the same button state and not the same thing to be told.
+let engineLoadError = null;
+
+/** The engine's name as the dropdown gives it, for the button's tooltip. */
+function engineLabel() {
+  return currentEngine === "server-gpu"
+    ? `Server (${serverEngineLabel})`
+    : WEBGPU_MODELS[currentEngine]?.name || "WebGPU";
+}
+
+function updateReprocessButton() {
+  const btn = document.getElementById("btn-reprocess");
+  if (!btn) return;
+  const stale = stalePhotos(previews, currentEngine).length;
+  // Checked in this order because a re-run is a batch is a re-run. The last is
+  // the dangerous one: the dropdown already names an engine whose session is not
+  // the one loaded, so pressing would stamp the new engine's name on the
+  // previous engine's result.
+  const blockedBy = reprocessRunning || isProcessingBatch || reclassifyRunner.inFlight
+    ? REPROCESS_BLOCKED_BATCH
+    : engineLoadError
+      ? `${engineLoadError} - the engine in the dropdown is not the one that scored these photos`
+      : !window.modelsReady
+        ? "The selected engine is still loading - re-run when it has"
+        : null;
+  renderReprocessButton(btn, { stale, engineLabel: engineLabel(), blockedBy });
+}
+
+/**
+ * Re-run every loaded photo through the batch a fresh drop takes.
+ *
+ * `processFiles` is the whole of it, deliberately: detection, both views, the
+ * fusion, the pending bookkeeping and the serial scheduling all come with it,
+ * and a parallel path would be a second thing to keep in step with the first.
+ *
+ * Every loaded photo is re-run, not only the stale ones: selecting a subset
+ * would leave a gallery half on each engine, which is the mixed state this
+ * exists to remove. Detection runs again as a consequence, which means a crop
+ * box the user drew and refined is replaced by the detector's - there is no undo
+ * for it, and the same is true of every fresh drop.
+ */
+async function reprocessLoadedPhotos() {
+  if (isProcessingBatch || !window.modelsReady || reprocessRunning) return;
+  // A whole-frame or crop re-classification holds the single inference slot
+  // without ever setting `isProcessingBatch`, and this app runs onnxruntime on
+  // the main thread: two of them at once is the freeze the runner exists to
+  // prevent, and the runner's own `onSettled` would then render against a
+  // gallery this has already replaced.
+  if (reclassifyRunner.inFlight) return;
+  const sources = previews.filter((p) => p && !p.removed);
+  if (!sources.length) return;
+  sendLog("reprocess_requested", { photos: sources.length, engine: currentEngine });
+
+  // The button is disabled for the whole of this, but `isProcessingBatch` only
+  // becomes true once the batch below starts, and collecting the sources is
+  // several awaits wide. Without this a second click lands in that gap and
+  // empties the gallery the first click is about to refill.
+  reprocessRunning = true;
+  updateReprocessButton();
+
+  try {
+    // Every photo that can be re-dropped, and every one that cannot - kept
+    // aside rather than dropped. A photo is un-re-droppable only if it has
+    // neither a File nor decoded pixels, and the batch below empties the whole
+    // gallery, so a photo left out of the drop without being kept would vanish
+    // from the strip with nothing said: a decode that failed, a photo whose
+    // canvas backing store was lost. Both are rare and both are someone's photo.
+    const files = [];
+    const kept = [];
+    for (const p of sources) {
+      const f = await sourceFileFor(p);
+      if (f) files.push(f);
+      else kept.push(p);
+    }
+    if (!files.length) {
+      sendLog("reprocess_impossible", { photos: kept.length });
+      return;
+    }
+    if (kept.length) {
+      console.warn("Re-running without", kept.length, "photo(s) that have no source image left");
+    }
+
+    // Only the photos the batch is about to replace are marked removed; `kept`
+    // stays in the gallery and lands BELOW the batch, which is what
+    // `processFiles` prepends to whatever is already there. Its own
+    // `shiftIncludedForPrepend` then moves `kept`'s checks down by the batch's
+    // length, which is the same arithmetic a drop over a populated gallery does.
+    previews.forEach((p) => { if (!kept.includes(p)) p.removed = true; });
+    previews = [...kept];
+    includedIndices = new Set(kept.map((_, i) => i));
+    selectedIndex = 0;
+    sendLog("reprocess_replaced", { replaced: files.length, kept: kept.length });
+    renderThumbnails();
+    updatePooling(EMB, previews, includedIndices);
+    renderResultsTable(previews);
+    // Awaited, so the guard is held until the batch has run: the photos on
+    // screen between this point and its end are the batch's, and the button
+    // must not offer to replace them again.
+    await processFiles(files);
+  } finally {
+    reprocessRunning = false;
+    updateReprocessButton();
+  }
+}
+
+/** The button's one listener: a click re-runs the gallery, nothing else. */
+function wireReprocessButton() {
+  const btn = document.getElementById("btn-reprocess");
+  if (!btn) return;
+  btn.onclick = () => { reprocessLoadedPhotos(); };
+  updateReprocessButton();
 }
 
 function applyEngineNotices(engineKey) {
@@ -769,6 +947,14 @@ function pickEmbedding(res) {
 // paints each as it lands.
 async function classifyImage(imgBitmap, filename) {
   const t0 = performance.now();
+  // Read once, so this photo's `scoredBy` names one engine rather than whichever
+  // was selected when the commit landed. It does NOT pin the arithmetic: `sessClip`
+  // and `EMB` are module state that `loadWebGPUModels` rebinds mid-download, so a
+  // photo classified in that window is still scored against whichever session and
+  // head happened to be bound. What the pin guarantees is that such a photo is
+  // LABELLED consistently, which is what the re-run button reads; the window is
+  // closed by the button being disabled until `modelsReady`, not by this.
+  const engine = currentEngine;
   const fullCv = document.createElement("canvas");
   fullCv.width = imgBitmap.width;
   fullCv.height = imgBitmap.height;
@@ -818,7 +1004,7 @@ async function classifyImage(imgBitmap, filename) {
   let cropRejected = false;
   if (best) {
     const emb = await clipEmbed(cropCv);
-    const j = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(currentEngine) });
+    const j = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(engine) });
     if (Math.max(...j.spP) >= Math.max(...j.nuP)) {
       cropView = { spP: j.spP, nuTotal: j.nuP.reduce((a, b) => a + b, 0), adP: j.adP,
                    scale: localViewScale() };
@@ -840,7 +1026,7 @@ async function classifyImage(imgBitmap, filename) {
   // so only the whole frame is left to decide here.
   if (viewKinds(Boolean(cropView), includeWholeFrame).includes("whole")) {
     const wholeEmb = await clipEmbed(fullCv);
-    const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(currentEngine) });
+    const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(engine) });
     views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
                  adP: wholeJ.adP, scale: localViewScale() });
   }
@@ -862,6 +1048,9 @@ async function classifyImage(imgBitmap, filename) {
 
   const base = {
     name: filename,
+    // The engine whose arithmetic produced this, so a later engine switch can be
+    // told apart from a photo that is still current. See `engine` above.
+    scoredBy: engine,
     fullCanvas: fullCv,
     cropCanvas: cropCv,
     contextCanvas,
@@ -880,7 +1069,7 @@ async function classifyImage(imgBitmap, filename) {
   };
 
   const epLabel = clipEP === "webgpu" ? "WEBGPU" : "WASM CPU";
-  const devText = `inference: ${WEBGPU_MODELS[currentEngine]?.name || "WebGPU"} (${epLabel}) · ${totalTime}ms/photo (crop: ${detTime}ms · analyze: ${clipTime}ms)`;
+  const devText = `inference: ${WEBGPU_MODELS[engine]?.name || "WebGPU"} (${epLabel}) · ${totalTime}ms/photo (crop: ${detTime}ms · analyze: ${clipTime}ms)`;
   const devElem = document.getElementById("footer-device");
   if (devElem) devElem.textContent = devText;
 
@@ -1065,6 +1254,12 @@ async function processFiles(fileList) {
   const engineLabel = currentEngine === "server-gpu" ? `Server (${serverEngineLabel})` : "WebGPU";
   let processed = 0;
   async function inferSlot(slot, i) {
+    // Read once, so the photos a batch scores all carry one engine in
+    // `scoredBy` rather than one each, and the footer naming the last of them
+    // cannot leave a reader unable to tell which scores are whose. The batch
+    // itself does not straddle a switch: `processFiles` is unreachable while the
+    // engine is unusable, so the session and head are settled for its duration.
+    const engine = currentEngine;
     if (isBatchAborted) {
       // Aborted before this photo started: say so rather than leaving a tile
       // greyed forever.
@@ -1076,7 +1271,7 @@ async function processFiles(fileList) {
     }
     setProgress("batch", `Analyzing ${processed + 1} of ${imageFiles.length} photos on ${engineLabel} (${slot.name})…`, (100 * processed) / imageFiles.length);
     try {
-      if (currentEngine === "server-gpu") {
+      if (engine === "server-gpu") {
         const formData = new FormData();
         formData.append("file", slot.file);
         const res = await fetch("/api/predict", { method: "POST", body: formData });
@@ -1104,7 +1299,8 @@ async function processFiles(fileList) {
         const fused = fuseViews(views);
 
         commitBatchSlot(slots[i], {
-          name: data.filename, fullCanvas: fullCv, cropCanvas: cropCv, contextCanvas: contextCv,
+          name: data.filename, scoredBy: engine,
+          fullCanvas: fullCv, cropCanvas: cropCv, contextCanvas: contextCv,
           cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
           detail: fused.detail, logits: fused.logits, status: data.status,
           // The server reports one `fallback` bit for both ways of ending up
@@ -1181,7 +1377,22 @@ function commitBatchSlot(slot, res) {
     return;
   }
   Object.assign(slot, res);
-  slot.file = undefined;   // release the File/ImageBitmap once it is not needed
+  // The ImageBitmap goes: it is the same pixels as `fullCanvas`, which stays,
+  // and a decoded copy of a 12-megapixel photograph is the largest thing a photo
+  // holds.
+  //
+  // The File stays, though it used to be released here with it. A re-run
+  // re-drops the photo through `processFiles`, which takes Files, so releasing
+  // it would make every re-run re-encode the photo's own canvas and feed the
+  // batch a second generation of JPEG instead of the bytes that were dropped.
+  //
+  // What that costs is bounded but not zero, and it is not zero for every intake:
+  // a dropped or picked file is a reference to bytes the browser holds outside
+  // its heap, but a zip entry, a clipboard paste and a sample fetch all build the
+  // File from an in-memory Blob. For those, a session that keeps the photos on
+  // screen now also keeps their encoded bytes - against a `fullCanvas` that is
+  // an order of magnitude larger and was never released either, but larger is
+  // not the same as bounded.
   slot.bitmap = undefined;
   slot.pending = false;
   slot.error = null;
@@ -1312,6 +1523,11 @@ function buildTile() {
 function renderThumbnails() {
   const strip = document.getElementById("thumbnail-strip");
   updateStripActions();
+  // With the strip's own actions, and for the same reason: whether the engine
+  // re-run belongs on the page is a fact about the photos as much as about the
+  // controls, and it changes wherever the photos do - a batch landing, a photo
+  // deleted, a re-classification settling.
+  updateReprocessButton();
 
   // The strip is the only writer of `includedIndices`, so this is where an index
   // is made valid. `updatePooling` drops an index it cannot resolve, silently,
@@ -1972,9 +2188,12 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
 // One view of one photo, scored. Returns the pieces fusion needs (the species
 // posteriors and the nuisance mass they were normalised against) rather than a
 // finished verdict, because the verdict is the fused one.
-async function classifyViewLocal(canvas) {
+//
+// `engine` is passed rather than read, because a two-view pass spans several
+// frames and the engine can be switched inside it; see classifyViews.
+async function classifyViewLocal(canvas, engine) {
   const emb = await clipEmbed(canvas);
-  const { spP, nuP, adP } = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(currentEngine) });
+  const { spP, nuP, adP } = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(engine) });
   return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), adP, scale: localViewScale() };
 }
 
@@ -2046,6 +2265,12 @@ function viewsFor(p, cropCv, cropBox) {
 // two views per photo that check runs twice as often, which is the point - the
 // second view has strictly more opportunity to arrive late and stale.
 async function classifyViews(p, idx, rev, cropCv, cropBox) {
+  // Read once, so a switch between the crop's view and the whole frame's cannot
+  // fuse two engines and stamp the result with whichever the pass ended on. The
+  // calibration each softmax applies follows this key; the session and head they
+  // read are the module's, and the whole-frame runner - which is what drives this
+  // path - only runs while the engine is usable.
+  const engine = currentEngine;
   const views = viewsFor(p, cropCv, cropBox);
   const landed = [];
   let dropped = false;
@@ -2057,15 +2282,15 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
   for (const view of views) {
     await afterNextPaint();
     if (!ownsRecompute(p, idx, rev)) { dropped = true; break; }
-    const v = currentEngine === "server-gpu"
+    const v = engine === "server-gpu"
       ? await classifyViewServer(p, view.box)
-      : await classifyViewLocal(view.canvas);
+      : await classifyViewLocal(view.canvas, engine);
     if (!ownsRecompute(p, idx, rev)) { dropped = true; break; }
     landed.push(v);
     // Paint what is known so far. The fused verdict is recomputed from the views
     // that have landed, so the first view's paint is that view's own softmax
     // unchanged, and the second replaces it with the pool of the two.
-    fused = applyViews(p, landed, views.length);
+    fused = applyViews(p, landed, views.length, engine);
     renderThumbnails();
     renderActivePhoto();
     updatePooling(EMB, previews, includedIndices);
@@ -2132,9 +2357,9 @@ const round4 = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.round(
 // verdict itself, then the multi-view bookkeeping on top. The photo stays
 // pending until every view is in, so a tile is never shown as settled on a
 // partial pool that is about to be replaced by the full one.
-function applyViews(p, landed, total) {
+function applyViews(p, landed, total, engine) {
   const fused = fuseViews(landed);
-  commitScores(p, fused);
+  commitScores(p, fused, engine);
   p.agreement = fused.agreement;
   p.viewsLanded = landed.length;
   p.viewsTotal = total;
@@ -2337,6 +2562,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   setupCropSurfaces();
   wireStripActions();
+  wireReprocessButton();
 
   // The viewer-aspect cache lives in the crop geometry module; these listeners
   // are wired here because they belong to the page's lifetime, not to that
