@@ -24,13 +24,20 @@ interface Fake {
   height: number;
   /** Non-zero when this canvas holds a drawn image; 0 when blank. */
   ink: number;
+  /** Every rectangle drawn onto this canvas, as the draw call passed it. */
+  drawn: number[][];
   getContext(t?: string): FakeCtx | null;
 }
 
 interface FakeCtx {
   drawImage(src: Fake, ...rest: number[]): void;
   fillRect(x: number, y: number, w: number, h: number): void;
-  getImageData(x: number, y: number, w: number, h: number): { data: Uint8ClampedArray };
+  getImageData(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+  ): { data: Uint8ClampedArray };
   fillStyle: string;
 }
 
@@ -63,17 +70,42 @@ function makeCanvas(w = 0, h = 0): Fake {
   let width = w;
   let height = h;
   let ink = 0;
+  const drawn: number[][] = [];
   const c = {
-    get width() { return width; },
-    set width(v: number) { width = v; ink = 0; },
-    get height() { return height; },
-    set height(v: number) { height = v; ink = 0; },
-    get ink() { return ink; },
-    set ink(v: number) { ink = v; },
+    drawn,
+    get width() {
+      return width;
+    },
+    set width(v: number) {
+      width = v;
+      ink = 0;
+    },
+    get height() {
+      return height;
+    },
+    set height(v: number) {
+      height = v;
+      ink = 0;
+    },
+    get ink() {
+      return ink;
+    },
+    set ink(v: number) {
+      ink = v;
+    },
     getContext(): FakeCtx | null {
       return {
-        drawImage(src: Fake) { c.ink = src.ink; },
-        fillRect() { c.ink = PAD_INK; },
+        // The geometry is recorded as well as the ink propagated. Ink alone
+        // cannot see a mis-scaled resample: drawing the photograph into
+        // `content` at twice the size, or blitting it at the wrong offset,
+        // leaves every assertion below satisfied.
+        drawImage(src: Fake, ...rest: number[]) {
+          c.ink = src.ink;
+          drawn.push(rest);
+        },
+        fillRect() {
+          c.ink = PAD_INK;
+        },
         getImageData(_x: number, _y: number, w: number, h: number) {
           return { data: pixelsFor(w, h, c.ink) };
         },
@@ -150,7 +182,18 @@ describe("letterbox", () => {
     const lb = letterbox(photo(4000, 3000, 42) as never);
     expect(lb.content.width).toBe(640);
     expect(lb.content.height).toBe(480);
-    expect(lb.content.ink).toBe(42);
+    expect((lb.content as unknown as Fake).ink).toBe(42);
+  });
+
+  it("resamples at the detector's scale and blits that 1:1", () => {
+    // The two draws that decide whether the detector sees the photograph or a
+    // wrongly-scaled version of it: the photo into `content`, and `content`
+    // into the padded input at 1:1 with the same `dw`/`dh`.
+    const lb = letterbox(photo(4000, 3000, 42) as never);
+    const [contentCv, paddedCv] = made;
+    expect(contentCv!.drawn).toEqual([[0, 0, 4000, 3000, 0, 0, 640, 480]]);
+    expect(paddedCv!.drawn).toEqual([[0, 0, 640, 480, 0, 80, 640, 480]]);
+    expect(lb.content).toBe(contentCv);
   });
 
   it("keeps the letterbox's own geometry - scale and padding - unchanged", () => {
@@ -164,36 +207,70 @@ describe("letterbox", () => {
     const lb = letterbox(photo(6144, 8160, 1) as never);
     expect(lb.content.width).toBe(482);
     expect(lb.content.height).toBe(640);
-    expect(isUsableIntermediate(lb.content, photo(6144, 8160), CLIP_SIZE)).toBe(true);
+    expect(isUsableIntermediate(lb.content, photo(6144, 8160), CLIP_SIZE)).toBe(
+      true,
+    );
   });
 });
 
 describe("isUsableIntermediate", () => {
   it("accepts the detector's content canvas for a normal photograph", () => {
     // A 4:3 photo: content 640x480, short edge 480 >= 224.
-    expect(isUsableIntermediate({ width: 640, height: 480 }, { width: 8160, height: 6144 }, CLIP_SIZE)).toBe(true);
+    expect(
+      isUsableIntermediate(
+        { width: 640, height: 480 },
+        { width: 8160, height: 6144 },
+        CLIP_SIZE,
+      ),
+    ).toBe(true);
   });
 
   it("refuses a panorama whose short edge would have to be enlarged", () => {
     // An 8:1 frame lands with a 78 px short edge at 640. Scaling that to 224
     // is a 2.9x enlargement, so the photograph is read instead.
-    expect(isUsableIntermediate({ width: 640, height: 78 }, { width: 8000, height: 1000 }, CLIP_SIZE)).toBe(false);
+    expect(
+      isUsableIntermediate(
+        { width: 640, height: 78 },
+        { width: 8000, height: 1000 },
+        CLIP_SIZE,
+      ),
+    ).toBe(false);
   });
 
   it("refuses a different aspect ratio rather than stretch the embedding", () => {
-    expect(isUsableIntermediate({ width: 640, height: 480 }, { width: 480, height: 640 }, CLIP_SIZE)).toBe(false);
+    expect(
+      isUsableIntermediate(
+        { width: 640, height: 480 },
+        { width: 480, height: 640 },
+        CLIP_SIZE,
+      ),
+    ).toBe(false);
   });
 
   it("tolerates the rounding that two independent roundings leave behind", () => {
     // 482/640 vs 6144/8160 differ by one part in ~10^4 from whole-pixel rounding.
-    expect(isUsableIntermediate({ width: 640, height: 482 }, { width: 8160, height: 6144 }, CLIP_SIZE)).toBe(true);
+    expect(
+      isUsableIntermediate(
+        { width: 640, height: 482 },
+        { width: 8160, height: 6144 },
+        CLIP_SIZE,
+      ),
+    ).toBe(true);
   });
 
   it("refuses nothing usable: absent, empty or zero-sized is a refusal", () => {
     const full = { width: 8160, height: 6144 };
     expect(isUsableIntermediate(null, full, CLIP_SIZE)).toBe(false);
     expect(isUsableIntermediate(undefined, full, CLIP_SIZE)).toBe(false);
-    expect(isUsableIntermediate({ width: 0, height: 0 }, full, CLIP_SIZE)).toBe(false);
-    expect(isUsableIntermediate({ width: 640, height: 480 }, { width: 0, height: 0 }, CLIP_SIZE)).toBe(false);
+    expect(isUsableIntermediate({ width: 0, height: 0 }, full, CLIP_SIZE)).toBe(
+      false,
+    );
+    expect(
+      isUsableIntermediate(
+        { width: 640, height: 480 },
+        { width: 0, height: 0 },
+        CLIP_SIZE,
+      ),
+    ).toBe(false);
   });
 });
