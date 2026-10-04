@@ -227,6 +227,16 @@ zero and never was: they take 0.4%-28% of the joint posterior. `informativeRows`
 is what stops that mattering, and `tests/culico-head.test.ts` is what stops a
 later refit from quietly filling them in.
 
+### One behavioural change nobody asked about, checked anyway
+
+`main.js` decides whether to trust the detector's crop by comparing the best
+species posterior against the best nuisance posterior. A refit that is far more
+confident than the shipped head could have flipped that comparison and started
+rejecting crops. Measured on the 6,264-row cache: the crop is rejected on
+**0 of 6,264** photographs under both heads, so the detector crop is still used
+everywhere. Nothing changed, but it was the one place where "sharper species
+block" could have had a cost nobody was looking for.
+
 ### What this made the app able to say
 
 Sixteen distinct weight rows means no two species are the same output any more,
