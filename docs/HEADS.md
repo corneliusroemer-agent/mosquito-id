@@ -126,7 +126,10 @@ if three things hold at once:
 
 Measured on 64 held-out photographs, the app's species posterior renormalised
 over the species block matches the probe's own distribution to **1.4e-8**, and the
-winning species agrees on 64 of 64.
+winning species agrees on 64 of 64. `main.js` narrows `species_emb` to
+`Float32Array` on load and the tests read the JSON's numbers directly; that costs
+nothing — over all 20,336 corpus rows the argmax is unchanged and the largest
+posterior shift is 2.6e-8.
 
 The renormalisation is not a fudge. `softmaxJoint` puts species, nuisance and
 adjacent in ONE softmax, so the species posteriors are the probe's times the
