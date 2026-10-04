@@ -264,6 +264,13 @@ const ASYNC = (window.__mosqAsync = {
   // The engine re-run, so a test can press the button's action without reaching
   // into the gallery's internals first.
   reprocess: () => reprocessLoadedPhotos(),
+  // The photo set an engine-switch re-run is narrowing the shared pass to, or
+  // null. Writable so a test can stand in for a re-run in progress: that is the
+  // only way to reach a whole-frame toggle's path while the narrowing is set,
+  // since the real re-run needs a live detector and minutes of inference.
+  // Read-only in production; nothing outside `reprocessLoadedPhotos` writes it.
+  get rerunPhotos() { return rerunPhotos; },
+  set rerunPhotos(v) { rerunPhotos = v; },
   // The render entry points, so a probe can time and inspect a render with the
   // same functions the app calls rather than a re-implementation of them. These
   // are the functions the encode cache exists for, so a probe that did not call
