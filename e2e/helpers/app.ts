@@ -32,6 +32,8 @@ export interface MosqAsync {
   selectPhoto: (i: number) => void;
   processFiles: (files: FileList | File[]) => Promise<void>;
   deletePhoto: (i: number) => void;
+  /** The engine re-run's photo-set narrowing, or null. See `main.js` ASYNC. */
+  rerunPhotos: Set<any> | null;
   renderThumbnails: () => void;
   renderActivePhoto: () => void;
   updatePooling: () => void;
