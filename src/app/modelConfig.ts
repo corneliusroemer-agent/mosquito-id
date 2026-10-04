@@ -20,6 +20,18 @@ export const NMS_IOU = 0.70;
 export const CROP_PAD = 0.10;
 export const CACHE_NAME = "mosquito-models-v1";
 
+/**
+ * The detector's size in bytes, which the load bar weighs it by.
+ *
+ * The one declared size `WEBGPU_MODELS` does not carry: the detector is fetched
+ * by a bare path rather than as a selectable engine, so nothing else records
+ * how big it is. It is needed because the bar aggregates across the whole load,
+ * and a step with no declared bytes cannot be weighted against a 1.2 GB
+ * classifier. Measured from the bucket's Content-Length, like the sizes beside
+ * it; a stale value here costs accuracy in the bar's middle, never its end.
+ */
+export const DETECTOR_SIZE = 10607017;
+
 // CLIP's channel normalisation, applied to the 0-1 pixel tensor before it is
 // handed to the classifier. Indexed by channel.
 export const CLIP_MEAN: readonly number[] = [0.48145466, 0.4578275, 0.40821073];
