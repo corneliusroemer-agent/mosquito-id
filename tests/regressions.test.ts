@@ -154,8 +154,12 @@ describe("two views naming different species cannot reach a species claim", () =
     // View A peaks on aegypti, view B on albopictus. The values are near-mirror
     // images so neither view is "the better one" - the test is about the veto,
     // not about which species happens to win the pool.
-    const viewA = { spP: mk("Aedes aegypti", "Aedes albopictus", 0.498, 0.497), nuTotal: 1e-6, scale: 40 };
-    const viewB = { spP: mk("Aedes albopictus", "Aedes aegypti", 0.498, 0.497), nuTotal: 1e-6, scale: 40 };
+    // Above `CROP_ONLY_MAX_POSTERIOR`, so the pair still reaches the pooling the
+    // veto is tested on - an unconfident crop is scored on its own and never
+    // gets here (`confidence-router.test.ts` covers that branch). Near-mirror
+    // as before, so neither view is "the better one".
+    const viewA = { spP: mk("Aedes aegypti", "Aedes albopictus", 0.898, 0.897), nuTotal: 1e-6, scale: 40 };
+    const viewB = { spP: mk("Aedes albopictus", "Aedes aegypti", 0.898, 0.897), nuTotal: 1e-6, scale: 40 };
     // Sanity: each view alone, at a zero floor, names its own species.
     const permissive = { ...DEFAULT_FLOORS, species: 0, genus: 0 };
     expect(fuseViews(head, [viewA], permissive)!.verdict.species).toBe("Aedes aegypti");

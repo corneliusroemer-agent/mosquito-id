@@ -155,14 +155,19 @@ describe("the three states", () => {
 describe("the gate reads the fused posterior", () => {
   it("the gate is applied to the fused posterior, not per view", () => {
     const viewA = view({ "Aedes aegypti": 0.34, "Aedes albopictus": 0.33, "Culex pipiens": 0.33 });
-    const viewB = view({ "Aedes aegypti": 0.6, "Aedes albopictus": 0.2, "Culex pipiens": 0.2 });
+    const viewB = view({ "Aedes aegypti": 0.85, "Aedes albopictus": 0.1, "Culex pipiens": 0.05 });
     // View A alone tops out at 0.34, under the species floor, so gating per view
     // would decline to answer it. View B alone answers. The photo is answered on
     // the pool of the two, which is the only place the gate may be applied.
     const alone = fuseViews(head, [viewA]);
     expect(alone!.verdict.state).not.toBe("species");
     expect(fuseViews(head, [viewB])!.verdict.state).toBe("species");
-    const fused = fuseViews(head, [viewA, viewB]);
+    // B first, because it is the crop here: `viewResults[0]` is the view the
+    // confidence router reads, and a crop below `CROP_ONLY_MAX_POSTERIOR` is
+    // scored on its own rather than pooled (`confidence-router.test.ts` covers
+    // that branch). Putting the unconfident view first would make this test
+    // about the router rather than about where the gate reads.
+    const fused = fuseViews(head, [viewB, viewA]);
     expect(fused!.verdict.state).toBe("species");
     expect(fused!.verdict.species).toBe("Aedes aegypti");
     // And it is the fused posterior, not view B copied through.
@@ -183,8 +188,10 @@ describe("the gate reads the fused posterior", () => {
 describe("a disagreement between the views costs the photo its species claim", () => {
   it("two views naming different species cannot reach a species verdict, however high the fused posterior", () => {
     const fused = fuseViews(head, [
-      view({ "Aedes aegypti": 0.6, "Aedes albopictus": 0.2, "Culex pipiens": 0.2 }),
-      view({ "Aedes albopictus": 0.6, "Aedes aegypti": 0.2, "Culex pipiens": 0.2 }),
+      // Both above `CROP_ONLY_MAX_POSTERIOR`, so the pair reaches the pooling the
+      // veto is tested on.
+      view({ "Aedes aegypti": 0.85, "Aedes albopictus": 0.1, "Culex pipiens": 0.05 }),
+      view({ "Aedes albopictus": 0.85, "Aedes aegypti": 0.1, "Culex pipiens": 0.05 }),
     ]);
     expect(fused!.verdict.topSpeciesP).toBeGreaterThan(DEFAULT_FLOORS.species);
     expect(fused!.verdict.topGenusP).toBeGreaterThan(DEFAULT_FLOORS.genus);
@@ -215,8 +222,11 @@ describe("a disagreement between the views costs the photo its species claim", (
 
   it("the disagreement measure is computed once, by fuseViews, and is the same object", () => {
     const views = [
-      view({ "Aedes aegypti": 0.5, "Aedes albopictus": 0.3, "Culex pipiens": 0.2 }),
-      view({ "Aedes aegypti": 0.4, "Aedes albopictus": 0.4, "Culex pipiens": 0.2 }),
+      // Disagreeing, and both above `CROP_ONLY_MAX_POSTERIOR` so the pair still
+      // reaches the pooling: the measure is computed once over the views that
+      // were pooled, which is the point being pinned.
+      view({ "Aedes aegypti": 0.85, "Aedes albopictus": 0.1, "Culex pipiens": 0.05 }),
+      view({ "Aedes aegypti": 0.6, "Aedes albopictus": 0.35, "Culex pipiens": 0.05 }),
     ];
     const fused = fuseViews(head, views);
     expect(fused!.agreement).toEqual(
