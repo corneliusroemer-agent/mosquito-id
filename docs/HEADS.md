@@ -273,7 +273,9 @@ The two blocks the gate reads were not touched:
 threshold on a posterior, so inheriting one across engines is a claim the
 inheriting engine has never been tested for. `floorsFor(engineKey)` sits beside
 `cosineOffsetsFor` in `../app/modelConfig` with the same shape: absent means the
-shipped floors, explicitly, and only culico has an entry.
+shipped floors, explicitly. The probe engines carry entries; H/14, the engine the
+shipped floors were fitted on, deliberately does not - see the section at the end
+of this file.
 
 Its values were fitted on **one half** of a held-out corpus and read on the other,
 because the decision is about how the head behaves on photographs it was not
@@ -400,3 +402,104 @@ and the ` · genus only` note drops off the dropdown. The machinery that collaps
 a group is unchanged and still tested, on `groupedHead` in `tests/fixtures.ts` and
 `public/text_embeds_grouped-fixture.json` — a fixture, because after this refit no
 shipped head has a group and a test that wanted one would have had nothing to ask.
+
+
+## H/14's head: measured, and left as it ships
+
+H/14 is the default engine and its head is a zero-shot text head, so it was worth
+asking whether it carries the same defect culico's did. It does not, and the two
+reasons are structural rather than lucky.
+
+**Every row of all three blocks is a real text embedding.** `dim` is 1024, there
+is no `bias_index` - a text head has no intercept coordinate to hold a constant in
+- and all 16 species, 8 nuisance and 7 adjacent rows are dense and unit-norm. So
+`informativeRows` returns all-true and the gate has real detectors to read. There
+is nothing here that can become a placeholder.
+
+**Measured through `softmaxJoint` → `fuseViews` → `verdictFrom`**, single view, on
+2,450 held-out photographs whose label is one of the head's sixteen columns (the
+test split has 2,852 rows; the other 402 are a bare `culex` / `culiseta` /
+`anopheles`, which the head has no column for and which are excluded from the
+denominator rather than counted as errors):
+
+| readout | H/14 | culico's head before its refit |
+| --- | ---: | ---: |
+| species argmax | 77.06% | 15.88% |
+| genus argmax | 92.24% | 65.39% |
+| real mosquitoes refused | **1 of 2,450** | 59.6% of in-domain mosquitoes |
+
+Verdict states: `species` 86.69%, `genus` 2.94%, `unsure` 10.33%, `non-mosquito`
+0.04%.
+
+### The refit was fitted and rejected, and the reason is not the one to quote
+
+A 16-way probe on the app-geometry features, `C` chosen on val macro-F1, wins at
+`C = 30` with 83.06% species against the shipped head's 77.76%. Through the app
+that is **+0.94 pp species and +1.31 pp genus**, and it is not a gain: McNemar on
+the two heads gives 212 rows the shipped head gets right and 229 the probe gets
+right, a net +17 of 2,450 with a standard error near 1.4 pp. The refit is not
+worth the risk of touching the default engine's head, and the reason is that the
+gain is inside the noise - not that the gate breaks.
+
+It is tempting to say the gate breaks, and it does on the first construction
+tried: fit the probe's coefficients onto the species rows at the shipped
+`logit_scale` while leaving the two gate blocks on their text-cosine scale, and
+the two blocks end up on incomparable logit scales and the nuisance rows win the
+softmax on 2,243 of 2,450 photographs. That is a construction artefact, not a
+property of refitting. Rescale the gate rows onto the probe's scale as
+`logit_scale = temperature` prescribes above and the same rows refuse 88 of 2,450
+mosquitoes (3.6%) rather than all of them. **The row scale is the axis, and
+`logit_scale` moves all three blocks together and is not it** - the same statement
+as in the culico section above, and it cuts both ways.
+
+### The gate is weak, in the opposite direction from culico's
+
+On the 899 detector-verified background crops, the shipped H/14 head refuses
+**70 (7.79%)**. culico's refitted head refuses 86.14% of the same crops. H/14
+under-refuses background: about 86% of these crops come back as a species. That
+is a real gap and it is the open item on this engine.
+
+What the gate does do is name what it saw. 55 of the 70 refusals name an adjacent
+family and 15 name a nuisance row, so it is reading evidence rather than firing on
+hesitation - and on 15 of the 899 the best nuisance posterior beats the best
+species one, which is `main.js:1016` discarding the detector's own crop on exactly
+those photographs. That is the nuisance block doing a crop gate's job.
+
+The repair is the one culico got: a **fitted** background row on the species
+columns' scale rather than a text embedding. It is a data job, and it is not
+attempted here.
+
+### Why H/14 has no per-engine floors, which is the non-obvious part
+
+`floorsFor("webgpu-fp16")` returns `DEFAULT_FLOORS`, and a per-engine entry for
+it was added on 2026-10-04 and taken back out the same day. The measurement that
+prompted it is real: at the shipped 0.373 the app names a species on 86.7% of
+held-out photographs and is right 83.66% of the time, against the 96.6%
+`DEFAULT_FLOORS` was fitted for, and at 0.80 it is right 97.05% at 37.4% coverage.
+Four things stop that being a change:
+
+1. **It was measured single-view.** The app pools the detector crop and the whole
+   frame on every photograph, and `fuseViews` is log-linear, so the real operating
+   point at 0.373 is 78.40% selective at 97.7% coverage and at 0.80 is 90.69% at
+   67.9%. Coverage roughly doubles; the selective-accuracy figure that justified
+   the change moves by 13 points.
+2. **Selective accuracy is the column that improves.** Whole-set correctness - the
+   app being right about a photograph at all - goes 75.43% → 60.82% at 0.80. A
+   floor change that is reported only as "83.66% → 97.05%" hides the trade that
+   actually decides it.
+3. **0.80 is in the one part of that curve where whole-set accuracy is worst**,
+   and the genus floor that came with it is justified by 27 photographs.
+4. **It was fitted and read on the same 2,450 rows**, on a different corpus from
+   the one `DEFAULT_FLOORS` came from. Checking transfer to a second corpus is the
+   minimum bar a change whose argument is "this floor does not transfer" has to
+   clear.
+
+Re-deriving H/14's floors needs the 6,264-row cache `DEFAULT_FLOORS` was fitted
+against, on fused posteriors, with the whole-set column reported beside the
+selective one. Until then the honest statement is that the shipped species floor
+does not transfer to a second corpus for this engine, which is a finding and not
+yet a change.
+
+`tests/h14-head.test.ts` pins the parts that are settled: no row in either gate
+block can be a placeholder, no real mosquito is refused, and background crops are
+mostly not named species.
