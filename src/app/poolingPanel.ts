@@ -17,11 +17,47 @@
 // variable of the same name holding its RESULT.
 import { aggregateAdjacent, aggregateLogits, pooledCandidates, pooledVerdict as pooledVerdictOf,
          poolingWeights, splitPoolable } from "../confidence/pooling";
-import type { PoolablePhoto, PoolingMethod } from "../confidence/pooling";
+import type { PoolablePhoto, PooledCandidate, PoolingMethod } from "../confidence/pooling";
 import type { Head } from "../confidence/types";
+import { genusOf } from "../confidence/genus";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
 import { inclusionSummary } from "./thumbnailStrip";
-import { claimSentence } from "./granularity";
+import { claimSentence, mergeUnresolvable } from "./granularity";
+
+// ---- Pooled rows ----
+
+/** How many rows the pooled ranking draws at most, counted after grouping. */
+const POOLED_ROW_LIMIT = 10;
+
+/**
+ * The pooled ranking's rows: one per thing the loaded head can tell apart.
+ *
+ * `pooledCandidates` is per SPECIES, because that is the shape the pooled
+ * verdict, the genus headline and the aggregate logits all want. The rows are
+ * not the same shape: a head with byte-identical weight rows gives every member
+ * of a group the same aggregated logit, so rendering one row per species listed
+ * the same group three times under a label that says the three are the same
+ * answer - a ranking asserting a separation the model did not make. The
+ * per-photo score list has merged these since PR #23; the pooled card had the
+ * label fix and not the merge, which is the whole of the defect.
+ *
+ * Members of a group share their logit by construction, so `mergeUnresolvable`'s
+ * max is that shared number and choosing any member would do; the one it keeps
+ * is the first in the candidate order, which is the row that was drawn first
+ * before. Order is score-descending over the merged rows, so collapsing a group
+ * removes rows without moving any other row's rank.
+ *
+ * `genus` is read back off the row's name, which for a collapsed group is the
+ * group's first word: `equivalenceGroups` takes a group's genus from its first
+ * member, so it is the same genus every member would have carried.
+ */
+export function pooledRows(head: Head, aggLogits: Record<string, number>): PooledCandidate[] {
+  return mergeUnresolvable(
+    pooledCandidates(head, aggLogits),
+    (c) => c.relScore,
+    (c) => c.name,
+  ).map(({ name, score }) => ({ name, genus: genusOf(name), relScore: score }));
+}
 
 // ---- Pooling / Evidence Aggregation ----
 export function updatePooling(head: Head, previews: PoolablePhoto[], includedIndices: Iterable<number>): void {
@@ -97,8 +133,11 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
   // say "this is not a mosquito" instead of being structurally unable to ask.
   const aggAdjLogits = aggregateAdjacent(head, included, weights);
 
-  // Relative Log Scores (Axis: -20 to 0)
-  const candidates = pooledCandidates(head, aggLogits);
+  // Relative Log Scores (Axis: -20 to 0). One row per group the head can
+  // actually separate, so the limit below is counted over classes rather than
+  // over species: capping first would let a group be dropped while its own
+  // members stayed, which is the "three times the same result" this avoids.
+  const candidates = pooledRows(head, aggLogits);
 
   // The pooled genus headline. Derived from the POOLED posterior - the softmax of
   // the aggregated logits - and gated by the same verdictFrom/verdictSentence the
@@ -137,7 +176,7 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
     headline.title = pooledLine;
     poolScores.appendChild(headline);
   }
-  candidates.slice(0, 10).forEach(c => {
+  candidates.slice(0, POOLED_ROW_LIMIT).forEach(c => {
     const row = document.createElement("div");
     row.className = "combined-candidate";
     // Same non-finite guard as the single-photo score list above.

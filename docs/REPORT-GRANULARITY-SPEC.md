@@ -134,6 +134,21 @@ order.
 **R3.4 The non-mosquito row is unaffected.** A photo called not-a-mosquito shows
 the adjacent class, not a species group, and hides the species rows below it.
 
+## 3b. The pooled card's ranking
+
+The pooled card is the same list drawn over the aggregate rather than over one
+photo, so R3.1–R3.3 hold there with one addition: the card's row limit is
+counted over the MERGED rows. Limiting to the ten best species first would let a
+group lose its own row while keeping its members'.
+
+**R3.5 Species in the same multi-member group are ONE row in the pooled card**,
+carrying the same group phrase and the same shared relative logit as R3.1. A
+head with byte-identical rows gives every member of a group the same aggregated
+logit, so the card drew the same group three times under a label saying the
+three are one answer. The surviving row is the group's first member in the
+aggregate's own order, which is the row that was drawn first before, and the rows
+that are not collapsed keep their relative order.
+
 ## 4. The results table and the CSV
 
 **R4.1 The "Top Species" cell carries the app's claim, at the app's granularity.**
@@ -171,5 +186,7 @@ number of rows it draws, which is content, not motion.
   decision; this only removes names the head cannot support from a claim that
   already passed them.
 - **The pooled card's own markup** (`src/app/poolingPanel.ts`) is unchanged: it
-  renders candidate names through `speciesLabelHtml`, which now knows the groups,
-  so its rows are correct without a change there.
+  renders candidate names through `speciesLabelHtml`, which knows the groups. The
+  label alone is not the row count, though — the card iterates `pooledCandidates`,
+  which is one entry per species, so the rows are merged before they are drawn
+  (`pooledRows`, R3.5).
