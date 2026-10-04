@@ -98,8 +98,30 @@ export function cosineOffsetsFor(engineKey: string): Readonly<Record<string, num
  * cost is coverage: the app names a species far less often on this engine, which
  * is the correct behaviour for a head this far from its training distribution and
  * not a tuning choice.
+ *
+ * H/14 carries an entry too, for a different reason: it is the engine the shipped
+ * floors were fitted on, and it does not meet them on a second corpus. See above.
  */
 const ENGINE_FLOORS: Readonly<Record<string, Floors>> = Object.freeze({
+  // H/14 is the engine DEFAULT_FLOORS were fitted on, so inheriting them is the
+  // right default - but inheriting them is not the same as being at them. Measured
+  // on 2,450 held-out photographs through `softmaxJoint` -> `fuseViews` ->
+  // `verdictFrom`, the shipped 0.373 species floor has the app naming a species on
+  // 86.7% of them and being right 83.66% of the time, against the ~88% the floors
+  // were chosen to deliver. At 0.80 it names a species on 37.4% and is right
+  // 97.05%; the genus floor follows, 98.61% correct where the shipped 0.80 fires
+  // at all (2.9% of rows) against 99.34% at 0.90. Both gate floors are the
+  // shipped ones and stay that way: H/14's nuisance and adjacent rows are genuine
+  // text embeddings rather than placeholders, so the block has never needed
+  // re-deriving.
+  //
+  // 2026-10-04, on the 14,072-row probe corpus rather than the 6,264-row cache
+  // DEFAULT_FLOORS was fitted against, which is the caveat on all of the above.
+  "webgpu-fp16": Object.freeze({
+    ...DEFAULT_FLOORS,
+    species: 0.80,
+    genus: 0.90,
+  }),
   "webgpu-culico": Object.freeze({
     ...DEFAULT_FLOORS,
     species: 0.80,

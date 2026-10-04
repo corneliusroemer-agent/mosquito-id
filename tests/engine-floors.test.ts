@@ -26,7 +26,9 @@ const CULICO = { ...raw, biasIndex: raw.bias_index } as unknown as Head;
 describe("per-engine floors", () => {
   it("leaves every other engine on the shipped floors", () => {
     for (const key of Object.keys(WEBGPU_MODELS)) {
-      if (key === "webgpu-culico") continue;
+      // culico and H/14 both carry an entry of their own; see below and
+      // modelConfig.ts. Neither may leak to the third engine.
+      if (key === "webgpu-culico" || key === "webgpu-fp16") continue;
       expect(floorsFor(key), key).toBe(DEFAULT_FLOORS);
     }
     expect(floorsFor("server-gpu")).toBe(DEFAULT_FLOORS);
@@ -42,6 +44,22 @@ describe("per-engine floors", () => {
     expect(f.nonMosquito).toBe(DEFAULT_FLOORS.nonMosquito);
     expect(f.nuisance).toBe(DEFAULT_FLOORS.nuisance);
     expect(f.viewDisagreementVetoesSpecies).toBe(DEFAULT_FLOORS.viewDisagreementVetoesSpecies);
+    expect(f.temperature).toBe(DEFAULT_FLOORS.temperature);
+  });
+
+  it("scores H/14 at its own floors, fitted against its own posteriors", () => {
+    // H/14 is the engine DEFAULT_FLOORS was fitted on, and at the shipped 0.373
+    // it names a species on 86.7% of held-out photographs and is right 83.66% of
+    // the time - under the ~88% contract. At 0.80 it is right 97.05% at 37.4%
+    // coverage. docs/HEADS.md carries the measurement.
+    const f = floorsFor("webgpu-fp16");
+    expect(f.species).toBeGreaterThan(DEFAULT_FLOORS.species);
+    expect(f.genus).toBeGreaterThan(DEFAULT_FLOORS.genus);
+    // Its gate floors are unchanged: the nuisance and adjacent rows on this head
+    // are real text embeddings, not placeholders, so the block never needed
+    // re-deriving and moving one would be a change nobody measured.
+    expect(f.nonMosquito).toBe(DEFAULT_FLOORS.nonMosquito);
+    expect(f.nuisance).toBe(DEFAULT_FLOORS.nuisance);
     expect(f.temperature).toBe(DEFAULT_FLOORS.temperature);
   });
 

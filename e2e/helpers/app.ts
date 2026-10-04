@@ -248,10 +248,16 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
       const sidx = emb.species.indexOf(sname);
       if (sidx < 0) throw new Error("fixture names a species the shipped head lacks: " + sname);
 
-      // Per state: a posterior and an adjacent vector the SHIPPED floors turn
-      // into that state. What the photo ends up carrying is the app's own gate's
-      // answer, not one written here.
-      const DEFAULTS = { species: 0.72, genus: 0.86, unsure: 0.12, "non-mosquito": 0.2 };
+      // Per state: a posterior and an adjacent vector the floors turn into that
+      // state. What the photo ends up carrying is the app's own gate's answer, not
+      // one written here.
+      //
+      // These clear floorsFor(webgpu-fp16), which is what the app runs these
+      // against. Species and genus are 0.80/0.90 on H/14 since 2026-10-04, where
+      // they used to be the shipped 0.373/0.80. A default below the floor does not
+      // fail loudly - the photo silently arrives as unsure, and the pooling
+      // arithmetic under test is then measured over a different set.
+      const DEFAULTS = { species: 0.86, genus: 0.94, unsure: 0.12, "non-mosquito": 0.2 };
       const top = spec.top ?? (DEFAULTS[spec.state] ?? 0.5);
       const spP = peaked(sidx, top);
 
