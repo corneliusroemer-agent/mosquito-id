@@ -53,6 +53,19 @@ export function letterbox(imgCv: HTMLCanvasElement): Letterboxed {
   const dx = (DET_SIZE - dw) / 2;
   const dy = (DET_SIZE - dh) / 2;
 
+  // The photo is resampled into `content` at the detector's scale, and
+  // `content` - not the photograph - is what lands in the padded input. The
+  // blit is 1:1, so the tensor is the same one the direct draw produced, and in
+  // exchange `content` is a ~0.3 MP copy of the photograph that the classifier's
+  // whole-frame view can be scaled from too: one read of a 12-50 MP source for
+  // both views instead of one each.
+  const content = document.createElement("canvas");
+  content.width = dw;
+  content.height = dh;
+  const contentCtx = content.getContext("2d");
+  if (!contentCtx) throw new Error("Could not get a 2d context for the detector input");
+  contentCtx.drawImage(imgCv, 0, 0, w, h, 0, 0, dw, dh);
+
   const cv = document.createElement("canvas");
   cv.width = DET_SIZE;
   cv.height = DET_SIZE;
@@ -60,9 +73,9 @@ export function letterbox(imgCv: HTMLCanvasElement): Letterboxed {
   if (!cx) throw new Error("Could not get a 2d context for the detector input");
   cx.fillStyle = "#727272";
   cx.fillRect(0, 0, DET_SIZE, DET_SIZE);
-  cx.drawImage(imgCv, 0, 0, w, h, Math.round(dx), Math.round(dy), dw, dh);
+  cx.drawImage(content, 0, 0, dw, dh, Math.round(dx), Math.round(dy), dw, dh);
 
-  return { tensor: new ort.Tensor("float32", chwFromCanvas(cv), [1, 3, DET_SIZE, DET_SIZE]), r, dx, dy };
+  return { tensor: new ort.Tensor("float32", chwFromCanvas(cv), [1, 3, DET_SIZE, DET_SIZE]), r, dx, dy, content };
 }
 
 export function decodeDets(outTensor: OrtTensor, r: number, dx: number, dy: number): Detection[] {

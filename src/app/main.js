@@ -33,6 +33,7 @@ import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setP
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
 import { decodeDets, letterbox, selectDetection } from "./detector";
+import { isUsableIntermediate } from "./downscale";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
 import { downloadCSV, renderResultsTable } from "./resultsTable";
@@ -821,9 +822,16 @@ function applyEngineNotices(engineKey) {
 }
 
 
-async function clipEmbed(sourceCanvas) {
-  const cw = sourceCanvas.width;
-  const ch = sourceCanvas.height;
+// `preScaled`, when given, is a smaller copy of `sourceCanvas` at the same
+// aspect ratio - in practice the detector's own unpadded input. Scaling that
+// instead of the photograph reads ~0.3 MP rather than 12-50 MP, which is the
+// whole of the cost of this step. It is refused whenever it would not be the
+// same picture, so a caller that passes the wrong canvas gets the direct read
+// rather than a stretched or enlarged embedding.
+async function clipEmbed(sourceCanvas, preScaled) {
+  const src = preScaled && isUsableIntermediate(preScaled, sourceCanvas, CLIP_SIZE) ? preScaled : sourceCanvas;
+  const cw = src.width;
+  const ch = src.height;
   const s = CLIP_SIZE / Math.min(cw, ch);
   const dw = Math.round(cw * s);
   const dh = Math.round(ch * s);
@@ -832,7 +840,7 @@ async function clipEmbed(sourceCanvas) {
   cv.width = dw;
   cv.height = dh;
   const cx = cv.getContext("2d", { willReadFrequently: true });
-  cx.drawImage(sourceCanvas, 0, 0, cw, ch, 0, 0, dw, dh);
+  cx.drawImage(src, 0, 0, cw, ch, 0, 0, dw, dh);
 
   const l = (dw - CLIP_SIZE) >> 1;
   const t = (dh - CLIP_SIZE) >> 1;
@@ -1093,7 +1101,9 @@ async function classifyImage(imgBitmap, filename) {
   // posterior is ever derived from zero views. The crop is already scored above,
   // so only the whole frame is left to decide here.
   if (viewKinds(Boolean(cropView), includeWholeFrame).includes("whole")) {
-    const wholeEmb = await clipEmbed(fullCv);
+    // `lb.content` is the photograph already resampled for the detector, so
+    // this reads ~0.3 MP rather than reading the 12-50 MP frame a second time.
+    const wholeEmb = await clipEmbed(fullCv, lb.content);
     const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(engine) });
     views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
                  adP: wholeJ.adP, scale: localViewScale() });

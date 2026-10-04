@@ -41,6 +41,15 @@ export interface Letterboxed {
   r: number;
   dx: number;
   dy: number;
+  /**
+   * The photograph at the detector's scale, without the padding.
+   *
+   * Handed back so the classifier's whole-frame view can be scaled from it
+   * rather than from the full-resolution photograph a second time; see
+   * `isUsableIntermediate` for when that substitution is sound, and `letterbox`
+   * for why it does not change the detector's own input.
+   */
+  content: HTMLCanvasElement;
 }
 
 /**
