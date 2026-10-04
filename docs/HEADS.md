@@ -186,8 +186,14 @@ identified as.
 ### What the refit changed, measured through the app's own code path
 
 Every number below is `softmaxJoint` -> `fuseViews` -> `verdictFrom` driven from
-real features, not a re-implementation. Test split = 2,450 held-out-specimen
-mosquitoes from the 16 classes.
+real features, not a re-implementation.
+
+**These are in-corpus numbers, and the qualifier is load-bearing.** The test split
+is 2,450 of the 2,850 test rows whose label is one of the head's sixteen columns;
+the other 400 are a bare `culex` / `culiseta` / `anopheles`, which the app has no
+column for and which are excluded from the denominator rather than counted as
+errors. The corpus is the one the head was fitted on, so this measures what the
+fit bought, not what it generalises to.
 
 | readout | previous head | refitted |
 | --- | ---: | ---: |
@@ -207,12 +213,61 @@ shipped floors:
 The abstention rate more than halves, in the direction that matters: the previous
 head claimed a species on 1 photograph in 100. **No floor was refitted** — these
 are the shipped 0.373 / 0.80 / 0.60 / 0.05 against a sharper posterior than they
-were calibrated for, and they survive it. They should be re-derived before they
-are trusted on the species claim, because 66.8% of photographs now clear a
-0.373 species floor against 0.24% before, and nothing has checked what that
-66.8% is made of on a corpus that was not the one they were fitted on.
+were calibrated for.
+
+### Off-corpus, where the refit is not uniformly better
+
+The 6,264-row cache is a different corpus from the 14,072-row one: GBIF plus a
+Mosquito Alert set, against an iNaturalist-heavy training corpus. 1,553 of its rows
+are in the training corpus by exact path; the other 4,711 were never seen. Scored
+on the unseen rows only, on identical rows for both heads:
+
+| slice | species, previous -> refitted | genus, previous -> refitted |
+| --- | ---: | ---: |
+| all 4,711 unseen | 5.86 -> **20.29** | 83.95 -> **58.01** |
+| 2,004 whose label is one of the 16 species | 13.77 -> **47.70** | 92.61 -> **80.99** |
+| 2,921 GBIF, unseen | 4.28 -> 12.19 | 82.78 -> **44.74** |
+| 1,564 Mosquito Alert API, unseen | 8.95 -> **33.82** | 85.87 -> 79.22 |
+
+Three things are worth stating plainly about that table.
+
+1. **Every row in the 6,264 cache whose label is one of the sixteen species is
+   Aedes** - all 2,004 of them. The "genus over nameable rows" line is therefore an
+   Aedes-only comparison, not a general one. The refit gains 33.9 pp of species
+   there and loses 11.6 pp of genus, and its 381 genus errors go to Culex (264),
+   Culiseta (91) and Anopheles (26).
+
+2. **The genus loss is a property of the head, not of the floors.** It is measured
+   on the *argmax*, which no floor can move: the refit ranks the wrong genus
+   highest on 11.6 points more unseen Aedes rows than the previous head does. A
+   floor decides when the app speaks, not what it says when it does, so a
+   per-engine genus floor can at best abstain away the rows it gets wrong, and
+   only if those rows carry a visibly lower posterior.
+
+3. **Where the app is closest to its real input the refit is better on both.**
+   On unseen Mosquito Alert rows - the source nearest what a phone actually
+   submits - species goes 8.95 -> 33.82 and genus is roughly flat at 85.87 -> 79.22.
+
+### Where the shipped floors actually put the refit
+
+Accuracy among the photographs each head claims, through the app's own gate and
+floors, on the same 2,450-row test split:
+
+| | previous head | refitted |
+| --- | ---: | ---: |
+| `species` claims | 24 (1.0% of rows), **8.3% correct** | 1,813 (74.0%), **71.2% correct** |
+| `genus` claims | 668 (27.3%), **92.7% correct** | 144 (5.9%), **94.4% correct** |
+| abstains | 71.8% | 20.1% |
+
+The genus floor is sound for this head: 94.4% correct where it fires, better than
+the previous head's 92.7%. The species floor is not — 71.2% against the ~88% the
+0.373 threshold was fitted to deliver. For contrast the previous head's species
+claims were 8.3% correct, so this is not the old floor being safer; it is both
+being unsafe and the new one being less so.
 
 The two blocks the gate reads were not touched:
+
+### The two blocks the gate reads were not touched
 
 | | previous head | refitted |
 | --- | ---: | ---: |
