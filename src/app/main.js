@@ -1783,6 +1783,14 @@ function wireWholeFrameToggle() {
       // next change reclassifies either way.
     }
     sendLog("whole_frame_toggled", { includeWholeFrame: on, photos: previews.length });
+    // A toggle is about every photo on screen, so it withdraws a re-run's scope
+    // rather than inheriting it. `request()` during a re-run's pass sets the
+    // runner's follow-up flag, and that follow-up is what re-fuses under the new
+    // setting - if it ran still scoped to the re-run's photos, every photo the
+    // re-run did not touch would be left pooled under the setting the user just
+    // turned off. The pass already in flight keeps the set it read at its start;
+    // this only decides what the follow-up sees.
+    rerunPhotos = null;
     reclassifyRunner.request();
   });
 }
