@@ -3,6 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!--
+  Paths are relative because the site is served from /mosquito-id/ (vite base
+  "./"), so a leading slash would ask for the domain root and 404. The PNG is
+  the same drawing as the SVG, so which of the two a browser picks changes
+  nothing visible; the PNG is there because Safari reads no SVG favicon.
+  apple-touch-icon and mask-icon are each the only form their browser reads -
+  the iPhone home screen and the Safari pinned tab.
+-->
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<link rel="mask-icon" href="mosquito-mask.svg" color="#ea580c">
 <title>mosquito-id</title>
 <style>
   :root {
