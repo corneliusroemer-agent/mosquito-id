@@ -129,25 +129,32 @@ export function cosineOffsetsFor(engineKey: string): Readonly<Record<string, num
  * catching insects. See docs/HEADS.md.
  */
 const ENGINE_FLOORS: Readonly<Record<string, Floors>> = Object.freeze({
-  // H/14 is the engine DEFAULT_FLOORS were fitted on, so inheriting them is the
-  // right default - but inheriting them is not the same as being at them. Measured
-  // on 2,450 held-out photographs through `softmaxJoint` -> `fuseViews` ->
-  // `verdictFrom`, the shipped 0.373 species floor has the app naming a species on
-  // 86.7% of them and being right 83.66% of the time, against the ~88% the floors
-  // were chosen to deliver. At 0.80 it names a species on 37.4% and is right
-  // 97.05%; the genus floor follows, 98.61% correct where the shipped 0.80 fires
-  // at all (2.9% of rows) against 99.34% at 0.90. Both gate floors are the
-  // shipped ones and stay that way: H/14's nuisance and adjacent rows are genuine
-  // text embeddings rather than placeholders, so the block has never needed
-  // re-deriving.
+  // H/14 has NO entry, and 2026-10-04 is when one was proposed here and taken
+  // back out. The measurement behind it is sound - on 2,450 held-out photographs
+  // through `softmaxJoint` -> `fuseViews` -> `verdictFrom`, the shipped 0.373 has
+  // the app naming a species on 86.7% of them and being right 83.66% of the time,
+  // and 0.80 gives 97.05% at 37.4% coverage - and it does not identify a value to
+  // put here:
   //
-  // 2026-10-04, on the 14,072-row probe corpus rather than the 6,264-row cache
-  // DEFAULT_FLOORS was fitted against, which is the caveat on all of the above.
-  "webgpu-fp16": Object.freeze({
-    ...DEFAULT_FLOORS,
-    species: 0.80,
-    genus: 0.90,
-  }),
+  //   * It was read single-view. The app pools the detector crop and the whole
+  //     frame on every photograph (main.js:1035), and fusion is log-linear, so
+  //     the real operating point at 0.373 is 78.40% selective at 97.7% coverage
+  //     and at 0.80 is 90.69% at 67.9%. Coverage roughly doubles.
+  //   * Selective accuracy is the column that improves. Whole-set correctness -
+  //     the app being right about a photograph at all - goes 75.43% -> 60.82% at
+  //     0.80. Neither end reaches the 96.6% this floor was fitted for (see
+  //     DEFAULT_FLOORS), so the corpus says the floor is mistuned and not what a
+  //     better value is.
+  //   * 0.80 sits in the one part of that curve where whole-set accuracy is at its
+  //     worst, and the genus floor that came with it is justified by 27
+  //     photographs.
+  //   * It was fitted and read on the same 2,450 rows, on a different corpus from
+  //     the one DEFAULT_FLOORS came from, which is the transfer the change exists
+  //     to question.
+  //
+  // Re-deriving H/14's floors needs the 6,264-row cache DEFAULT_FLOORS was fitted
+  // against, on fused posteriors, with the whole-set column reported beside the
+  // selective one. That is the work, not a second line in this map.
   "webgpu-culico": Object.freeze({
     ...DEFAULT_FLOORS,
     species: 0.80,

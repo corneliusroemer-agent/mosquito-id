@@ -65,20 +65,15 @@ describe("per-engine floors", () => {
     expect(f.temperature).toBe(DEFAULT_FLOORS.temperature);
   });
 
-  it("scores H/14 at its own floors, fitted against its own posteriors", () => {
-    // H/14 is the engine DEFAULT_FLOORS was fitted on, and at the shipped 0.373
-    // it names a species on 86.7% of held-out photographs and is right 83.66% of
-    // the time - under the ~88% contract. At 0.80 it is right 97.05% at 37.4%
-    // coverage. docs/HEADS.md carries the measurement.
-    const f = floorsFor("webgpu-fp16");
-    expect(f.species).toBeGreaterThan(DEFAULT_FLOORS.species);
-    expect(f.genus).toBeGreaterThan(DEFAULT_FLOORS.genus);
-    // Its gate floors are unchanged: the nuisance and adjacent rows on this head
-    // are real text embeddings, not placeholders, so the block never needed
-    // re-deriving and moving one would be a change nobody measured.
-    expect(f.nonMosquito).toBe(DEFAULT_FLOORS.nonMosquito);
-    expect(f.nuisance).toBe(DEFAULT_FLOORS.nuisance);
-    expect(f.temperature).toBe(DEFAULT_FLOORS.temperature);
+  // H/14 has NO entry, deliberately. It is the engine DEFAULT_FLOORS were fitted
+  // on, and a per-engine override for it was proposed on 2026-10-04 and taken back
+  // out: the measurement behind it was sound but did not identify a value (single-
+  // view when the app fuses two, selective accuracy reported without the whole-set
+  // column, 0.80 sitting where whole-set accuracy is worst). modelConfig.ts says
+  // what re-deriving it needs. This pins the reversal so it cannot creep back as an
+  // unremarked line.
+  it("leaves H/14 - the engine the shipped floors were fitted on - on them", () => {
+    expect(floorsFor("webgpu-fp16")).toBe(DEFAULT_FLOORS);
   });
 
   it("returns a whole floors object, not a partial one", () => {

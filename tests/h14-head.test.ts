@@ -46,6 +46,7 @@ function readFixture(name: string): Float32Array[] {
 
 const MOSQUITOES = readFixture("h14-mosquito-256.npy");
 const REF = JSON.parse(read("fixtures/h14-mosquito-256.json")) as { species_index: number[] };
+const BACKGROUND = readFixture("h14-background-256.npy");
 
 /** clipEmbed() for this head: no bias coordinate, so a plain 1024-d L2. */
 function appEmbed(features: Float32Array): Float32Array {
@@ -120,27 +121,51 @@ describe("a real mosquito is never refused as a nuisance class", () => {
   });
 });
 
-describe("what the app claims from this head is usually right", () => {
-  it("holds the species floor that meets the accuracy contract", () => {
-    const res = MOSQUITOES.map((f) => appScore(f));
+describe("what the app claims from this head", () => {
+  // 83.66% correct where it names a species, at the shipped 0.373 floor. That is
+  // under the 96.6% whole-set accuracy DEFAULT_FLOORS was fitted for, and it is
+  // why a per-engine floor for H/14 was proposed and then withdrawn - the
+  // measurement is a real gap, but it does not say which value closes it. docs/
+  // HEADS.md carries the curve. What is pinned here is the floor on the number,
+  // so a change that makes the app less accurate where it speaks fails.
+  const res = MOSQUITOES.map((f) => appScore(f));
+
+  it("names a species on most photographs, and is usually right when it does", () => {
     const claimed = res.filter((r) => r.verdict.state === "species");
-    expect(claimed.length / res.length).toBeGreaterThan(0.2);
+    expect(claimed.length / res.length).toBeGreaterThan(0.8);
     const right = res.filter(
       (r, i) => r.verdict.state === "species" &&
         (r.verdict as { species: string }).species === HEAD.species[REF.species_index[i]!],
     );
-    expect(right.length / claimed.length).toBeGreaterThan(0.9);
+    expect(right.length / claimed.length).toBeGreaterThan(0.8);
   });
 });
 
-describe("the per-engine floors H/14 is scored at", () => {
-  it("are this engine's own, not culico's and not a widened default", () => {
-    expect(floorsFor(ENGINE)).not.toBe(DEFAULT_FLOORS);
-    expect(floorsFor(ENGINE).species).toBe(0.8);
-    expect(floorsFor(ENGINE).genus).toBe(0.9);
-    // The gate's floors are the shipped ones: this head's nuisance rows are real
-    // text embeddings, so nothing about them needed re-deriving.
-    expect(floorsFor(ENGINE).nonMosquito).toBe(DEFAULT_FLOORS.nonMosquito);
-    expect(floorsFor(ENGINE).nuisance).toBe(DEFAULT_FLOORS.nuisance);
+describe("the other side of the gate: background crops", () => {
+  // The positives are where culico's broken head showed itself. The negatives are
+  // where a head that is merely WEAK shows itself, and this one is weak: on the
+  // full 899-crop set it refuses 7.79%, against 86.14% for culico's refitted head
+  // on the same crops. It fails in the opposite direction - it under-refuses
+  // background rather than over-refusing mosquitoes - and that is a real gap, not
+  // a rounding error, so it is pinned here rather than left to prose.
+  //
+  // This fixture is 256 of those crops. The assertion is deliberately a ceiling
+  // and not a floor: the number to protect is that these are NOT named species,
+  // and a future change to the gate must not make them mostly species.
+  const verdicts = BACKGROUND.map((f) => appScore(f).verdict);
+
+  it("names a species on far fewer background crops than on mosquitoes", () => {
+    const named = verdicts.filter((v) => v.state === "species").length;
+    expect(named / verdicts.length).toBeLessThan(0.25);
+  });
+
+  it("names an adjacent family rather than a mosquito when it does refuse", () => {
+    // 55 of the 70 refusals on the full set name an adjacent family and 15 name a
+    // nuisance row, so the gate is reading evidence rather than firing on
+    // hesitation - the culico failure mode. Nothing here may name a species.
+    for (const v of verdicts.filter((x) => x.state === "non-mosquito")) {
+      const kind = (v as { nonMosquitoKind: string }).nonMosquitoKind;
+      expect(["adjacent", "nuisance"]).toContain(kind);
+    }
   });
 });
