@@ -71,11 +71,6 @@ export function clearProgress(owner?: ProgressOwner): void {
   progressOwner = null;
   slot.style.visibility = "hidden";
   slot.classList.remove("indeterminate");
-  // The next load declares its own steps; keeping the last one's would let a
-  // byte report from a superseded load move this one's bar.
-  loadSteps = [];
-  loadTotalBytes = 0;
-  loadFloor = 0;
   const fill = document.getElementById("progress-fill");
   if (fill) fill.style.width = "0%";
   const meterEl = document.getElementById("progress-meter");
@@ -121,6 +116,7 @@ let loadTotalBytes = 0;
 // Highest fraction reached, so a step reporting out of order cannot walk the bar
 // backwards. A reset to a lower number reads as a glitch, not as progress.
 let loadFloor = 0;
+let loadGeneration = 0;
 
 const stepByKey = (key: string): PlacedStep | undefined => loadSteps.find((s) => s.key === key);
 
@@ -143,6 +139,12 @@ export function beginModelLoad(steps: LoadStep[]): void {
   const bytePortion = downloadSteps.length ? DOWNLOAD_SHARE / downloadSteps.length : 0;
   const sessionPortion = sessionSteps ? (100 - DOWNLOAD_SHARE) / sessionSteps : 0;
   loadSteps = [];
+  // Bumped by every `beginModelLoad`. A byte reporter captures the value it was
+  // handed and ignores itself once it no longer matches, which is what stops a
+  // SUPERSEDED load's still-open reader from driving the new load's bar: an
+  // engine switch re-enters `loadWebGPUModels` without cancelling the previous
+  // fetch, and both then share the keys "detector" and "classifier".
+  loadGeneration++;
   let pct = 0;
   steps.forEach((step, i) => {
     const bytes = step.bytes ?? 0;
@@ -170,13 +172,14 @@ export function loadStepProgress(key: string, label: string): (got: number, tota
   // `done` bypasses the throttle: a cache hit reports completion exactly once,
   // and throttling a single sample is what left a returning user watching a
   // bar that never left 0%.
+  const generation = loadGeneration;
   return (got, total, done) => {
-    // A load that has been cleared owns nothing: `loadWebGPUModels` is
-    // re-entered on an engine switch, and the superseded call's reader keeps
-    // delivering chunks for a while after. Reporting into the slot then would
-    // resurrect a bar the app has already hidden, and move it for a model that
-    // is no longer the one loading.
-    if (!loadSteps.length) return;
+    // A superseded load owns nothing. `loadWebGPUModels` is re-entered on an
+    // engine switch without cancelling the previous fetch, so the old call's
+    // reader keeps delivering chunks under the SAME step keys - reporting them
+    // would drive the new load's bar to 100% on bytes the new load never
+    // fetched, and resurrect a slot that has already been hidden.
+    if (generation !== loadGeneration || !loadSteps.length) return;
     const now = performance.now();
     if (!done && now - lastAt < 500) return;   // rate needs a window, not a sample
     const rate = done ? 0 : ((got - lastGot) / (now - lastAt)) * 1000;
@@ -217,15 +220,4 @@ export function completeLoadStep(key: string, meter?: string): void {
   if (!step) return;
   loadFloor = Math.max(loadFloor, step.endPct);
   setProgress("model", null, loadFloor, meter ?? null);
-}
-
-/**
- * Bytes moved so far, the total when the server sent one, and the time the
- * transfer started - enough for a rate, and from a rate an ETA.
- *
- * Retained for callers outside a declared load, where there is nothing to
- * aggregate against and the byte count is the whole of what is known.
- */
-export function makeTransferProgress(label: string): (got: number, total: number, done?: boolean) => void {
-  return loadStepProgress(label, label);
 }

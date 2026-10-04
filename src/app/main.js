@@ -36,7 +36,7 @@ import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
 import { downloadCSV, renderResultsTable } from "./resultsTable";
-import { fetchWithCache, fetchWithProgress } from "./modelFetch";
+import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
 import { renderBuildLink, stampBuildSha } from "./buildSha";
@@ -454,8 +454,8 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
 
   // 3. Load text embeddings for this model
   if (needsEmbeds) {
-    const buf = await fetchWithProgress(targetEmbedsPath, loadStepProgress("embeds", "Species labels"));
-    const data = JSON.parse(new TextDecoder().decode(buf));
+    const r = await fetch(targetEmbedsPath);
+    const data = await r.json();
     for (const k of ["species_emb", "nuisance_emb"]) {
       data[k] = Float32Array.from(data[k]);
     }
