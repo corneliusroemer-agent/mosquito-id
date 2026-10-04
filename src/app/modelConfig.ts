@@ -26,11 +26,21 @@ export const CLIP_SIZE = 224;
  * shipped threshold.
  *
  * At 0.50 the detector fires on 71.5%, wrong boxes on 9.9% of fired images
- * rather than 4.2%, and the downstream macro-F1 gain is +0.064 [+0.008,
- * +0.143] over 0.70 - 6.4 of the 9.4 points a perfect detector would deliver,
- * for no retraining and no inference cost. 0.30 adds a further 1.1 pp whose
- * interval crosses zero and doubles wrong boxes to 20.2%, so it buys nothing
- * worth having.
+ * rather than 4.2%. Measured on 1,199 held-out images under the app's own
+ * two-view pooling rule - crop and whole frame combined log-linearly - and
+ * paired over report groups, 2,000 resamples, every arm at the shipped
+ * temperature of 2.5: against 0.70 it is +2.26 to +2.60 pp accuracy and
+ * +0.026 to +0.028 macro-F1, and it is better on prior-corrected entropy
+ * (-0.047 [-0.095, -0.004]) wherever the nuisance gate rejects a wrong box.
+ * No retraining, no inference cost.
+ *
+ * 0.30 is the same call made harder and is NOT settled. It is better still on
+ * accuracy (+0.33 pp) and macro-F1 (+0.019), worse on entropy under a
+ * permissive gate, and indistinguishable on entropy under the rejecting gates
+ * (+0.011 [-0.029, +0.052]). It is held back on a proxy, not on a measurement:
+ * it doubles wrong boxes to 20.2% of fired images, and a simulated IoU gate
+ * is a poor stand-in for the real one. See 68-detconf-entropy.md before
+ * changing this.
  *
  * Do not raise this back on the strength of "of fired": that number is a
  * property of the boxes that survive, and it is maximised by never firing at
