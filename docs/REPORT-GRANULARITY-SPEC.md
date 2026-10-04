@@ -166,9 +166,12 @@ is the same number as the group class's score (R3.1).
 ## 5. The engine dropdown
 
 **R5.1 The dropdown says what the engine reports, before the engine is chosen.**
-The option reads `⚡ culico-net-cls-v1 (experimental · 81 MB · genus only)`. It
-keeps "experimental", and it is set at runtime from `ModelConfig` so the label
-has one source.
+The option reads `culico-net (experimental · 81 MB)`, plus ` · genus only` when
+and only when that engine's head cannot separate species. It keeps
+"experimental", and it is set at runtime from `ModelConfig` so the label has one
+source. Since the 2026-10-04 refit no shipped head has a group, so the note is
+currently absent from every option — it is still rendered from `reports`, which
+is what a head that gains a group would flip.
 
 **R5.2 No header caveat.** There is no `#engine-caveat` and nothing is added above
 the content: that block moved the page (0.27 CLS on desktop) and has been

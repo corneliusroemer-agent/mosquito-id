@@ -119,7 +119,7 @@ export function capabilityNote(reports: Capability): string {
 export const WEBGPU_MODELS: Record<string, ModelConfig> = {
   // culico-net-cls-v1: a 21M-parameter TinyViT, 15x smaller than H/14, which
   // is what makes it the one engine a phone can actually fetch. Its head is a
-  // linear probe rather than a text head, so it is labelled experimental in the
+  // trained probe rather than a text head, so it is labelled experimental in the
   // selector; see the dropdown option text.
   "webgpu-culico": {
     path: "culico-net-cls-v1-17-embed.onnx",
@@ -127,12 +127,13 @@ export const WEBGPU_MODELS: Record<string, ModelConfig> = {
     label: "culico-net (experimental · 81 MB)",
     name: "culico-net-cls-v1",
     size: 85378550,
-    // Its head gives three of the sixteen species one weight row each - Aedes
-    // vexans/geniculatus/cinereus, the whole of Culex, three Culiseta, three
-    // Anopheles - so within each set the two posteriors are the same number and
-    // the app cannot name one of them. Measured on the shipped head: 22.6%
-    // species accuracy against 94.9% genus.
-    reports: "genus"
+    // The head is a 16-way linear probe REFITTED on 2026-10-04 (see
+    // docs/HEADS.md), so all sixteen species have their own weight row and the
+    // app names species rather than genus. Before that refit it gave three
+    // species one row each within four genera, which capped it at genus.
+    // Measured through this app's own scoring on the held-out corpus: 61.2%
+    // species and 82.3% genus, against 15.9% / 65.4% for the head it replaced.
+    reports: "species"
   },
   "webgpu-b16": {
     path: "bioclip_visual_b16_fp16.onnx",

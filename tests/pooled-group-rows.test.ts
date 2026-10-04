@@ -6,6 +6,7 @@ import { pooledRows } from "../src/app/poolingPanel";
 import { pooledCandidates } from "../src/confidence/pooling";
 import { speciesLabelHtml } from "../src/app/speciesLabels";
 import { equivalenceGroups, resolvableGroups, setActiveHead } from "../src/app/granularity";
+import { culicoPreRefitHead } from "./fixtures";
 import type { Head } from "../src/confidence/types";
 
 /**
@@ -36,6 +37,8 @@ function headFrom(file: string): Head {
 
 const CULICO = headFrom("text_embeds_culico.json");
 const H14 = headFrom("text_embeds.json");
+/** The shape culico's head had before the refit; the group machinery's subject. */
+const GROUPED = culicoPreRefitHead(CULICO.species);
 
 /**
  * Aggregated logits that give every member of a group the SAME number, as the
@@ -58,8 +61,8 @@ function aggLogits(head: Head, over: Record<string, number>): Record<string, num
 
 describe("the pooled card emits one row per group", () => {
   it("gives a three-member group one row, not three", () => {
-    setActiveHead(CULICO);
-    const rows = pooledRows(CULICO, aggLogits(CULICO, { "Aedes albopictus": 5, "Aedes aegypti": 4 }));
+    setActiveHead(GROUPED);
+    const rows = pooledRows(GROUPED, aggLogits(GROUPED, { "Aedes albopictus": 5, "Aedes aegypti": 4 }));
     const group = rows.filter((r) => r.name.startsWith("Aedes (") && r.name.includes("vexans"));
     expect(group).toHaveLength(1);
     expect(group[0]!.name).toBe("Aedes (vexans / geniculatus / cinereus not separable)");
@@ -85,16 +88,16 @@ describe("the pooled card emits one row per group", () => {
   });
 
   it("leaves a singleton species as its own row", () => {
-    setActiveHead(CULICO);
-    const rows = pooledRows(CULICO, aggLogits(CULICO, { "Aedes albopictus": 5 }));
+    setActiveHead(GROUPED);
+    const rows = pooledRows(GROUPED, aggLogits(GROUPED, { "Aedes albopictus": 5 }));
     expect(rows.map((r) => r.name)).toContain("Aedes albopictus");
   });
 
   it("counts rows by group, not by species column", () => {
-    setActiveHead(CULICO);
-    const rows = pooledRows(CULICO, aggLogits(CULICO, { "Aedes albopictus": 5 }));
-    expect(rows).toHaveLength(equivalenceGroups(CULICO).length);
-    expect(rows.length).toBeLessThan(CULICO.species.length);
+    setActiveHead(GROUPED);
+    const rows = pooledRows(GROUPED, aggLogits(GROUPED, { "Aedes albopictus": 5 }));
+    expect(rows).toHaveLength(equivalenceGroups(GROUPED).length);
+    expect(rows.length).toBeLessThan(GROUPED.species.length);
     expect(new Set(rows.map((r) => r.name)).size).toBe(rows.length);
   });
 
@@ -102,30 +105,39 @@ describe("the pooled card emits one row per group", () => {
     // The shape of the defect: `pooledCandidates` is one entry per species, so
     // rendering its rows is the same group repeated. `pooledRows` is what the
     // card draws, and the count is the difference.
-    setActiveHead(CULICO);
-    const agg = aggLogits(CULICO, {});
+    setActiveHead(GROUPED);
+    const agg = aggLogits(GROUPED, {});
     const label = "Aedes (vexans / geniculatus / cinereus not separable)";
-    const members = resolvableGroups(CULICO).find((g) => g.label === label)!.species;
-    const perSpecies = pooledCandidates(CULICO, agg).filter((c) => members.includes(c.name));
+    const members = resolvableGroups(GROUPED).find((g) => g.label === label)!.species;
+    const perSpecies = pooledCandidates(GROUPED, agg).filter((c) => members.includes(c.name));
     expect(perSpecies).toHaveLength(3);
     // The rendered rows collapse, and carry the label the card prints.
-    expect(pooledRows(CULICO, agg).filter((r) => r.name === label)).toHaveLength(1);
+    expect(pooledRows(GROUPED, agg).filter((r) => r.name === label)).toHaveLength(1);
     expect(speciesLabelHtml(members[0]!)).toContain("(vexans / geniculatus / cinereus not separable)");
   });
 
   it("carries the shared score of the group it collapsed", () => {
-    setActiveHead(CULICO);
-    const agg = aggLogits(CULICO, { "Aedes albopictus": 5 });
+    setActiveHead(GROUPED);
+    const agg = aggLogits(GROUPED, { "Aedes albopictus": 5 });
     const best = Math.max(...Object.values(agg));
     const vexans = agg["Aedes vexans"]! - best;
-    const rows = pooledRows(CULICO, agg);
+    const rows = pooledRows(GROUPED, agg);
     const group = rows.find((r) => r.name.startsWith("Aedes ("))!;
     expect(group.relScore).toBeCloseTo(vexans, 12);
     // And it is the number all three members carried, which is why any one of
     // them would have been truthful.
-    for (const s of resolvableGroups(CULICO).find((g) => g.genus === "Aedes")!.species) {
+    for (const s of resolvableGroups(GROUPED).find((g) => g.genus === "Aedes")!.species) {
       expect(agg[s]! - best).toBeCloseTo(group.relScore, 12);
     }
+  });
+
+  it("emits one row per species again, now that culico separates them all", () => {
+    // The refit removed the last shipped head with a group. The collapse is a
+    // no-op on every head the app now loads, and this is what that looks like.
+    setActiveHead(CULICO);
+    const rows = pooledRows(CULICO, aggLogits(CULICO, {}));
+    expect(rows).toHaveLength(CULICO.species.length);
+    expect(resolvableGroups(CULICO)).toEqual([]);
   });
 
   it("changes nothing on a head that separates every species", () => {
