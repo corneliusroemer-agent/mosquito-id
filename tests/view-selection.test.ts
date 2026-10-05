@@ -302,6 +302,9 @@ describe("every classify path asks the same question", () => {
   it("persists the setting under the key it reads", () => {
     const src = body("wireWholeFrameToggle");
     expect(src).toContain("readIncludeWholeFrame(");
-    expect(src).toContain(`localStorage.setItem(WHOLE_FRAME_KEY`);
+    // Through `writePref`, not `localStorage.setItem` directly: the write has to
+    // survive a browser that refuses storage, and the key it uses is the one the
+    // reader reads.
+    expect(src).toContain(`writePref(WHOLE_FRAME_KEY`);
   });
 });

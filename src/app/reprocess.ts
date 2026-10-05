@@ -45,6 +45,22 @@ export function stalePhotos<T extends ScoredPhoto>(photos: readonly T[], engine:
   return photos.filter((p) => p && !p.removed && !!p.scoredBy && p.scoredBy !== engine);
 }
 
+/**
+ * How many of those photos there are, without building the array of them.
+ *
+ * The only caller wants a number - the re-run button's count - and the button is
+ * updated on every render, which during a batch is once per photo. The filter is
+ * O(n) either way, but the array is O(n) allocation per render on top, and for a
+ * count that outlives nobody.
+ */
+export function stalePhotoCount<T extends ScoredPhoto>(photos: readonly T[], engine: string): number {
+  let n = 0;
+  for (const p of photos) {
+    if (p && !p.removed && !!p.scoredBy && p.scoredBy !== engine) n++;
+  }
+  return n;
+}
+
 /** What a photo has to offer a re-run: the box it was cropped to, if it has one. */
 export interface CroppedPhoto {
   /** The box the crop was cut from, in full-frame pixels. Null when there is none. */
