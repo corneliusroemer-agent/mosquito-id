@@ -39,11 +39,9 @@ function view(species: string, top: number): ViewResult {
 // be observed at all. `crop` is the more confident of the two, so the fused
 // posterior must land between them and nearer the crop.
 //
-// The crop sits above `CROP_ONLY_MAX_POSTERIOR` because a crop below it is scored
-// on its own and never reaches the pooling these tests pin (see
-// `confidence-router.test.ts` for that branch). These assertions are about the
-// pooling arithmetic and are unchanged; only the fixture row moved, and it moved
-// onto a row that still pools.
+// Both views are confident, so the pair reaches the pooling these tests pin.
+// These assertions are about the pooling arithmetic and are unchanged; only the
+// fixture row moved, and it moved onto a row that still pools.
 const crop = () => view("Aedes aegypti", 0.9);
 const whole = () => view("Culex pipiens", 0.4);
 

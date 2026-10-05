@@ -20,22 +20,20 @@ import type { Page } from "@playwright/test";
  * pool. That is the whole difference from the freeze spec, and it is what makes
  * the assertions below able to fail.
  *
- * Keyed on the pixels ALONE it is not enough. `fuseViews` routes an unconfident
- * crop (`CROP_ONLY_MAX_POSTERIOR`) to a crop-only verdict, so a fake that leans
- * on no species row leaves the crop near-flat, the router fires, the whole frame
- * is never pooled, and "the toggle changed nothing" is the router working rather
- * than a fusion bug - which is how two of the specs below failed the moment the
- * router landed. The fake therefore leans on a species row chosen by the hash,
- * which keeps the views genuinely different AND puts the crop above the
- * threshold. `expectConfidentCrop` asserts that, so the fixture cannot quietly
- * drift back under the router.
+ * Keyed on the pixels ALONE it is not enough. A fake that leans on no species row
+ * leaves the crop near-flat, so the crop and the whole frame are close to
+ * indistinguishable and a fusion bug has nothing to be visible in. The fake
+ * therefore leans on a species row chosen by the hash, which keeps the two views
+ * genuinely different. `expectConfidentCrop` asserts that.
+ *
+ * (This file used to have to keep the fixture ABOVE `CROP_ONLY_MAX_POSTERIOR`,
+ * because `fuseViews` discarded the whole frame for an unconfident crop. That
+ * router is gone - see the last spec, which is now the regression test for it.)
  *
  * The model is still not downloaded: the fake replaces the ONNX session, so
  * `softmaxJoint`, `fuseViews`, `viewKinds`, `commitScores` and every render run
  * for real against the shipped head.
  */
-import { CROP_ONLY_MAX_POSTERIOR } from "../../src/confidence/fuseViews";
-
 /** Two photos, both cropped, so each offers two views and the toggle can bite. */
 const TWO: { name: string; state: "species" }[] = [
   { name: "photo_a.jpg", state: "species" },
@@ -190,14 +188,17 @@ function jointTopPosterior(p: CropReading): number {
  * `jointTopPosterior`.
  */
 function expectConfidentCrop(cropOnly: CropReading[]) {
+  // No longer a guard against the router, which is gone: every crop is pooled
+  // whatever its confidence. What it still protects is the other specs' premise -
+  // that the two views are genuinely different, so a fusion bug has something to
+  // be visible in. A flat crop and a flat frame fuse to something neither of them
+  // said, and the specs below would pass for the wrong reason.
   for (const p of cropOnly) {
     expect(
       jointTopPosterior(p),
-      `${p.name}: the crop's top joint species posterior is below CROP_ONLY_MAX_POSTERIOR ` +
-        `(${CROP_ONLY_MAX_POSTERIOR}), so the confidence router answers this photo from the ` +
-        "crop alone and the whole-frame view is never pooled - these specs cannot see a " +
-        "fusion bug through that",
-    ).toBeGreaterThan(CROP_ONLY_MAX_POSTERIOR);
+      `${p.name}: the crop is flat, so the crop and the whole frame are not ` +
+        "distinguishable and these specs cannot see a fusion bug through that",
+    ).toBeGreaterThan(0.5);
   }
 }
 
@@ -349,29 +350,20 @@ test.describe("the whole-frame toggle moves the scores", () => {
     expect(errors(page)).toHaveLength(0);
   });
 
-  test("the router answers an unconfident crop from the crop alone, and no agreement is reported", async ({ page }) => {
-    // The branch the other three specs must stay out of.
+  test("an unconfident crop is still pooled with the whole frame (#90)", async ({ page }) => {
+    // The regression test for #90, and the inverse of what used to be here.
     //
-    // A crop whose top joint posterior is below CROP_ONLY_MAX_POSTERIOR is fused
-    // from that one view: equal weighting would spend the whole frame half the
-    // decision on rows where the crop is the view carrying the signal. That is
-    // worth measuring on real data (report 80) and it is invisible here, because
-    // the app then shows exactly the crop-only numbers whether the toggle is
-    // checked or not. It landed and two specs above started failing on it, and
-    // nothing here pinned it: this is the branch where the toggle is checked, a
-    // second view IS classified, and the answer does not move.
+    // This spec previously pinned the ROUTER: with a crop whose top joint
+    // posterior fell below CROP_ONLY_MAX_POSTERIOR, `fuseViews` answered from the
+    // crop alone, so checking "include the whole photo" scored a second view and
+    // then discarded it. The scores could not move, and the app told the user
+    // nothing - no second opinion, no disagreement, `viewsTotal` written to the
+    // photo record and never rendered.
     //
-    // What this pins is the ROUTER, and it says nothing about what the user is
-    // told. The name it used to carry - "the app does not claim a second opinion"
-    // - asserted a product guarantee that does not exist: `viewsTotal` is written
-    // to the photo record and never rendered, and the agreement box is cleared
-    // and left empty, so a user who checks the box on this branch is told nothing
-    // at all. That silence is [#85], tracked there; whether the app should
-    // surface it is a product decision, not something a test should bless.
-    //
-    // So the classifier is installed with `lean = 0` - the same pixel-keyed
-    // direction with no species row behind it, which is what "the crop is not
-    // sure" looks like from inside the app.
+    // The router is gone. Every view counts whatever its confidence, so the same
+    // fixture - a flat crop, installed with `lean = 0` - must now show the whole
+    // frame changing the answer. If this ever goes back to a no-op, the cause is a
+    // discard rule of some kind, and this is where it surfaces.
     await boot(page);
     await populate(page, TWO);
     await installPixelKeyedClassifier(page, 0);
@@ -381,51 +373,42 @@ test.describe("the whole-frame toggle moves the scores", () => {
     await toggleAndSettle(page, true);
     const both = await shownScores(page);
 
-    // The fixture is what makes this the router's branch: below the threshold,
-    // on the joint scale the router reads, asserted against the source constant
-    // so a threshold change that lifts this fixture above it says so here
-    // instead of quietly voiding the test.
+    // The fixture is what makes this the interesting case: the crop is not sure,
+    // which is exactly the condition the router used to key on.
     for (const c of cropOnly) {
       expect(
         jointTopPosterior(c),
-        `${c.name}: this fixture is only interesting BELOW CROP_ONLY_MAX_POSTERIOR ` +
-          `(${CROP_ONLY_MAX_POSTERIOR}); above it the two views pool and this is the first test`,
-      ).toBeLessThan(CROP_ONLY_MAX_POSTERIOR);
+        `${c.name}: this fixture is only interesting when the crop is UNSURE; ` +
+          `a confident crop is pooled by every rule, so this test would pass for the wrong reason`,
+      ).toBeLessThan(0.5);
     }
 
-    // Not vacuous: the whole frame WAS classified and its answer discarded.
-    // `viewsTotal` is the count of views the pass was asked for, written by
-    // `applyViews` before `fuseViews` runs, so this establishes that a second
-    // view was scored and not that it was pooled - it does not establish the
-    // pooling was suppressed. `fuseViews`'s `nViews` is the direct signal and it
-    // is not on the photo record; surfacing it is a `src/` change, so it is not
-    // asserted here.
-    //
-    // That is also why there is no "the scores did not move" assertion here. On
-    // this branch `fuseViews` returns the crop's own softmax, so
-    // `cropOnly.detail` and `both.detail` being identical is a property of the
-    // arithmetic rather than of the app, and an assertion comparing them cannot
-    // fail. The verdict and agreement assertions below are kept because they do
-    // read `fuseViews`'s own output rather than restating the posterior.
+    // The whole frame WAS classified...
     expect(
       both.every((p) => p.viewsTotal === 2),
-      "the whole frame was never classified, so the router cannot have suppressed it",
+      "the whole frame was never classified, so there is nothing to assert about pooling",
     ).toBe(true);
 
+    // ...and it is now pooled, so the scores must have moved. This assertion
+    // could not exist while the router was in place: on that branch `fuseViews`
+    // returned the crop's own softmax, so `cropOnly.detail` and `both.detail`
+    // being identical was a property of the arithmetic rather than of the app.
     for (const c of cropOnly) {
       const b = both.find((p) => p.name === c.name)!;
-      expect(b.verdict, `${c.name}: the verdict moved on a branch that must not move it`)
-        .toEqual(c.verdict);
-      // And no agreement is reported, because `viewAgreement` is computed over
-      // the views that were POOLED and none were: a crop-only answer cannot say
-      // the views disagree when it never compared them. This is a statement
-      // about the fused result, not about what the app shows - the agreement box
-      // is cleared and nothing fills it either way.
       expect(
-        b.agreement,
-        `${c.name}: the app reported an agreement between views it never pooled`,
-      ).toBeNull();
+        b.detail,
+        `${c.name}: the whole frame was classified and the pooled scores are identical to the ` +
+          "crop's own - a view is being discarded somewhere between fuseViews and the score panel",
+      ).not.toEqual(c.detail);
     }
+
+    // And with two views actually pooled, the app can report whether they agree.
+    // A crop-only answer could not: `viewAgreement` runs over the views that were
+    // pooled, and there were none.
+    expect(
+      both.some((p) => p.agreement !== null),
+      "two views were pooled but no agreement was reported - viewAgreement is being skipped",
+    ).toBe(true);
 
     expect(errors(page)).toHaveLength(0);
   });

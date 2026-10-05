@@ -162,11 +162,10 @@ describe("the gate reads the fused posterior", () => {
     const alone = fuseViews(head, [viewA]);
     expect(alone!.verdict.state).not.toBe("species");
     expect(fuseViews(head, [viewB])!.verdict.state).toBe("species");
-    // B first, because it is the crop here: `viewResults[0]` is the view the
-    // confidence router reads, and a crop below `CROP_ONLY_MAX_POSTERIOR` is
-    // scored on its own rather than pooled (`confidence-router.test.ts` covers
-    // that branch). Putting the unconfident view first would make this test
-    // about the router rather than about where the gate reads.
+    // B first because that is the order every caller uses (crop, then whole
+    // frame). Pooling is commutative, so the answer does not depend on it - but
+    // keeping the caller's order means this test exercises the same call shape
+    // the app makes.
     const fused = fuseViews(head, [viewB, viewA]);
     expect(fused!.verdict.state).toBe("species");
     expect(fused!.verdict.species).toBe("Aedes aegypti");
@@ -188,8 +187,8 @@ describe("the gate reads the fused posterior", () => {
 describe("a disagreement between the views costs the photo its species claim", () => {
   it("two views naming different species cannot reach a species verdict, however high the fused posterior", () => {
     const fused = fuseViews(head, [
-      // Both above `CROP_ONLY_MAX_POSTERIOR`, so the pair reaches the pooling the
-      // veto is tested on.
+      // Two confident-but-disagreeing views, which is the case the veto is
+      // about.
       view({ "Aedes aegypti": 0.85, "Aedes albopictus": 0.1, "Culex pipiens": 0.05 }),
       view({ "Aedes albopictus": 0.85, "Aedes aegypti": 0.1, "Culex pipiens": 0.05 }),
     ]);
@@ -223,7 +222,7 @@ describe("a disagreement between the views costs the photo its species claim", (
   it("the disagreement measure is computed once, by fuseViews, and is the same object", () => {
     const views = [
       // Disagreeing. The router reads `viewResults[0]` alone - always the crop -
-      // so the crop at 0.85 is what has to clear `CROP_ONLY_MAX_POSTERIOR` for
+      // so the crop at 0.85 has to be confident for
       // this pair to reach the pooling at all; the second view's own posterior is
       // irrelevant to that branch. The measure is computed once over the views
       // that were pooled, which is the point being pinned.
