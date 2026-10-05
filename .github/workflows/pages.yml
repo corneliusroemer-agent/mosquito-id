@@ -1,7 +1,15 @@
 name: Deploy to GitHub Pages
 
 on:
-  push:
+  # The deploy is gated on CI rather than running beside it. `verify` is a job in
+  # ci.yml, so `needs:` cannot say this: `needs` resolves inside one workflow
+  # file, and `needs: verify` in this file is a hard error - actionlint rejects it
+  # with 'job "deploy" needs job "verify" which does not exist in this workflow'.
+  # `workflow_run` is the cross-workflow form of the same edge. It fires whenever
+  # the `CI` workflow completes; the `if` on the job below admits only a green one.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -22,12 +30,34 @@ concurrency:
 
 jobs:
   deploy:
+    # A green `verify` is the only thing that may publish. `workflow_run` fires on
+    # every completion, so the conclusion is the gate: `failure`, `cancelled`,
+    # `skipped` and `timed_out` all skip this job rather than deploy. That matters -
+    # on 2026-10-04 both a red commit (58f8e2f) and three cancelled ones reached the
+    # live site. A `workflow_dispatch` run has no triggering workflow to consult and
+    # deploys the dispatched ref, as it always has.
+    #
+    # A skipped job still leaves this workflow green, so read the job list, not the
+    # run's conclusion, to tell whether a deploy happened.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    # `GITHUB_SHA` is the default branch tip under `workflow_run`, not the commit CI
+    # verified, so both the checkout and the SHA Vite inlines are pinned to the
+    # triggering run's head. Without this a second merge landing while CI is still
+    # running would publish untested code - the exact failure this gate exists to
+    # stop. `workflow_dispatch` has no triggering run, so it falls back to its own
+    # `github.sha`.
+    env:
+      DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -44,7 +74,7 @@ jobs:
         # exact SHA it was built from and the page puts it in its URL as
         # ?build=<sha> (src/app/buildSha.ts).
         env:
-          VITE_COMMIT_SHA: ${{ github.sha }}
+          VITE_COMMIT_SHA: ${{ env.DEPLOY_SHA }}
         run: npm ci && npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
