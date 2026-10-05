@@ -255,9 +255,12 @@ test.describe("the whole-frame toggle moves the scores", () => {
 
     // `populate` writes a verdict of its own rather than classifying anything, so
     // the gallery has to be classified through the toggle before there is a
-    // number to compare. Unchecking first is the classifying pass: the control
-    // boots checked, so "check it" on a fresh gallery is the no-op the handler's
-    // early return is there to swallow.
+    // number to compare. The control boots unchecked (crop-only is the default),
+    // so the classifying pass is the one that checks it.
+    await toggleAndSettle(page, true);
+    const bothViews = await shownScores(page);
+    expect(bothViews.every((p) => p.viewsTotal === 2), "the two-view pass ran").toBe(true);
+
     await toggleAndSettle(page, false);
     const cropOnly = await shownScores(page);
     expect(cropOnly.every((p) => p.viewsTotal === 1), "the crop-only pass ran").toBe(true);
@@ -266,15 +269,11 @@ test.describe("the whole-frame toggle moves the scores", () => {
     // than part of the claim.
     expectConfidentCrop(cropOnly);
 
+    // Unchecking again... then re-checking must land back on the numbers the
+    // first two-view pass produced, not merely on some other set of numbers.
     await toggleAndSettle(page, true);
-    const bothViews = await shownScores(page);
-    expect(bothViews.every((p) => p.viewsTotal === 2), "the two-view pass ran").toBe(true);
-
-    // Unchecking again must land back on the numbers the first crop-only pass
-    // produced, not merely on some other set of numbers.
-    await toggleAndSettle(page, false);
-    const cropOnlyAgain = await shownScores(page);
-    expect(cropOnlyAgain.every((p) => p.viewsTotal === 1)).toBe(true);
+    const bothViewsAgain = await shownScores(page);
+    expect(bothViewsAgain.every((p) => p.viewsTotal === 2)).toBe(true);
 
     // THE INVARIANT. Two views and one view must not produce the same numbers.
     // The threshold is not "not equal": a fusion that moved every species by
@@ -299,11 +298,21 @@ test.describe("the whole-frame toggle moves the scores", () => {
     // the crop's own softmax, and re-checking must land back on the two-view
     // numbers rather than somewhere new.
     for (const a of cropOnly) {
-      const b = cropOnlyAgain.find((p) => p.name === a.name)!;
+      const b = bothViewsAgain.find((p) => p.name === a.name)!;
       expect(
         biggestScoreMove(a.detail, b.detail),
-        `${a.name}: unchecking twice produced different numbers, so re-checking did not ` +
-          "restore the state it started from",
+        `${a.name}: checking the whole frame again produced different numbers, so the toggle ` +
+          "does not return to the state it started from",
+      ).toBeGreaterThan(1e-3);
+    }
+    // And the return is exact in the other direction: re-checking has to
+    // reproduce the first two-view pass, not merely some other two-view pass.
+    for (const a of bothViews) {
+      const b = bothViewsAgain.find((p) => p.name === a.name)!;
+      expect(
+        biggestScoreMove(a.detail, b.detail),
+        `${a.name}: two identical two-view passes produced different numbers, so the toggle ` +
+          "does not restore the state it started from",
       ).toBeLessThan(1e-9);
     }
 
@@ -325,11 +334,13 @@ test.describe("the whole-frame toggle moves the scores", () => {
     await populate(page, TWO);
     await installPixelKeyedClassifier(page);
 
-    await toggleAndSettle(page, false);
-    const cropOnly = await shownScores(page);
-    expectConfidentCrop(cropOnly);
     await toggleAndSettle(page, true);
     const both = await shownScores(page);
+    expect(both.every((p) => p.viewsTotal === 2), "the two-view pass ran").toBe(true);
+    await toggleAndSettle(page, false);
+    const cropOnly = await shownScores(page);
+    expect(cropOnly.every((p) => p.viewsTotal === 1), "the crop-only pass ran").toBe(true);
+    expectConfidentCrop(cropOnly);
 
     for (const c of cropOnly) {
       const b = both.find((p) => p.name === c.name)!;
@@ -368,10 +379,11 @@ test.describe("the whole-frame toggle moves the scores", () => {
     await populate(page, TWO);
     await installPixelKeyedClassifier(page, 0);
 
-    await toggleAndSettle(page, false);
-    const cropOnly = await shownScores(page);
     await toggleAndSettle(page, true);
     const both = await shownScores(page);
+    await toggleAndSettle(page, false);
+    const cropOnly = await shownScores(page);
+    expect(cropOnly.every((p) => p.viewsTotal === 1), "the crop-only pass ran").toBe(true);
 
     // The fixture is what makes this the interesting case: the crop is not sure,
     // which is exactly the condition the router used to key on.

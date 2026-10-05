@@ -1,7 +1,7 @@
 import type { Agreement, Floors, Head, RunnerUp, Verdict } from "./types";
 import { DEFAULT_FLOORS } from "./types";
 import { adjacentNames, informativeRows } from "./softmax";
-import { speciesGenusIndex } from "./genus";
+import { effectiveGenusIndex } from "./taxonomy";
 
 /** What tripped the non-mosquito gate, and what it is called. */
 export interface GateHit {
@@ -180,7 +180,11 @@ export function verdictFrom(
   if (!spP || !spP.length || spP.some((p) => !Number.isFinite(p))) {
     return { state: "unsure", genus: null, species: null, topGenusP: 0, topSpeciesP: 0, runnersUp: [] };
   }
-  const { idx } = { idx: speciesGenusIndex(head) };
+  // Through `effectiveGenusIndex`, so a head that ships a taxonomy is read
+  // through it and a head that does not keeps the first-word rule. Both produce a
+  // partition, which is what the sum below needs: a genus row collects the mass
+  // of all its species, so a rare species cannot split its genus across rows.
+  const idx = effectiveGenusIndex(head);
   const genP: [string, number][] = [];
   for (const [g, members] of idx) {
     genP.push([g, members.reduce((a, i) => a + (spP[i] || 0), 0)]);
