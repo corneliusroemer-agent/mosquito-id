@@ -124,3 +124,63 @@ it means a cached split from a pre-fix run is not comparable to a post-fix one o
 — worth knowing before someone reads a metric change as a modelling result.
 
 Test: `investigations/2026-10-03-rewrite/test_common2_canon_group.py`, next to `common2.py`.
+
+---
+
+## 6. Where `common2.py` actually lives — and who imports it
+
+Added after review of PR #126 flagged the diff shape. The short answer: **there is no tracked
+home for `common2.py` on any remote**, and the copy that twenty harnesses actually import is not
+the copy this fix patched.
+
+**Three distinct files, not one.** Named `common2.py`, `common2_b16f.py`, or reachable through a
+symlink:
+
+| path | bytes | tracked? | imported? |
+|---|---:|---|---|
+| `common2.py` (repo root) | 9,079 | yes, local repo commit `6ba1081` | no — nothing adds the root to `sys.path` |
+| `40-precision/97-insect-dino-work/harness/common2_b16f.py` | 6,151 | yes | no — named `common2_b16f`, never imported under that name |
+| `40-precision/97-insect-dino-work/common2.py` | symlink | yes (as a symlink) | **yes — all 20 importers** |
+
+The third entry is a **symlink into untracked scratch space**:
+
+```
+40-precision/97-insect-dino-work/common2.py
+  -> /workspaces/claude-devcontainer/scratch/2026-10-04-b16-finetune/common2.py
+```
+
+`scratch/` is ignored by the repo's `/*` whitelist `.gitignore`, so the symlink's target is not in
+version control. **In a fresh clone of the archived repo this symlink dangles**, and all twenty
+`import common2 as K` statements fail with `ModuleNotFoundError`. It resolves here only because
+one agent's scratch directory happens to still exist on this machine.
+
+**Are the imported copies the same file? No — and this fix patched the wrong one.** Resolved
+imports of `import common2 as K` from inside `40-precision/97-insect-dino-work/` land on the
+symlink, whose 6,151-byte target is byte-identical to `harness/common2_b16f.py` (both md5
+`54e37cdc72…`). The 9,079-byte repo-root `common2.py` this PR modified is a **different file**:
+it is a later revision carrying the headline-metric functions (`entropy_of`, `full_score`,
+`boot_ci`, `paired_boot`) and an env-overridable `HERE`. Its `canon_group` was fixed; the
+`canon_group` the twenty harnesses call was **not**.
+
+All three carry the identical buggy two-line regex, so the leak is live in all three — but a fix
+applied to only one of them does not reach the code that produced the reported numbers.
+
+**The tracked copies are also not on any remote.** `mosquito-id` `main` contains
+`investigations/2026-10-03-rewrite/00-ON-HOLD.md` and nothing else from this tree; it has no
+`common2.py` and no `97-insect-dino-work/`. The ML harnesses have **no tracked home on any
+remote** — they exist only in the repo being archived. (Per the archived repo's own last commit
+message: *"Add common2.py, which committed scripts import but which was never tracked"* — the
+file was committed locally and never pushed.)
+
+### What this means for the fix
+
+The one-line change is correct and its verification stands, but it is currently a fix to a file
+no harness imports. Before it can be relied on:
+
+1. the same change must be applied to `harness/common2_b16f.py` and to the
+   `scratch/2026-10-04-b16-finetune/common2.py` the symlink points at, and
+2. whichever file is chosen as canonical should be tracked in a repo that has a remote, with the
+   other two reduced to thin re-exports rather than copies.
+
+Copying this file three times is what let a one-line fix land in the wrong one. The tracker
+should have been `pip install -e` on a single module, not three text files.
