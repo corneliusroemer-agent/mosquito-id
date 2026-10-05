@@ -32,12 +32,15 @@ export interface MosqAsync {
   selectPhoto: (i: number) => void;
   processFiles: (files: FileList | File[]) => Promise<void>;
   deletePhoto: (i: number) => void;
+  deleteAllPhotos: () => void;
   /** The crop release, as a drag reaches it. */
   applyCropFromFullSurface: (idx: number, rect: number[], t0: number) => Promise<unknown>;
   /** A photo's full-resolution pixels, decoded from its File on demand. */
   fullCanvasFor: (p: unknown) => Promise<HTMLCanvasElement | null>;
-  /** How many full-resolution frames are held. The bound is one. */
+  /** How many full-resolution frames are held. The bound is a fixed count. */
   retainedFullCanvasCount: () => number;
+  /** The engine re-run, as the button's action reaches it. */
+  reprocess: () => Promise<unknown>;
   /** The engine re-run's photo-set narrowing, or null. See `main.js` ASYNC. */
   rerunPhotos: Set<any> | null;
   renderThumbnails: () => void;
@@ -56,6 +59,8 @@ declare global {
     __mosqShiftLog?: string[];
     /** The app's own "engine settled" flag. False once a load has failed. */
     modelsReady?: boolean;
+    /** Inferences a counting classifier stub has been asked for. */
+    __countedRuns?: number;
   }
 }
 
@@ -152,6 +157,16 @@ export interface PhotoSpec {
   pending?: boolean;
   error?: string | null;
   is_cropped?: boolean;
+  /**
+   * Whether this photo's lack of a crop came from the USER reverting it, rather
+   * than from the detector finding nothing.
+   *
+   * It is the same record shape either way - no crop box - and nothing about the
+   * views differs. What differs is which re-run path the photo takes: one with
+   * no File can only be re-classified if it was reverted, so an uncropped
+   * fixture that wants to exercise the two-view decision needs this set.
+   */
+  revertedToFull?: boolean;
 }
 
 const SPECIES_BY_NAME: Record<string, string> = {
@@ -299,6 +314,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         emb.species.map((s, j) => [s, Math.log(Math.max(spP[j], 1e-9))]),
       );
 
+      const cropped = spec.is_cropped ?? true;
       const p = {
         name: spec.name,
         // Fixtures install records directly, so they carry the photo's own
@@ -306,11 +322,17 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         // sourceCanvas rather than fullCanvas: these have no File, so there
         // is nothing to re-decode from and the frame is what they hold.
         displayCanvas: full,
-        // The dimensions makeCanvas was called with above.
         fullW: 2400,
         fullH: 1800,
         sourceCanvas: full,
-        cropCanvas: crop,
+        // A cropped photo carries its crop box, in the photograph's own pixels -
+        // that box is what decides whether the photo has two views or one, so a
+        // fixture with a crop canvas but no box cannot tell an uncropped photo
+        // from a cropped one, and the whole-frame tests pass for the wrong
+        // reason. An uncropped photo has no box AND shares the display canvas,
+        // which is what the app's own no-detection case looks like.
+        cropCanvas: cropped ? crop : full,
+        cropBox: cropped ? [750, 450, 1650, 1350] : null,
         contextCanvas: full,
         detail,
         scores,
@@ -323,7 +345,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         verdict: null,
         pending: spec.pending ?? false,
         error: spec.error ?? null,
-        is_cropped: spec.is_cropped ?? true,
+        is_cropped: cropped,
         crop_rejected: false,
         status: spec.error ? "failed" : "ok",
         rev: 0,
@@ -332,6 +354,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         viewsTotal: 0,
         fingerprint: "fp_" + i,
         manual_full_photo: false,
+        revertedToFull: spec.revertedToFull ?? false,
       };
       // The real gate's answer, not ours - and the nuisance posteriors go with it,
       // because the gate reads that block and the seam drops nothing.

@@ -33,7 +33,8 @@ import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setP
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
 import { photoObjectUrl, releasePhotoUrl } from "./photoUrl";
-import { displayCanvasFrom, fullCanvasFor, releaseFullCanvas, retainedFullCanvasCount } from "./fullResSource";
+import { displayCanvasFrom, fullCanvasFor, releaseFullCanvas, resetFullCanvasCache,
+         retainedFullCanvasCount } from "./fullResSource";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, cutCrop, extractContextCrop, photoFrame,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
@@ -55,11 +56,11 @@ import { embedCanvas as _embedCanvas } from "./embedding";
 import { isUsableIntermediate } from "./downscale";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
          Superseded } from "./photoRecord";
-import { classifyCanvasServer as _classifyCanvasServer,
-         classifyViewLocal as _classifyViewLocal,
+import { classifyViewLocal as _classifyViewLocal,
          classifyViewServer as _classifyViewServer, genusTotals as _genusTotals,
          posteriorSummary as _posteriorSummary, round4, serverView as _serverView,
-         verdictSummary as _verdictSummary, viewsFor as _viewsFor } from "./views";
+         verdictSummary as _verdictSummary, viewsFor as _viewsFor,
+         aliasesWholeFrame } from "./views";
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -88,7 +89,6 @@ const classifyViewLocal = (canvas, engine) =>
   _classifyViewLocal(canvas, engine, EMB, clipEmbed, localViewScale());
 const classifyViewServer = (full, name, cropBox) =>
   _classifyViewServer(full, name, cropBox, EMB, serverViewScale(), sendLog);
-const classifyCanvasServer = (p, cropBox) => _classifyCanvasServer(p, cropBox, sendLog);
 const posteriorSummary = (fused) => _posteriorSummary(fused, EMB);
 const verdictSummary = (p) => _verdictSummary(p);
 const genusTotals = (fused, topIdx) => _genusTotals(fused, topIdx, EMB);
@@ -288,6 +288,9 @@ const ASYNC = (window.__mosqAsync = {
   selectPhoto,
   processFiles,
   deletePhoto,
+  // Empties the gallery, which is the other way the cache can be left holding
+  // frames for photographs that are no longer on screen.
+  deleteAllPhotos,
   // The crop release, so a test can cut a crop the way a drag does rather than
   // reaching past the pointer handlers into the canvas. It is the path that
   // fetches the full-resolution frame back, so it is also the path a test has to
@@ -298,8 +301,8 @@ const ASYNC = (window.__mosqAsync = {
   // would, or it is asserting about a different photograph than the re-run will
   // score.
   fullCanvasFor,
-  // How many full-resolution frames are held right now. The bound is one, and a
-  // test asserting the gallery is empty has to be able to see it.
+  // How many full-resolution frames are held right now. The bound is a fixed
+  // number, and a test asserting the gallery is empty has to be able to see it.
   retainedFullCanvasCount,
   // The engine re-run, so a test can press the button's action without reaching
   // into the gallery's internals first.
@@ -1329,6 +1332,13 @@ async function processFiles(fileList) {
         const fullCv = await dataUrlToCanvas(data.fullDataUrl);
         const cropCv = await dataUrlToCanvas(data.cropDataUrl);
         const contextCv = await dataUrlToCanvas(data.contextDataUrl);
+        // Aliasing is decided from the data URLs, which is what the server sent:
+        // `dataUrlToCanvas` allocates a fresh canvas per URL, so the decoded
+        // canvases are never the same object and comparing them would never
+        // alias - which held three capped copies of one photograph in exactly the
+        // case the comment below claims to collapse to one.
+        const aliased = aliasesWholeFrame(data);
+        const displayCv = displayCanvasFrom(fullCv);
 
         // Second view over the same contract, no server change needed: the
         // endpoint already classifies whatever box it is given, so the whole
@@ -1349,13 +1359,13 @@ async function processFiles(fileList) {
 
         commitBatchSlot(slots[i], {
           name: data.filename, scoredBy: engine,
-          displayCanvas: displayCanvasFrom(fullCv), fullW: fullCv.width, fullH: fullCv.height,
+          displayCanvas: displayCv, fullW: fullCv.width, fullH: fullCv.height,
           sourceCanvas: slots[i].file ? null : fullCv,
           // The server sends full-resolution data URLs, so all three are capped
           // here, and the no-detection case shares one canvas rather than three
           // copies of the same photograph.
-          cropCanvas: cropCv === fullCv ? displayCanvasFrom(fullCv) : displayCanvasFrom(cropCv),
-          contextCanvas: contextCv === fullCv ? displayCanvasFrom(fullCv) : displayCanvasFrom(contextCv),
+          cropCanvas: aliased.crop ? displayCv : displayCanvasFrom(cropCv),
+          contextCanvas: aliased.context ? displayCv : displayCanvasFrom(contextCv),
           cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
           detail: fused.detail, logits: fused.logits, status: data.status,
           // The server reports one `fallback` bit for both ways of ending up
@@ -1737,6 +1747,11 @@ function deleteAllPhotos() {
   // photo drops its result rather than writing into a slot that no longer exists.
   previews.forEach((p) => { p.removed = true; releasePhotoUrl(p); });
   previews.length = 0;
+  // The whole cache, not the frames of the photos that are going: a photo that
+  // is merely evicted from a two-slot cache leaves its frame behind here, and an
+  // emptied gallery holding two photographs' pixels is the leak this path
+  // exists to stop.
+  resetFullCanvasCache();
   includedIndices = new Set();
   selectedIndex = 0;
   sendLog("delete_all_photos", { count: n });

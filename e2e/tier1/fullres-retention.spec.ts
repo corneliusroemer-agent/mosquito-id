@@ -1,4 +1,4 @@
-import { boot, errors, expect, settle, test } from "../helpers/app";
+import { boot, errors, expect, populate, settle, test } from "../helpers/app";
 import type { Page } from "@playwright/test";
 
 /**
@@ -121,18 +121,54 @@ async function retained(page: Page) {
       // which is what the no-detection case is, and counting it three times is
       // how a fix like this one can appear to save nothing.
       const seen = new Set<any>();
-      for (const k of ["displayCanvas", "cropCanvas", "contextCanvas", "sourceCanvas", "fullCanvas"]) {
+      for (const k of ["displayCanvas", "cropCanvas", "contextCanvas", "sourceCanvas"]) {
         if (p[k]) seen.add(p[k]);
       }
       return { distinct: seen.size, MB: +[...seen].reduce((a, c) => a + mb(c), 0).toFixed(1) };
     };
     return {
       n: P.length,
-      anyFullCanvas: P.filter((p) => p.fullCanvas).length,
       displayLongEdges: P.map((p) => (p.displayCanvas ? Math.max(p.displayCanvas.width, p.displayCanvas.height) : null)),
+      // Every canvas the record holds, and the largest edge of each. This is the
+      // assertion that would fail if the frame came back: `fullCanvas` is gone
+      // from `PhotoState`, so counting a field that is always undefined proves
+      // nothing - what a re-introduced frame changes is the SIZE of what is
+      // there, which is measurable without knowing the field's name.
+      allEdges: P.map((p) => (["displayCanvas", "cropCanvas", "contextCanvas", "sourceCanvas"] as const)
+        .filter((k) => p[k])
+        .map((k) => Math.max(p[k].width, p[k].height))),
+      cachedFrames: window.__mosqAsync!.retainedFullCanvasCount(),
       dims: P.map((p) => [p.fullW, p.fullH]),
       total: P.reduce((a, p) => { const r = per(p); return { distinct: a.distinct + r.distinct, MB: +(a.MB + r.MB).toFixed(1) }; }, { distinct: 0, MB: 0 }),
     };
+  });
+}
+
+
+/**
+ * A classifier that counts how many inferences it is asked for, so "one view" and
+ * "two views" are counted rather than inferred from a `viewsTotal` field the
+ * app itself writes.
+ */
+async function installCountingClassifier(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const A = window.__mosqAsync!;
+    const w = window as any;
+    w.__countedRuns = 0;
+    const dim = (A.embeds as { dim: number }).dim;
+    A.sessClip = {
+      inputNames: ["pixel_values"],
+      async run() {
+        w.__countedRuns++;
+        const emb = (A.embeds as any).species_emb;
+        return { embedding: { dims: [1, dim], data: Float32Array.from(emb.slice(0, dim)) } };
+      },
+    };
+    A.clipSessions["webgpu-fp16"] = { sess: A.sessClip, ep: "wasm" };
+    // The re-run refuses to start while the engine reports itself unusable, and
+    // the fixtures install records without going through the batch, so nothing
+    // else would have set this.
+    w.modelsReady = true;
   });
 }
 
@@ -144,9 +180,16 @@ test.describe("full-resolution retention", () => {
 
     const r = await retained(page);
     expect(r.n).toBe(2);
-    // The frame is off every record. This is the whole change: before it, all
-    // twenty photos of a hundred-photo gallery carried one.
-    expect(r.anyFullCanvas).toBe(0);
+    // No canvas anywhere on the records is bigger than the cap, so there is no
+    // frame hiding under any of the four names. Before this change the frame was
+    // a 4032px canvas on every photo, which is what fails here.
+    for (const edges of r.allEdges) {
+      expect(edges.length).toBeGreaterThan(0);
+      for (const e of edges) expect(e).toBeLessThanOrEqual(2048);
+    }
+    // And nothing is sitting in the on-demand cache for a photo that has never
+    // been cropped.
+    expect(r.cachedFrames).toBe(0);
     // A display canvas is present, and bounded - the panels are CSS boxes a few
     // hundred pixels across, so nothing shows the pixels above the cap.
     for (const edge of r.displayLongEdges) {
@@ -200,15 +243,18 @@ test.describe("full-resolution retention", () => {
       return {
         box: (q.cropBox as number[]).slice(),
         cropCanvas: q.cropCanvas ? [q.cropCanvas.width, q.cropCanvas.height] : null,
-        hasFullCanvas: !!q.fullCanvas,
+        // The frame was fetched, drawn from and released rather than moved onto
+        // the photo. Measured by what the cache holds, which is the only place a
+        // fetched frame can now be: the `fullCanvas` field this used to read was
+        // removed from the record, so reading it proved nothing.
+        cachedFrames: A.retainedFullCanvasCount(),
         error: q.error ?? null,
       };
     });
 
     expect(after.error).toBeNull();
-    // The frame is still off the record after a crop: it was fetched, drawn
-    // from, and released rather than moved onto the photo.
-    expect(after.hasFullCanvas).toBe(false);
+    // The frame is still not resident after a crop, beyond the small cache bound.
+    expect(after.cachedFrames).toBeLessThanOrEqual(2);
 
     // The box is in PHOTOGRAPH pixels. Contain against a 4:3 photograph in the
     // panel's own box letterboxes one axis, so the vertical fractions are
@@ -254,8 +300,14 @@ test.describe("full-resolution retention", () => {
       return {
         before,
         after: { viewsLanded: q.viewsLanded, viewsTotal: q.viewsTotal, is_cropped: q.is_cropped, pending: q.pending },
-        hasFullCanvas: !!q.fullCanvas,
+        // A photo with a File has nothing to decode it again from, so it keeps
+        // no frame of its own - this one is still a real assertion, because
+        // `sourceCanvas` IS still a field on the record.
         hasSourceCanvas: !!q.sourceCanvas,
+        cachedFrames: A.retainedFullCanvasCount(),
+        edges: (["displayCanvas", "cropCanvas", "contextCanvas", "sourceCanvas"] as const)
+          .filter((k) => (q as any)[k])
+          .map((k) => Math.max((q as any)[k].width, (q as any)[k].height)),
         error: q.error ?? null,
         scores: Object.keys(q.scores).length,
       };
@@ -269,8 +321,8 @@ test.describe("full-resolution retention", () => {
     expect(r.after.viewsLanded).toBe(r.after.viewsTotal);
     expect(r.scores).toBeGreaterThan(0);
     // Still nothing full-resolution on the record afterwards.
-    expect(r.hasFullCanvas).toBe(false);
     expect(r.hasSourceCanvas).toBe(false);
+    for (const e of r.edges) expect(e).toBeLessThanOrEqual(2048);
     expect(errors(page)).toHaveLength(0);
   });
 
@@ -304,6 +356,140 @@ test.describe("full-resolution retention", () => {
     // One. The second draw reuses the frame the first one fetched, which is why
     // the cache exists at all: a 12 MP decode is hundreds of milliseconds.
     expect(decodes).toBe(1);
+  });
+
+  test("an uncropped photo runs ONE view; a cropped one runs two", async ({ page }) => {
+    // The predicate that decides this is `cropBox`, and it has to be visible
+    // here rather than only in a unit test: an uncropped photo's `cropCanvas` is
+    // its display canvas, a DIFFERENT object from the frame the re-run decodes,
+    // so a check on canvas identity says "cropped" and the photograph is pooled
+    // against itself as two independent views.
+    //
+    // The fixtures carry a real crop box on the cropped photo and none on the
+    // uncropped one, so the two cases are actually distinguishable - a fixture
+    // with a crop canvas and no box makes both look cropped and this test passes
+    // for the wrong reason.
+    await boot(page);
+    await populate(page, [
+      // `revertedToFull` so this record takes the re-classify path rather than the
+      // re-detect one: the fixtures hold no File, and a photo with no File and no
+      // crop cannot be re-run at all - which is a fixture limitation, not the
+      // thing under test.
+      { name: "uncropped.jpg", state: "species", is_cropped: false, revertedToFull: true },
+      { name: "cropped.jpg", state: "species", is_cropped: true },
+    ]);
+    await installCountingClassifier(page);
+    await settle(page);
+
+    const r = await page.evaluate(async () => {
+      const A = window.__mosqAsync!;
+      const before = window.__countedRuns ?? 0;
+      const reads = {
+        uncropped: {
+          cropBox: A.previews[0]!.cropBox,
+          cropIsDisplay: A.previews[0]!.cropCanvas === A.previews[0]!.displayCanvas,
+        },
+        cropped: {
+          cropBox: A.previews[1]!.cropBox,
+          cropIsDisplay: A.previews[1]!.cropCanvas === A.previews[1]!.displayCanvas,
+        },
+      };
+      await A.reprocess();
+      for (let i = 0; i < 600 && A.previews.some((p: any) => p.pending); i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+      return {
+        reads,
+        runs: (window.__countedRuns ?? 0) - before,
+        viewsLanded: A.previews.map((p: any) => p.viewsLanded),
+        viewsTotal: A.previews.map((p: any) => p.viewsTotal),
+        detail: A.previews.map((p: any) => ({ name: p.name, err: p.error, is_cropped: p.is_cropped,
+                                               box: p.cropBox, pending: p.pending, status: p.status })),
+      };
+    });
+
+    // The fixture really is the two cases, not two copies of one.
+    expect(r.reads.uncropped.cropBox).toBeNull();
+    expect(r.reads.uncropped.cropIsDisplay).toBe(true);
+    expect(r.reads.cropped.cropBox).not.toBeNull();
+    expect(r.reads.cropped.cropIsDisplay).toBe(false);
+
+    // Three runs total: one for the uncropped photo, two for the cropped one.
+    expect(r.runs, `runs=${r.runs} viewsTotal=${JSON.stringify(r.viewsTotal)} landed=${JSON.stringify(r.viewsLanded)} detail=${JSON.stringify(r.detail)}`).toBe(3);
+    expect(r.viewsTotal).toEqual([1, 2]);
+    expect(r.viewsLanded).toEqual([1, 2]);
+  });
+
+  test("emptying the gallery releases every frame it had out on loan", async ({ page }) => {
+    await boot(page);
+    await loadBigPhotos(page);
+    await settle(page);
+
+    const r = await page.evaluate(async () => {
+      const A = window.__mosqAsync!;
+      // Two crops on two photographs, so the cache is at its bound and both
+      // photographs have a frame that a per-photo release would not reach.
+      for (const i of [0, 1]) {
+        await A.applyCropFromFullSurface(i, [0.2, 0.2, 0.6, 0.6], performance.now());
+      }
+      for (let k = 0; k < 400 && A.previews.some((p: any) => p.pending); k++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+      const held = A.retainedFullCanvasCount();
+      A.deleteAllPhotos();
+      const A2 = window.__mosqAsync!;
+      return { held, after: A2.retainedFullCanvasCount(), n: A2.previews.length };
+    });
+    expect(r.n).toBe(0);
+    // The cache was occupied, so this is not passing because there was nothing
+    // to release - `deleteAllPhotos` empties `previews` without touching the
+    // cache, which leaves both frames resident.
+    expect(r.held).toBeGreaterThan(0);
+    expect(r.after).toBe(0);
+  });
+
+  test("alternating between two photographs decodes each of them once", async ({ page }) => {
+    await boot(page);
+    await loadBigPhotos(page);
+    await settle(page);
+
+    const r = await page.evaluate(async () => {
+      const A = window.__mosqAsync!;
+      let decodes = 0;
+      const real = window.createImageBitmap.bind(window);
+      (window as any).createImageBitmap = async (src: any, opts: any) => {
+        if (src instanceof File) decodes++;
+        return real(src, opts);
+      };
+      const settle = async () => {
+        for (let i = 0; i < 400 && A.previews.some((p: any) => p.pending); i++) {
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+      };
+      // A -> B -> A -> B: the pattern a user comparing two photographs makes.
+      // A cache that keeps only one frame holds A forever, so every B here is a
+      // fresh 46 MiB decode.
+      const per: number[] = [];
+      const pattern: [number, number[]][] = [
+        [0, [0.1, 0.1, 0.5, 0.5]], [1, [0.2, 0.2, 0.6, 0.6]],
+        [0, [0.3, 0.3, 0.7, 0.7]], [1, [0.4, 0.4, 0.8, 0.8]],
+      ];
+      for (const [i, box] of pattern) {
+        const before = decodes;
+        await A.applyCropFromFullSurface(i, box, performance.now());
+        await settle();
+        per.push(decodes - before);
+      }
+      (window as any).createImageBitmap = real;
+      return { decodes, per, cached: A.retainedFullCanvasCount() };
+    });
+    // Two photographs, four crop draws, two decodes. Each is re-decoded at most
+    // once, which is what a two-frame bound buys over a one-frame one.
+    expect(r.decodes).toBe(2);
+    // No single draw cost two decodes, which is the other half: the second and
+    // later visits were free rather than merely cheaper.
+    expect(Math.max(...r.per)).toBe(1);
+    expect(r.cached).toBeLessThanOrEqual(2);
   });
 
   test("the viewer still shows the photo, and the strip still shows a thumbnail", async ({ page }) => {

@@ -19,8 +19,9 @@
  * memory. A decode is not free - a 12 MP frame is hundreds of milliseconds - so
  * callers that arrive together share one decode instead of queueing one each,
  * and callers that arrive one after another get the frame that is already
- * decoded. And the retention bound is one frame, not one per photo: a hundred
- * crop draws still hold one, because the point was never to make the second
+ * decoded. And the retention bound is a fixed number of frames, not one per
+ * photo: a hundred crop draws across a hundred photographs still hold
+ * `FULL_RES_CACHE_FRAMES`, because the point was never to make the second
  * decode cheap, it was to stop the hundredth frame being resident forever.
  */
 
@@ -100,34 +101,66 @@ export interface FullResRecord {
 }
 
 /**
- * The one retained frame, and the decodes in flight.
+ * How many full-resolution frames are retained at once.
  *
- * A single slot rather than a per-photo map: the bound that matters is bytes
- * resident, and one frame is one frame however many photographs ask for it. A
- * photo that asks while another is held still gets its own frame, it simply is
- * not the one left over afterwards.
+ * The bound that matters is bytes resident, so this is a count of frames and
+ * nothing else - the photographs behind them do not matter. One was enough to
+ * stop the linear-in-gallery growth it replaced, but a single slot is only ever
+ * installed for the photo already in it, so the first photo to ask owned the
+ * cache for the rest of the session and every other photograph re-decoded on
+ * every call. Two is what makes alternating between two photographs free, which
+ * is what comparing two crops looks like.
  */
-let retained: { photo: object; canvas: HTMLCanvasElement } | null = null;
+export const FULL_RES_CACHE_FRAMES = 2;
+
+/**
+ * The retained frames, least recently used first, and the decodes in flight.
+ *
+ * A `Map`, because insertion order is the recency order and a hit re-inserts:
+ * `Map.delete` then `Map.set` moves a key to the end, so the first key is always
+ * the least recently used. That matters because the alternatives do not hold the
+ * bound. A `WeakMap` has no bound at all - a frame lives as long as its photo,
+ * which is the whole gallery, and is the original eleven-gigabyte problem. A
+ * `WeakRef` bounds only whatever the collector happens to reclaim, so the bound
+ * is never guaranteed. Last-writer-wins with one slot is what this replaced.
+ */
+const retained = new Map<object, HTMLCanvasElement>();
 const inflight = new Map<object, Promise<HTMLCanvasElement | null>>();
 
-/** How many frames are being held. One, or none - the point of the bound. */
+/** How many frames are being held. Never more than `FULL_RES_CACHE_FRAMES`. */
 export function retainedFullCanvasCount(): number {
-  return retained ? 1 : 0;
+  return retained.size;
 }
 
-/** The frame currently held, if any. For tests and for leak assertions. */
+/** The frame held for this photo, if any. For tests and for leak assertions. */
 export function retainedFullCanvasFor(p: object): HTMLCanvasElement | null {
-  return retained?.photo === p ? retained.canvas : null;
+  return retained.get(p) ?? null;
+}
+
+/**
+ * Mark `p` as the most recently used frame and evict past the bound.
+ *
+ * Every insertion and every eviction goes through here, so releasing one photo
+ * and emptying the cache cannot disagree about what the bound is.
+ */
+function admit(p: object, canvas: HTMLCanvasElement): void {
+  retained.delete(p);
+  retained.set(p, canvas);
+  while (retained.size > FULL_RES_CACHE_FRAMES) {
+    const oldest = retained.keys().next().value;
+    if (oldest === undefined) break;
+    retained.delete(oldest);
+  }
 }
 
 /**
  * Forget every held frame and every decode in flight.
  *
  * For tests, and for the between-galleries case: a gallery that has been
- * emptied should not leave the last photo's frame behind.
+ * emptied should not leave the last photographs' frames behind.
  */
 export function resetFullCanvasCache(): void {
-  retained = null;
+  retained.clear();
   inflight.clear();
 }
 
@@ -165,23 +198,29 @@ async function decodeFullFrame(file: File): Promise<HTMLCanvasElement | null> {
  * a 2048 px copy of a 12 MP photograph is a different crop.
  *
  * The returned canvas belongs to the cache, not the caller. Draw from it; do
- * not keep it, because the next photo asked for will take the slot.
+ * not keep it, because the next photographs asked for will take the slots.
  */
 export async function fullCanvasFor(p: FullResRecord & object): Promise<HTMLCanvasElement | null> {
   // A photo with no bytes keeps its pixels, so there is nothing to decode and
   // nothing to evict: what it holds is the whole of what it has.
   if (!p.file) return p.sourceCanvas ?? null;
-  if (retained?.photo === p) return retained.canvas;
+  const held = retained.get(p);
+  if (held) {
+    // Re-insert, so a hit counts as the use it is and the eviction below drops
+    // a photograph that has not been asked for rather than this one.
+    admit(p, held);
+    return held;
+  }
   const pending = inflight.get(p);
   if (pending) return pending;
 
   const promise = decodeFullFrame(p.file).then((canvas) => {
     inflight.delete(p);
     if (!canvas) return null;
-    // Install only if nothing else claimed the slot while this was in flight.
-    // Two photos decoded at once and the later one wins; the earlier caller
-    // still gets its own frame, it is just not the one left resident.
-    if (!retained || retained.photo === p) retained = { photo: p, canvas };
+    // Whoever lands last is the most recently used, which is the whole
+    // admission rule: two photos decoded at once both stay resident if there is
+    // room, and the earlier caller still gets its own frame either way.
+    admit(p, canvas);
     return canvas;
   });
   inflight.set(p, promise);
@@ -195,5 +234,5 @@ export async function fullCanvasFor(p: FullResRecord & object): Promise<HTMLCanv
  * something asks for its frame.
  */
 export function releaseFullCanvas(p: object): void {
-  if (retained?.photo === p) retained = null;
+  retained.delete(p);
 }

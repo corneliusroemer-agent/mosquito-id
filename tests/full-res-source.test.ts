@@ -11,9 +11,11 @@ import { beforeEach, describe, expect, it } from "vitest";
  * "decoding twice" and "decoding ten times at once" would happen.
  */
 import {
+  FULL_RES_CACHE_FRAMES,
   fullCanvasFor,
   releaseFullCanvas,
   retainedFullCanvasCount,
+  retainedFullCanvasFor,
   resetFullCanvasCache,
 } from "../src/app/fullResSource";
 
@@ -74,13 +76,80 @@ describe("fullCanvasFor", () => {
     expect(d.calls).toBe(1);
   });
 
-  it("holds one photo's full-resolution frame however many photos ask", async () => {
+  it("holds at most FULL_RES_CACHE_FRAMES however many photos ask", async () => {
     const d = stubDecoder();
     for (const n of ["a.jpg", "b.jpg", "c.jpg"]) await fullCanvasFor(photo(n));
     expect(d.calls).toBe(3);
     // Three decodes, but the bound that matters is retention: without this the
-    // cache is just a slower leak.
+    // cache is just a slower leak. A single slot here would be enough to hold
+    // one, so the assertion has to be against the named bound - a bound of one
+    // and a bound of two are both `>= 1`.
+    expect(retainedFullCanvasCount()).toBe(FULL_RES_CACHE_FRAMES);
+  });
+
+  it("rotates: the photo in the slot is not the only one that stays resident", async () => {
+    const d = stubDecoder();
+    const a = photo("a.jpg");
+    const b = photo("b.jpg");
+    await fullCanvasFor(a);
+    await fullCanvasFor(b);
+    // Both are held, which a write-once single slot could never do: a.jpg
+    // decoded first would own it forever and every other photo re-decoded on
+    // every call.
+    expect(retainedFullCanvasFor(a)).not.toBeNull();
+    expect(retainedFullCanvasFor(b)).not.toBeNull();
+    expect(d.calls).toBe(2);
+    // Neither decodes again while both are resident.
+    await fullCanvasFor(a);
+    await fullCanvasFor(b);
+    expect(d.calls).toBe(2);
+  });
+
+  it("does not re-decode on a revisit when two photos alternate", async () => {
+    // The alternating pattern is the one that exposes a single-slot cache: A is
+    // in the slot forever, so every B re-decodes. With two slots, A -> B -> A
+    // -> B costs two decodes however many times it runs.
+    const d = stubDecoder();
+    const a = photo("a.jpg");
+    const b = photo("b.jpg");
+    for (let i = 0; i < 4; i++) {
+      await fullCanvasFor(a);
+      await fullCanvasFor(b);
+    }
+    expect(d.calls).toBe(2);
+    expect(retainedFullCanvasCount()).toBe(FULL_RES_CACHE_FRAMES);
+  });
+
+  it("evicts the least recently used frame past the bound", async () => {
+    const d = stubDecoder();
+    const a = photo("a.jpg");
+    const b = photo("b.jpg");
+    const c = photo("c.jpg");
+    await fullCanvasFor(a);
+    await fullCanvasFor(b);
+    // Touch A, so B is the least recently used when C arrives.
+    await fullCanvasFor(a);
+    await fullCanvasFor(c);
+    expect(retainedFullCanvasCount()).toBe(FULL_RES_CACHE_FRAMES);
+    expect(retainedFullCanvasFor(b)).toBeNull();
+    // A survived the eviction, because it was the more recent of the two.
+    expect(retainedFullCanvasFor(a)).not.toBeNull();
+    // And B is decoded again rather than answered from a dropped frame.
+    const before = d.calls;
+    await fullCanvasFor(b);
+    expect(d.calls).toBe(before + 1);
+  });
+
+  it("releases one photo's frame out of a full cache, dropping only that one", async () => {
+    stubDecoder();
+    const a = photo("a.jpg");
+    const b = photo("b.jpg");
+    await fullCanvasFor(a);
+    await fullCanvasFor(b);
+    releaseFullCanvas(a);
     expect(retainedFullCanvasCount()).toBe(1);
+    expect(retainedFullCanvasFor(a)).toBeNull();
+    expect(retainedFullCanvasFor(b)).not.toBeNull();
   });
 
   it("gives a photo with no File its retained source canvas, decoding nothing", async () => {
