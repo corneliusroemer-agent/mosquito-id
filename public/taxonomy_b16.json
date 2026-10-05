@@ -1,0 +1,126 @@
+{
+ "_comment": [
+  "The taxonomy for text_embeds_b16.json, one entry per species, index-aligned with that",
+  "file's `species` array. Read by src/confidence/taxonomy.ts; see that module for why a",
+  "rank must partition the species and why a mismatch is invisible rather than fatal.",
+  "Every rank above genus is a SUM over its species, so a rare species cannot split its",
+  "genus across rows. Kept beside the head rather than inside it: the head is a fitted",
+  "artefact, and editing it to add 16 labels would bury that under a formatting diff."
+ ],
+ "head": "text_embeds_b16.json",
+ "engine": "webgpu-b16",
+ "taxonomy": [
+  {
+   "species": "Aedes albopictus",
+   "genus": "Aedes",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Aedes aegypti",
+   "genus": "Aedes",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Aedes japonicus",
+   "genus": "Aedes",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Aedes koreicus",
+   "genus": "Aedes",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Aedes vexans",
+   "genus": "Aedes",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Aedes geniculatus",
+   "genus": "Aedes",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Aedes cinereus",
+   "genus": "Aedes",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Culex pipiens",
+   "genus": "Culex",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Culex torrentium",
+   "genus": "Culex",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Culex quinquefasciatus",
+   "genus": "Culex",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Culiseta annulata",
+   "genus": "Culiseta",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Culiseta morsitans",
+   "genus": "Culiseta",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Culiseta longiareolata",
+   "genus": "Culiseta",
+   "subfamily": "Culicinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Anopheles maculipennis",
+   "genus": "Anopheles",
+   "subfamily": "Anophelinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Anopheles claviger",
+   "genus": "Anopheles",
+   "subfamily": "Anophelinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  },
+  {
+   "species": "Anopheles plumbeus",
+   "genus": "Anopheles",
+   "subfamily": "Anophelinae",
+   "family": "Culicidae",
+   "order": "Diptera"
+  }
+ ]
+}
