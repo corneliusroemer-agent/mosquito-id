@@ -38,13 +38,13 @@ import { contentFingerprint } from "./contentHash";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
-import { downloadCSV, renderResultsTable } from "./resultsTable";
+import { downloadCSV, renderResultsTable as _renderResultsTable } from "./resultsTable";
 import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
 import { renderBuildLink, stampBuildSha } from "./buildSha";
 import { renderFooterTiming } from "./footerTiming";
-import { updatePooling } from "./poolingPanel";
+import { updatePooling as _updatePooling } from "./poolingPanel";
 import { badge, canView, checkLabel, contributesToPool, photoRef,
          removeLabel, SelectedScrollGuard, shiftIncluded,
          shiftIncludedForPrepend, shiftSelected, validateIncluded,
@@ -67,6 +67,30 @@ import { classifyCanvasServer as _classifyCanvasServer,
          classifyViewServer as _classifyViewServer, genusTotals as _genusTotals,
          posteriorSummary as _posteriorSummary, round4, serverView as _serverView,
          verdictSummary as _verdictSummary, viewsFor as _viewsFor } from "./views";
+import { FULL_RES_MIN_EDGE, armLayoutCounters, disarmLayoutCounters,
+         noteClassifierCall, noteDetectorCall, noteServerViewCall,
+         registerFullResSource, registerOrtSessionSource, resetCounters,
+         snapshot, withRenderScope } from "./perfCounters";
+
+// The four render entry points, wrapped so a layout-forcing read inside one is
+// attributed to that render rather than to the page. Wrapping the ENTRY POINTS
+// rather than the individual reads is what makes the count mean anything: a
+// counter placed at a call site reports the calls a caller made, and a caller
+// added later would not be counted at all.
+//
+// These are thin wrappers and nothing else calls the unwrapped functions, so
+// "the app rendered" and "a render scope ran" are the same statement.
+//
+// They are `const` arrow functions rather than declarations on purpose: they are
+// bound into the `__mosqAsync` seam object near the top of this file, and a
+// `const` referenced from an object literal at module-evaluation time is a
+// temporal-dead-zone crash where a hoisted declaration would have worked.
+const renderResultsTable = (previews) =>
+  withRenderScope("resultsTable", () => _renderResultsTable(previews));
+const updatePooling = (head, photos, included) =>
+  withRenderScope("pooling", () => _updatePooling(head, photos, included));
+const renderThumbnails = () => withRenderScope("thumbnails", _renderThumbnails);
+const renderActivePhoto = () => withRenderScope("activePhoto", _renderActivePhoto);
 
 // The floors moved to src/confidence/types.ts with their derivations. These four
 // names are kept so the app reads the same as before, and nothing else reads
@@ -93,9 +117,18 @@ const viewsFor = (p, cropCv, cropBox) => _viewsFor(p, cropCv, cropBox, includeWh
 const serverView = (data) => _serverView(data, EMB, serverViewScale());
 const classifyViewLocal = (canvas, engine) =>
   _classifyViewLocal(canvas, engine, EMB, clipEmbed, localViewScale());
-const classifyViewServer = (p, cropBox) =>
-  _classifyViewServer(p, cropBox, EMB, serverViewScale(), sendLog);
-const classifyCanvasServer = (p, cropBox) => _classifyCanvasServer(p, cropBox, sendLog);
+// Each of these spends a `/api/predict` round trip doing the work one ONNX call
+// does locally, so they are counted as classifier calls in their own right: a
+// spec that asserts "N photos cost at most 2N classifier calls" means the same
+// thing whichever engine ran them.
+const classifyViewServer = (p, cropBox) => {
+  noteServerViewCall();
+  return _classifyViewServer(p, cropBox, EMB, serverViewScale(), sendLog);
+};
+const classifyCanvasServer = (p, cropBox) => {
+  noteServerViewCall();
+  return _classifyCanvasServer(p, cropBox, sendLog);
+};
 const posteriorSummary = (fused) => _posteriorSummary(fused, EMB);
 const verdictSummary = (p) => _verdictSummary(p);
 const genusTotals = (fused, topIdx) => _genusTotals(fused, topIdx, EMB);
@@ -218,6 +251,43 @@ let EMB = null;
 let detEP = "wasm";
 let clipEP = "wasm";
 window.modelsReady = false;
+
+// ---- Live gauges for the structural counters ----
+//
+// Registered here rather than read inside `perfCounters.ts`, because both are
+// statements about app state and the rule for what counts belongs to whoever owns
+// the state. Both are pure reads: they allocate nothing and mutate nothing, so
+// reading a gauge does not change what the next one says.
+
+// A frame is full-resolution when it is larger than any panel paints. On the
+// batch path that is `fullCanvas`, drawn at the decoded bitmap's own size; the
+// detector's letterbox intermediate and a thumbnail are display copies and are
+// deliberately not counted.
+function liveFullResFrameCount() {
+  let n = 0;
+  for (const p of previews) {
+    const cv = p && p.fullCanvas;
+    if (cv && Math.max(cv.width, cv.height) > FULL_RES_MIN_EDGE) n++;
+  }
+  return n;
+}
+
+// Every session the app can still reach, de-duplicated by identity: each entry
+// of the per-engine cache, plus the two bound singletons. The bound `sessClip`
+// is normally also in `clipSessions`, and counting it twice would make a release
+// that emptied the cache but left the binding look like it freed nothing.
+function liveOrtSessionCount() {
+  const seen = new Set();
+  for (const entry of Object.values(clipSessions)) {
+    if (entry && entry.sess) seen.add(entry.sess);
+  }
+  if (sessClip) seen.add(sessClip);
+  if (sessDet) seen.add(sessDet);
+  return seen.size;
+}
+
+registerFullResSource(liveFullResFrameCount);
+registerOrtSessionSource(liveOrtSessionCount);
 
 // Application State
 let previews = [];
@@ -365,7 +435,21 @@ const ASYNC = (window.__mosqAsync = {
   renderResultsTable: () => renderResultsTable(previews),
   // The CSV is the other way a claim leaves the machine, and it is a separate
   // function from the table it mirrors, so a test has to be able to call it.
-  downloadCSV: () => downloadCSV(previews, sendLog)
+  downloadCSV: () => downloadCSV(previews, sendLog),
+  /**
+   * The structural counters (see `perfCounters.ts`).
+   *
+   * `snapshot()` reads the live gauges fresh, so a spec can poll it without the
+   * numbers it gets being a moment stale. `armLayoutCounters` is the ONLY way the
+   * layout probe gets installed - nothing in the app arms it, so a page a user
+   * loads carries no patched getter and pays nothing for the counting.
+   */
+  perf: {
+    snapshot,
+    resetCounters,
+    armLayoutCounters,
+    disarmLayoutCounters,
+  }
 });
 (function countFrames() {
   requestAnimationFrame(() => { ASYNC.frames++; countFrames(); });
@@ -967,6 +1051,11 @@ async function clipEmbed(sourceCanvas, preScaled) {
   // 640 px canvas was a single non-anti-aliased reduction, and halving from it
   // would only continue that.
   const src = !halvingEnabled() && preScaled && isUsableIntermediate(preScaled, sourceCanvas, CLIP_SIZE) ? preScaled : sourceCanvas;
+  // Counted here rather than at the call sites because this is the ONE function
+  // every classifier run goes through: the batch path calls it directly, and the
+  // view path reaches it as `classifyViewLocal`'s `embed`. A counter on either
+  // caller would miss the other.
+  noteClassifierCall();
   return _embedCanvas(src, sessClip, EMB, (data, dims) => new ort.Tensor("float32", data, dims));
 }
 
@@ -1107,6 +1196,7 @@ async function classifyImage(imgBitmap, filename) {
   const tDet0 = performance.now();
   const lb = letterbox(fullCv);
   const inName = sessDet.inputNames[0];
+  noteDetectorCall();
   const detRes = await sessDet.run({ [inName]: lb.tensor });
   const dets = decodeDets(detRes[Object.keys(detRes)[0]], lb.r, lb.dx, lb.dy);
   let best = selectDetection(dets);
@@ -1449,6 +1539,7 @@ async function processFiles(fileList) {
       if (engine === "server-gpu") {
         const formData = new FormData();
         formData.append("file", slot.file);
+        noteServerViewCall();
         const res = await fetch("/api/predict", { method: "POST", body: formData });
         if (!res.ok) throw new Error("Server inference error " + res.status);
         const data = await res.json();
@@ -1493,6 +1584,7 @@ async function processFiles(fileList) {
           const fd2 = new FormData();
           fd2.append("file", slot.file);
           fd2.append("crop_box", JSON.stringify([0, 0, data.fullWidth, data.fullHeight]));
+          noteServerViewCall();
           const res2 = await fetch("/api/predict", { method: "POST", body: fd2 });
           if (!res2.ok) throw new Error("Server inference error " + res2.status);
           const wholeView = serverView(await res2.json());
@@ -1747,7 +1839,7 @@ function buildTile() {
   return node;
 }
 
-function renderThumbnails() {
+function _renderThumbnails() {
   const strip = document.getElementById("thumbnail-strip");
   updateStripActions();
   // With the strip's own actions, and for the same reason: whether the engine
@@ -2141,7 +2233,7 @@ function emptyPanelMessage(p) {
   return `${ref} could not be displayed`;
 }
 
-function renderActivePhoto() {
+function _renderActivePhoto() {
   if (!previews.length || !previews[selectedIndex]) return;
   const p = previews[selectedIndex];
 
@@ -2864,6 +2956,19 @@ async function releaseIdleMemory() {
     unreleased: freed.failedSessions,
     deviceDestroyed: freed.deviceDestroyed,
   });
+  // One console line, only under the existing `?log=` diagnostics flag, because a
+  // release is the one moment every counter in this file is meaningful at once:
+  // it is where "the tab has been working for an hour" becomes readable. It is a
+  // log line and not a panel, so it costs a shipped page nothing.
+  if (new URLSearchParams(location.search).has("log")) {
+    const s = snapshot();
+    console.info(
+      `perf: ${s.classifierCalls} classifier, ${s.detectorCalls} detector, ` +
+      `${s.serverViewCalls} server view calls; ${s.forcedLayouts} forced layouts ` +
+      `(worst render ${s.worstRenderLayouts}); ${s.fullResFrames} full-res frames, ` +
+      `${s.ortSessions} ORT sessions live`,
+    );
+  }
 }
 
 async function restoreIdleMemory() {
