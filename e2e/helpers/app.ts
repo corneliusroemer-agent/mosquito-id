@@ -266,6 +266,17 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
       const hue = (i * 47) % 360;
       const full = makeCanvas(2400, 1800, hue, spec.name.slice(0, 6));
       const crop = makeCanvas(900, 900, (hue + 20) % 360, spec.name.slice(0, 4));
+      // The DISPLAY canvas is a separate, smaller canvas from the frame, which is
+      // the shape the app's own intake produces: displayCanvasFrom reduces a
+      // 12 MP frame to 2048 px on the long edge, and the frame is then released.
+      // (No backticks in these comments: this whole body is a template literal.)
+      //
+      // Aliasing them - making the display canvas the very same object as the
+      // frame - quietly invalidates every test that asks "does this photo hold
+      // its frame?". An uncropped photo's crop canvas is then the same object as
+      // its whole frame, so a check on canvas identity accidentally agrees with
+      // the truth and the test passes on the bug it is meant to catch.
+      const display = makeCanvas(2048, 1536, hue, spec.name.slice(0, 6));
 
       const sname = spec.species ?? (i % 3 === 0 ? "Aedes aegypti" : "Culex pipiens");
       const sidx = emb.species.indexOf(sname);
@@ -321,7 +332,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         // dimensions and its retained pixels the way the app's own intake does.
         // sourceCanvas rather than fullCanvas: these have no File, so there
         // is nothing to re-decode from and the frame is what they hold.
-        displayCanvas: full,
+        displayCanvas: display,
         fullW: 2400,
         fullH: 1800,
         sourceCanvas: full,
@@ -329,11 +340,11 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         // that box is what decides whether the photo has two views or one, so a
         // fixture with a crop canvas but no box cannot tell an uncropped photo
         // from a cropped one, and the whole-frame tests pass for the wrong
-        // reason. An uncropped photo has no box AND shares the display canvas,
+        // reason. An uncropped photo has no box and shows the display canvas,
         // which is what the app's own no-detection case looks like.
-        cropCanvas: cropped ? crop : full,
+        cropCanvas: cropped ? crop : display,
         cropBox: cropped ? [750, 450, 1650, 1350] : null,
-        contextCanvas: full,
+        contextCanvas: display,
         detail,
         scores,
         logits,
