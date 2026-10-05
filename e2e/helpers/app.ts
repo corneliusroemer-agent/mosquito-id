@@ -29,6 +29,8 @@ export interface MosqAsync {
   embeds: any;
   verdictFrom: (spP: number[], agreement: unknown, adP: number[], nuP?: number[]) => any;
   verdictSentence: (v: any) => string;
+  /** The classifier input tensor for a canvas; `halving` overrides the `?resize=` flag. */
+  clipTensor: (cv: HTMLCanvasElement, halving?: boolean) => Float32Array;
   selectPhoto: (i: number) => void;
   processFiles: (files: FileList | File[]) => Promise<void>;
   deletePhoto: (i: number) => void;
