@@ -145,6 +145,34 @@ re-run would empty.
 change handler and `loadWebGPUModels` call it too, since neither renders the
 strip.
 
+## The selector is blocked for the length of a pass
+
+A batch pins its engine per photo — `inferSlot` reads `currentEngine` once and
+threads it through — so a switch landing mid-pass left the photos already scored
+on the old engine and the ones behind them on the new one. Measured before this
+was fixed: `scoredBy = ["webgpu-fp16", "webgpu-culico", "webgpu-culico"]`, with
+nothing on the page saying so. The re-run button below is what removes that
+state afterwards; it says nothing about it while it exists.
+
+So the engine `<select>` is `disabled` for the whole pass, with the reason in its
+`title` and its accessible name — the same rule and the same shape as the
+button's `REPROCESS_BLOCKED_BATCH`. Deferring the switch to the end of the pass
+instead would need a queue for it and a way to show a choice that has not taken
+effect yet, and neither is a state this app has anywhere else.
+
+The `change` handler is guarded as well as the control, because `disabled` is a
+statement about the `<select>` and not about the batch: a `change` dispatched
+from anywhere else would still reach it. The handler puts the value back and
+logs `engine_switch_blocked`, so the dropdown never names an engine that is not
+the one scoring. `e2e/tier1/engine-switch-mid-batch.spec.ts` covers both halves.
+
+`docs/THUMBNAIL-STRIP-SPEC.md` R4.4 keeps the strip's delete button live
+mid-inference, and it is the one control here that stays live: mid-batch
+deletion is safe because `commitBatchSlot` guards on the photo's revision and
+identity. Switching engines is not the same kind of action — it changes what
+every later photo is scored by — so it is blocked rather than left to land
+wherever it lands.
+
 ## Where the engine is pinned
 
 Four places read `currentEngine` during a computation, and all four now read it
