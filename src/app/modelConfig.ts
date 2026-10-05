@@ -243,6 +243,16 @@ export const FP16_AVAILABLE = true;
 export interface ModelConfig {
   path: string;
   embedsPath: string;
+  /**
+   * The head's taxonomy, beside the head rather than inside it.
+   *
+   * The head is a fitted artefact and adding 16 labels to it would bury the
+   * change under a whole-file formatting diff, so the tree ships next to it and
+   * is attached to the loaded head at load time (`taxonomy.ts`). Absent means
+   * the first-word genus rule, which is what every head shipped before this and
+   * is exactly right for a binomial.
+   */
+  taxonomyPath?: string;
   label: string;
   name: string;
   size: number;
@@ -299,6 +309,7 @@ export const WEBGPU_MODELS: Record<string, ModelConfig> = {
   "webgpu-b16": {
     path: "bioclip_visual_b16_fp16.onnx",
     embedsPath: "text_embeds_b16.json",
+    taxonomyPath: "taxonomy_b16.json",
     label: "BioCLIP B/16 (FP16 · 172 MB)",
     name: "BioCLIP B/16 FP16",
     size: 172725427,

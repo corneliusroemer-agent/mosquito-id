@@ -41,6 +41,12 @@ export interface MosqAsync {
   /** How many times a lazy restore has been entered. Tier 1 aborts the weights
    *  fetch, so "the restore was reached" is the only thing observable. */
   idleRestoreAttempts: number;
+  /**
+   * The app's own `GPUDevice`, as `loadWebGPUModels` installs it. Tier 1 aborts
+   * every model fetch so that load never completes; writing this installs one so
+   * a spec can watch the release destroy it and clear `ort.env.webgpu.device`.
+   */
+  appOwnedDevice: { destroy(): void } | null;
   /** The engine whose weights are currently bound, or null when none are. */
   loadedClipEngine: string | null;
   /** The app's "an engine is loaded and usable" flag. */

@@ -103,7 +103,9 @@ test.describe("toggling the whole-frame view", () => {
     await installFakeClassifier(page);
     await settle(page);
 
-    await expect(page.locator("#chk-whole-frame")).toBeChecked();
+    // Crop-only is the default, so this pass is the one that turns the whole
+    // frame ON - two views per photo, and therefore the heavier of the two.
+    await expect(page.locator("#chk-whole-frame")).not.toBeChecked();
 
     // Frames presented while the toggle ran, counted by an observer inside the
     // page that is independent of the app's own counter. A frozen main thread
@@ -120,7 +122,7 @@ test.describe("toggling the whole-frame view", () => {
       const before = n;
 
       const box = document.getElementById("chk-whole-frame") as HTMLInputElement;
-      box.checked = false;
+      box.checked = true;
       box.dispatchEvent(new Event("change", { bubbles: true }));
 
       // Bounded, so a regression fails instead of hanging the suite. The budget
@@ -154,14 +156,13 @@ test.describe("toggling the whole-frame view", () => {
     expect(after.inFlight, "a classification was still in flight after the pass").toBe(0);
     expect(after.pending, "a photo was left pending").toBe(0);
     expect(after.errors, "a photo failed to re-classify").toBe(0);
-    // Crop-only is one view per photo, so every photo ends up agreeing with the
-    // setting the checkbox now shows.
-    expect(after.viewsTotal.every((v: number) => v === 1)).toBe(true);
+    // Both views now, so every photo agrees with the setting the checkbox shows.
+    expect(after.viewsTotal.every((v: number) => v === 2)).toBe(true);
 
     expect(errors(page)).toHaveLength(0);
   });
 
-  test("toggling back on settles too, and re-runs both views", async ({ page }) => {
+  test("toggling back off settles too, and drops back to one view", async ({ page }) => {
     // The other direction. The report was not symmetric in its symptom - one way
     // froze and the other crashed - but it was one mechanism, and a fix that only
     // holds in one direction is not a fix.
@@ -170,19 +171,19 @@ test.describe("toggling the whole-frame view", () => {
     await installFakeClassifier(page);
     await settle(page);
 
-    await toggleAndSettle(page, false);
-    const off = await classifierState(page);
-
     await toggleAndSettle(page, true);
     const on = await classifierState(page);
 
-    expect(off.peakConcurrency).toBe(1);
+    await toggleAndSettle(page, false);
+    const off = await classifierState(page);
+
     expect(on.peakConcurrency).toBe(1);
-    expect(on.pending).toBe(0);
-    expect(on.errors).toBe(0);
-    expect(on.viewsTotal.every((v: number) => v === 2)).toBe(true);
-    // The second pass is more work than the first, so it must have run.
-    expect(on.started).toBeGreaterThan(off.started);
+    expect(off.peakConcurrency).toBe(1);
+    expect(off.pending).toBe(0);
+    expect(off.errors).toBe(0);
+    expect(off.viewsTotal.every((v: number) => v === 1)).toBe(true);
+    // The second pass is less work than the first, so it must have run too.
+    expect(off.started).toBeGreaterThan(0);
 
     expect(errors(page)).toHaveLength(0);
   });
@@ -213,9 +214,10 @@ test.describe("toggling the whole-frame view", () => {
         box.checked = v;
         box.dispatchEvent(new Event("change", { bubbles: true }));
       };
-      flip(false);
+      flip(true);
       // Inside the pass, while photos are still being re-classified.
       await new Promise((r) => setTimeout(r, 2));
+      flip(false);
       flip(true);
       flip(false);
 
@@ -263,16 +265,29 @@ test.describe("toggling the whole-frame view", () => {
 
   test("a stored value that is neither true nor false boots as the default", async ({ page }) => {
     // A hand-edited or stale key must not be able to produce a third state the
-    // app has no handling for. Anything that is not exactly "false" is the
-    // default, which is the setting every existing user gets.
-    for (const raw of ["", "1", "0", "TRUE", "maybe"]) {
+    // app has no handling for. Anything that is not exactly "true" is the
+    // default, which is crop-only.
+    for (const raw of ["", "1", "0", "TRUE", "maybe", "false "]) {
       const p = await page.context().newPage();
       await p.addInitScript((v) => {
         window.localStorage.setItem("mosquito_include_whole_frame", v);
       }, raw);
       await boot(p);
-      await expect(p.locator("#chk-whole-frame")).toBeChecked();
+      await expect(p.locator("#chk-whole-frame")).not.toBeChecked();
       await p.close();
     }
+  });
+
+  test("a user who explicitly asked for the whole frame keeps it across a reload", async ({ page }) => {
+    // The asymmetry that makes changing a default safe: an explicit "true" is
+    // honoured, so the change costs nobody who chose. Needs photos, because the
+    // control only renders once there is a gallery to act on.
+    await boot(page);
+    await populate(page, TEN.slice(0, 2));
+    await installFakeClassifier(page);
+    await settle(page);
+    await toggleAndSettle(page, true);
+    await page.reload();
+    await expect(page.locator("#chk-whole-frame")).toBeChecked();
   });
 });

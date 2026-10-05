@@ -6,9 +6,38 @@
 // module-level global, which is the point of the extraction: a test can build a
 // head out of the real label list and synthetic embeddings, or out of a
 // three-species fixture, without a 660 KB file or a 1.26 GB model.
+/**
+ * One species' place in the tree, shipped alongside the head.
+ *
+ * Read in parallel with `Head.species`, so entry `i` describes species `i`;
+ * `assertPartition` checks that they agree in length and in name rather than
+ * trusting the file, because a mismatch is invisible — it files one species
+ * under two genera and the numbers still sum to 1.
+ *
+ * Every field but `species` is optional, and a head that omits the taxonomy
+ * entirely is fully supported: genus falls back to the first word of the label,
+ * which is exactly right for a binomial and is what the app has always done.
+ */
+export interface TaxonomyEntry {
+  /** The species label this entry describes. Checked against `Head.species`. */
+  species?: string;
+  genus?: string;
+  subfamily?: string;
+  family?: string;
+  order?: string;
+}
+
 export interface Head {
   /** Species labels, in the order `species_emb` is laid out in. */
   species: string[];
+  /**
+   * The tree, one entry per species, index-aligned with `species`.
+   *
+   * Absent on every head that ships today, so nothing changes until a head
+   * carries one. See `taxonomyEnabled` for the flag and `taxonomy.ts` for the
+   * roll-up.
+   */
+  taxonomy?: TaxonomyEntry[];
   /** Length of one embedding. Every embedding in the head is this long. */
   dim: number;
   /**

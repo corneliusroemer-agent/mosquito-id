@@ -75,6 +75,10 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
   let hiddenAt: number | null = null;
   let isReleased = false;
   let inFlight: Promise<void> = Promise.resolve();
+  // How many releases/restores are queued or running. `ensure` waits on this
+  // rather than reading `isReleased`, which is only true once a release has
+  // FINISHED.
+  let pending = 0;
   // Bumped on every transition. Work captures the generation it was started for
   // and returns without touching anything if it no longer matches.
   let generation = 0;
@@ -115,10 +119,33 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
       const waited = hiddenAt === null ? delayMs : Date.now() - hiddenAt;
       hiddenAt = null;
       const gen = generationOf();
-      inFlight = inFlight.then(() => doRelease(waited)).then(() => {
-        if (gen === generation) generation++;
-      });
+      enqueue(() => doRelease(waited), gen);
     }, delayMs);
+  }
+
+  /**
+   * Serialise every release and restore through one chain.
+   *
+   * The generation counter alone is not enough. It guards the STATE - whether
+   * the tab counts as released - but `release` and `restore` mutate the app's
+   * own state as they run: a release that is still awaiting its sessions can
+   * null out `sessClip` after a restore has already rebuilt it. Once `release`
+   * became async (awaiting `InferenceSession.release()`, which is where the
+   * weight buffers are actually destroyed) that window opened, so all three
+   * entry points queue here instead.
+   */
+  function enqueue(work: () => Promise<void>, gen: number): Promise<void> {
+    pending++;
+    const run = inFlight.then(work).then(() => {
+      if (gen === generation) generation++;
+    });
+    // Swallow a rejection on the chain itself so one failed link cannot poison
+    // every later one; `work` already contains its own error handling.
+    inFlight = run.catch(() => {});
+    void inFlight.finally(() => {
+      pending--;
+    });
+    return run;
   }
 
   return {
@@ -139,23 +166,30 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
       return isReleased;
     },
     async ensure(): Promise<void> {
+      // Wait for a release that is already under way rather than reading
+      // `isReleased` and finding it still false. The flag is set at the END of
+      // the release, so an inference arriving mid-release used to see "not
+      // released", skip the restore, and then run against sessions the release
+      // was in the middle of taking away.
+      if (pending > 0) await inFlight;
       if (!isReleased) return;
       const gen = generationOf();
       isReleased = false;
-      try {
-        await opts.restore();
-      } catch {
-        // Left released, so the next `ensure` tries again rather than the app
-        // running inference against sessions that are not there.
-        isReleased = true;
-      }
-      if (gen !== generation) generation++;
+      return enqueue(async () => {
+        try {
+          await opts.restore();
+        } catch {
+          // Left released, so the next `ensure` tries again rather than the app
+          // running inference against sessions that are not there.
+          isReleased = true;
+        }
+      }, gen);
     },
     async releaseNow(): Promise<void> {
       hiddenAt = null;
       generation++;
       cancelTimer();
-      await doRelease(0);
+      return enqueue(() => doRelease(0), generationOf());
     },
     dispose(): void {
       hiddenAt = null;
