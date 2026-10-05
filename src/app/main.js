@@ -2190,7 +2190,7 @@ function renderActivePhoto() {
     contextImg.style.display = "block";
     contextImg.style.width = "100%";
     contextImg.style.height = "100%";
-    contextImg.style.objectFit = "cover";
+    contextImg.style.objectFit = "contain";
     cropEmpty.style.display = "none";
 
     // Draw where the crop sits within the context region
