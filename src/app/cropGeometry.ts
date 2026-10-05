@@ -65,9 +65,16 @@ export function boxInSurface(box: Box, img: CanvasLike, mapping: Mapping): BoxPe
 // constraint has to be applied on the far side of it, because a square in
 // surface fractions is not a square in photo pixels once the two aspects
 // differ.
+//
+// `boxInSurface` goes image -> surface as `(imageFraction - o) / k`, so this
+// goes surface -> image as `k * surfaceFraction + o` - the other way round, and
+// in the other direction. Writing `(pt - o) / k` here instead is a plausible
+// typo that compiles, type-checks and passes every test that does not compare
+// the two against each other, which is why `squareCropCutsThePixelsUnderTheCursor`
+// and the round-trip test both exist.
 export function surfacePointToFrame(pt: [number, number], img: CanvasLike, mapping: Mapping): [number, number] {
   const { kx, ox, ky, oy } = mapping;
-  return [((pt[0] - ox) / kx) * img.width, ((pt[1] - oy) / ky) * img.height];
+  return [(kx * pt[0] + ox) * img.width, (ky * pt[1] + oy) * img.height];
 }
 
 /**
