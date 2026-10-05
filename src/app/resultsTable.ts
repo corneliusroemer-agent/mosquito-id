@@ -47,9 +47,17 @@ export function claimFor(p: ClassifiedPhoto, topSpec: [string, number] | (string
   return "Not confident";
 }
 
-/** One CSV field, quoted, with embedded quotes doubled (RFC 4180 section 2.7). */
+/**
+ * One CSV field, quoted, with embedded quotes doubled (RFC 4180 section 2.7).
+ *
+ * A text starting with = + - @ (or tab/CR) is prefixed with an apostrophe so a
+ * spreadsheet reads it as text rather than evaluating it as a formula; file and
+ * zip-entry names are user-controlled. A lone "-" is the placeholder and stays.
+ */
 export function csvField(value: unknown): string {
-  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+  let t = String(value ?? "");
+  if (t !== "-" && /^[=+\-@\t\r]/.test(t)) t = `'${t}`;
+  return `"${t.replace(/"/g, '""')}"`;
 }
 
 // ---- Results Table & CSV Export ----

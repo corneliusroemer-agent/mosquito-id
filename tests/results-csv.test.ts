@@ -43,6 +43,14 @@ describe("CSV quoting follows RFC 4180", () => {
     expect(csvField("a,b")).toBe('"a,b"');
   });
 
+  it("a name that would run as a spreadsheet formula is written as text", () => {
+    expect(csvField("=HYPERLINK(\"http://x\")")).toBe('"\'=HYPERLINK(""http://x"")"');
+    expect(csvField("+1")).toBe("\"'+1\"");
+    expect(csvField("@a")).toBe("\"'@a\"");
+    expect(csvField("-")).toBe('"-"');
+    expect(csvField("a=b")).toBe('"a=b"');
+  });
+
   it("a file name with a quote, a comma and a newline stays one record", () => {
     const csv = buildCsv([photo({ name: 'a "b", c\nd.jpg' })]);
     expect(csv).toContain('"a ""b"", c\nd.jpg"');
