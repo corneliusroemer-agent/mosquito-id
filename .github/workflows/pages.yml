@@ -48,10 +48,16 @@ jobs:
     #
     # A skipped job still leaves this workflow green, so read the job list, not the
     # run's conclusion, to tell whether a deploy happened.
+    #
+    # The `head_repository.full_name` clause is defence in depth, not the fix. The
+    # `event == 'push'` clause above is what closes the hole; this one independently
+    # refuses any run whose code came from somewhere other than this repository, so a
+    # future edit that loosens the event check does not reopen the hole on its own.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.conclusion == 'success')
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     # `GITHUB_SHA` is the default branch tip under `workflow_run`, not the commit CI
     # verified, so both the checkout and the SHA Vite inlines are pinned to the
     # triggering run's head. Without this a second merge landing while CI is still
