@@ -77,6 +77,14 @@ export interface ViewResult {
   spP: number[];
   /** Combined posterior of every nuisance class for this view. */
   nuTotal: number;
+  /**
+   * Per-class nuisance posteriors, or absent if this view scored none.
+   *
+   * Carried alongside `nuTotal` rather than instead of it, because the
+   * non-mosquito gate reports WHICH nuisance class it matched. Collapsing to a
+   * single number makes every nuisance verdict name class 0.
+   */
+  nuP?: number[];
   /** Per-class adjacent posteriors, or absent if this view scored none. */
   adP?: number[];
   /**

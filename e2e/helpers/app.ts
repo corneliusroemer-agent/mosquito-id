@@ -26,9 +26,30 @@ export interface MosqAsync {
   clipSessions: Record<string, { sess: unknown; ep: string }>;
   selectedIndex: number;
   includedIndices: Set<number>;
+  /**
+   * The idle-release controller (#36). A tier-1 spec drives a release through
+   * `releaseNow()` rather than faking `document.visibilityState` and waiting out
+   * the 60 s grace period; the grace period itself is unit-tested.
+   */
+  idleRelease: {
+    released(): boolean;
+    releaseNow(): Promise<void>;
+    ensure(): Promise<void>;
+    hidden(): void;
+    visible(): void;
+  };
+  /** How many times a lazy restore has been entered. Tier 1 aborts the weights
+   *  fetch, so "the restore was reached" is the only thing observable. */
+  idleRestoreAttempts: number;
+  /** The engine whose weights are currently bound, or null when none are. */
+  loadedClipEngine: string | null;
+  /** The app's "an engine is loaded and usable" flag. */
+  modelsReady: boolean;
   embeds: any;
   verdictFrom: (spP: number[], agreement: unknown, adP: number[], nuP?: number[]) => any;
   verdictSentence: (v: any) => string;
+  /** The classifier input tensor for a canvas; `halving` overrides the `?resize=` flag. */
+  clipTensor: (cv: HTMLCanvasElement, halving?: boolean) => Float32Array;
   selectPhoto: (i: number) => void;
   processFiles: (files: FileList | File[]) => Promise<void>;
   deletePhoto: (i: number) => void;
@@ -50,6 +71,12 @@ declare global {
     __mosqShiftLog?: string[];
     /** The app's own "engine settled" flag. False once a load has failed. */
     modelsReady?: boolean;
+    /** `getBoundingClientRect` calls since the last reset. Set by a probe. */
+    __rectReads?: number;
+    /** Whether that probe is already installed on `Element.prototype`. */
+    __rectPatched?: boolean;
+    /** `resize` events the page has been told about. See `__rectPatched`. */
+    __resizes?: number;
   }
 }
 

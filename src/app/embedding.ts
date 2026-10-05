@@ -22,11 +22,36 @@
 import { CLIP_MEAN, CLIP_SIZE, CLIP_STD } from "./modelConfig";
 import type { OrtTensor } from "./types";
 import type { Head } from "../confidence/types";
+import { halvingEnabled } from "./resizeMode";
 
 /** A classifier session, as much of one as this module uses. */
 export interface ClassifierSession {
   readonly inputNames: readonly string[];
   run(feeds: Record<string, unknown>): Promise<Record<string, unknown>>;
+}
+
+/**
+ * `src` halved in each axis, repeatedly, until one more halving would take it
+ * below `dw` x `dh`; returns `src` itself when it is already within 2x.
+ *
+ * Each step is a 2:1 bilinear read, which averages exactly the 2x2 block it
+ * covers, so the chain is a box filter and the final non-integer step to
+ * `dw` x `dh` never skips more than 2x.
+ */
+export function halveToward(src: HTMLCanvasElement, dw: number, dh: number): HTMLCanvasElement {
+  let cur = src;
+  while (cur.width >= 2 * dw && cur.height >= 2 * dh) {
+    const next = document.createElement("canvas");
+    next.width = Math.max(dw, cur.width >> 1);
+    next.height = Math.max(dh, cur.height >> 1);
+    const nx = next.getContext("2d", { willReadFrequently: true });
+    if (!nx) throw new Error("Could not get a 2d context for a resize step");
+    nx.drawImage(cur, 0, 0, cur.width, cur.height, 0, 0, next.width, next.height);
+    // Release the pixels of an intermediate as soon as it has been read.
+    if (cur !== src) { cur.width = 0; cur.height = 0; }
+    cur = next;
+  }
+  return cur;
 }
 
 /**
@@ -37,7 +62,7 @@ export interface ClassifierSession {
  * with the crop's subject centred, which is what keeps a tight detector box from
  * being re-cropped into nothing here.
  */
-export function clipTensor(sourceCanvas: HTMLCanvasElement): Float32Array {
+export function clipTensor(sourceCanvas: HTMLCanvasElement, halving: boolean = halvingEnabled()): Float32Array {
   const cw = sourceCanvas.width;
   const ch = sourceCanvas.height;
   const s = CLIP_SIZE / Math.min(cw, ch);
@@ -49,7 +74,10 @@ export function clipTensor(sourceCanvas: HTMLCanvasElement): Float32Array {
   cv.height = dh;
   const cx = cv.getContext("2d", { willReadFrequently: true });
   if (!cx) throw new Error("Could not get a 2d context to read the source canvas");
-  cx.drawImage(sourceCanvas, 0, 0, cw, ch, 0, 0, dw, dh);
+  // Flag off: the one direct read, exactly as it always was.
+  const from = halving ? halveToward(sourceCanvas, dw, dh) : sourceCanvas;
+  cx.drawImage(from, 0, 0, from.width, from.height, 0, 0, dw, dh);
+  if (from !== sourceCanvas) { from.width = 0; from.height = 0; }
 
   const l = (dw - CLIP_SIZE) >> 1;
   const t = (dh - CLIP_SIZE) >> 1;

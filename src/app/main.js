@@ -33,6 +33,7 @@ import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTO
 import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
+import { contentFingerprint } from "./contentHash";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
@@ -44,13 +45,18 @@ import { renderBuildLink, stampBuildSha } from "./buildSha";
 import { renderFooterTiming } from "./footerTiming";
 import { updatePooling } from "./poolingPanel";
 import { badge, canView, checkLabel, contributesToPool, photoRef,
-         removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
-         validateIncluded, viewLabel } from "./thumbnailStrip";
+         removeLabel, SelectedScrollGuard, shiftIncluded,
+         shiftIncludedForPrepend, shiftSelected, validateIncluded,
+         viewLabel } from "./thumbnailStrip";
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
-import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
-import { embedCanvas as _embedCanvas } from "./embedding";
+import { keyEventBelongsElsewhere, describeKeyTarget } from "./keyNav";
+import { readPref, writePref } from "./safeStorage";
+import { createIdleRelease } from "./idleRelease";
+import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotoCount } from "./reprocess";
+import { clipTensor, embedCanvas as _embedCanvas } from "./embedding";
+import { halvingEnabled } from "./resizeMode";
 import { isUsableIntermediate } from "./downscale";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
          Superseded } from "./photoRecord";
@@ -215,7 +221,17 @@ window.modelsReady = false;
 let previews = [];
 let includedIndices = new Set();
 let selectedIndex = 0;
+// Which photo the strip was last scrolled to. Lives here rather than in the
+// render because the question "does the strip need scrolling" is about the
+// selection's history, not about any one render: the strip's box changing under
+// a still selection (a resize) is the only thing that revives it.
+const scrollGuard = new SelectedScrollGuard();
+/** The strip's box moved under a selection that did not: scroll again on the next render. */
+function invalidateScrollGuard() {
+  scrollGuard.invalidate();
+}
 let isProcessingBatch = false;
+let idleRestoreAttempts = 0;
 // A re-run in progress: the window between emptying the gallery and the batch
 // that refills it starting. See reprocessLoadedPhotos.
 let reprocessRunning = false;
@@ -270,6 +286,19 @@ const ASYNC = (window.__mosqAsync = {
   // assignment to it a silent no-op outside strict mode, and `page.evaluate`
   // bodies are not strict.
   set sessDet(v) { sessDet = v; },
+  // The idle-release controller, so a tier-1 spec can drive a release without
+  // waiting out the 60 s grace period and without faking `visibilityState`. The
+  // decision logic itself is unit-tested in `tests/idle-release.test.ts`; what
+  // this seam is for is the wiring - that a release really empties the session
+  // cache and that the next `processFiles` refills it.
+  get idleRelease() { return idleRelease; },
+  get idleRestoreAttempts() { return idleRestoreAttempts; },
+  // Reachable so a spec can put a fake session in and watch the release take it
+  // out. `release` is counted rather than asserted on identity, because
+  // onnxruntime's own sessions are what a real run releases.
+  get loadedClipEngine() { return loadedClipEngine; },
+  get modelsReady() { return window.modelsReady; },
+  set modelsReady(v) { window.modelsReady = v; },
   get selectedIndex() { return selectedIndex; },
   set selectedIndex(v) { selectedIndex = v; },
   get includedIndices() { return includedIndices; },
@@ -284,6 +313,7 @@ const ASYNC = (window.__mosqAsync = {
   // predecessor did, and what made it break the moment the source was bundled.
   verdictFrom,
   verdictSentence,
+  clipTensor,
   selectPhoto,
   processFiles,
   deletePhoto,
@@ -562,7 +592,7 @@ async function initEngine() {
   const defaultEngine = "webgpu-fp16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
-  const savedEngine = localStorage.getItem("mosquito_engine");
+  const savedEngine = readPref("mosquito_engine");
   const selectable = (e) =>
     (e === "server-gpu" ? false : !!WEBGPU_MODELS[e]) && (e !== "webgpu-fp16" || FP16_AVAILABLE);
 
@@ -579,7 +609,12 @@ async function initEngine() {
     engineSelect.value = chosenEngine;
     engineSelect.addEventListener("change", async (e) => {
       const chosen = e.target.value;
-      localStorage.setItem("mosquito_engine", chosen);
+      // Reported rather than thrown: a browser that refuses the write would
+      // otherwise leave the selector showing an engine that reverts on reload,
+      // with nothing said. The switch itself still happens either way.
+      if (!writePref("mosquito_engine", chosen)) {
+        sendLog("pref_not_stored", { key: "mosquito_engine" });
+      }
       sendLog("engine_switched", { from: currentEngine, to: chosen });
       applyEngineNotices(chosen);
       currentEngine = chosen;
@@ -711,7 +746,7 @@ function engineLabel() {
 function updateReprocessButton() {
   const btn = document.getElementById("btn-reprocess");
   if (!btn) return;
-  const stale = stalePhotos(previews, currentEngine).length;
+  const stale = stalePhotoCount(previews, currentEngine);
   // Checked in this order because a re-run is a batch is a re-run. The last is
   // the dangerous one: the dropdown already names an engine whose session is not
   // the one loaded, so pressing would stamp the new engine's name on the
@@ -746,6 +781,11 @@ function updateReprocessButton() {
  * because a parallel path would be a second thing to keep in step with that one.
  */
 async function reprocessLoadedPhotos() {
+  // Same as `processFiles`: a released tab rebuilds on demand rather than
+  // refusing the re-run. The button is disabled for the duration either way,
+  // and the weights come from the Cache API, so the cost is a load the reader
+  // was going to pay on their next photo drop anyway.
+  if (idleRelease.released()) await idleRelease.ensure();
   if (isProcessingBatch || !window.modelsReady || reprocessRunning) return;
   // A whole-frame or crop re-classification holds the single inference slot
   // without ever setting `isProcessingBatch`, and this app runs onnxruntime on
@@ -882,7 +922,10 @@ function applyEngineNotices(engineKey) {
 // same picture, so a caller that passes the wrong canvas gets the direct read
 // rather than a stretched or enlarged embedding.
 async function clipEmbed(sourceCanvas, preScaled) {
-  const src = preScaled && isUsableIntermediate(preScaled, sourceCanvas, CLIP_SIZE) ? preScaled : sourceCanvas;
+  // With halving on, the whole view is read from the photo itself: the detector's
+  // 640 px canvas was a single non-anti-aliased reduction, and halving from it
+  // would only continue that.
+  const src = !halvingEnabled() && preScaled && isUsableIntermediate(preScaled, sourceCanvas, CLIP_SIZE) ? preScaled : sourceCanvas;
   return _embedCanvas(src, sessClip, EMB, (data, dims) => new ort.Tensor("float32", data, dims));
 }
 
@@ -1122,7 +1165,6 @@ async function classifyImage(imgBitmap, filename) {
     is_cropped,
     rev: 0,
     error: null,
-    fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
     manual_full_photo: !best,
     detTime,
     clipTime,
@@ -1185,6 +1227,11 @@ function drainQueuedBatches() {
 }
 
 async function processFiles(fileList) {
+  // A tab that released its sessions while hidden rebuilds them here rather
+  // than queueing the photos and waiting for something else to notice. This is
+  // a no-op unless a release actually happened, so it costs nothing on the
+  // normal path.
+  if (idleRelease.released()) await idleRelease.ensure();
   if (isProcessingBatch) {
     // A drop during a batch is not nothing: the photos have to run, so they
     // queue behind the batch rather than being dropped on the floor. Silently
@@ -1295,6 +1342,9 @@ async function processFiles(fileList) {
         if (i >= slots.length) return;
         const slot = slots[i];
         try {
+          // Hashed once, here: the slot's `fingerprint` is what pooling
+          // de-duplicates on, and `commitBatchSlot` does not overwrite it.
+          slot.fingerprint = await contentFingerprint(slot.file);
           slot.bitmap = await createImageBitmap(slot.file, { imageOrientation: "from-image" });
           // Paint the photo as soon as it is decoded, so the tile is the real
           // image (greyed) while its own inference is still to come.
@@ -1377,7 +1427,6 @@ async function processFiles(fileList) {
           adjacentDetail: fused.adjacentDetail,
           agreement: fused.agreement,
           viewsLanded: views.length, viewsTotal: views.length,
-          fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
           manual_full_photo: !data.is_cropped,
           detTime: data.detTime, clipTime: data.clipTime, totalTime: data.totalTime
         });
@@ -1619,6 +1668,19 @@ function renderThumbnails() {
       node = buildTile();
       tileNodes.set(p, node);
     }
+    // Whether this tile can already be in the right place, read before `idx` is
+    // overwritten: a tile keeps its index exactly when nothing before it was
+    // added or removed, so the tiles before it kept theirs too and none of them
+    // moved - which means it is still ahead of them, where it belongs.
+    //
+    // That implication only holds while nothing is *replaced* rather than added
+    // or removed: a tile whose index is unchanged can still have lost its
+    // neighbours, if the tiles before it were swapped one-for-one or reordered.
+    // No caller does that today - `previews` is appended to, prepended to,
+    // filtered and spliced, never reordered within a render - so this is safe
+    // now and wrong-by-omission if that ever changes. A caller that adds a sort
+    // must revisit this line rather than trust it.
+    const alreadyInPlace = node.idx === idx;
     node.idx = idx;
 
     // A photo still being analyzed is visibly unsettled: greyed tile, pending
@@ -1680,8 +1742,11 @@ function renderThumbnails() {
     node.chk.disabled = !contributesToPool(p);
 
     // One appendChild on an already-present child moves it to the end, which is
-    // how the strip is put into index order after a deletion.
-    strip.appendChild(node.tile);
+    // how the strip is put into index order after a deletion - so it has to
+    // happen for every tile whose index moved, and only for those. Doing it for
+    // the rest too is a real remove-and-insert per tile per render, on the one
+    // path that runs n times per photo of a batch.
+    if (!alreadyInPlace) strip.appendChild(node.tile);
   });
 
   scrollSelectedIntoView();
@@ -1698,10 +1763,19 @@ function renderThumbnails() {
  * `scrollIntoView`, which walks up the tree and scrolls whatever ancestor it
  * finds - including the page, which is a layout shift the strip has no business
  * causing.
+ *
+ * Both rect reads below force a synchronous layout of the whole document, over a
+ * strip and a results table the render that just preceded them rebuilt. This
+ * runs at the end of every render and a render runs once per photo as a batch
+ * lands, so the cost is paid n times per batch for an answer that only changes
+ * when the selection does - and a batch never changes the selection. The guard
+ * is what makes it once.
  */
 function scrollSelectedIntoView() {
+  const photo = previews[selectedIndex];
+  if (!scrollGuard.needsScroll(photo)) return;
   const strip = document.getElementById("thumbnail-strip");
-  const node = tileNodes.get(previews[selectedIndex]);
+  const node = tileNodes.get(photo);
   if (!strip || !node) return;
   const pad = 8;
   const stripBox = strip.getBoundingClientRect();
@@ -1714,6 +1788,7 @@ function scrollSelectedIntoView() {
   } else if (tileBox.right > stripBox.right - pad) {
     strip.scrollLeft += tileBox.right - (stripBox.right - pad);
   }
+  scrollGuard.record(photo);
 }
 
 function setAllSelected(on) {
@@ -1806,13 +1881,12 @@ function wireWholeFrameToggle() {
     const on = box.checked;
     if (on === includeWholeFrame) return;
     includeWholeFrame = on;
-    try {
-      localStorage.setItem(WHOLE_FRAME_KEY, on ? "true" : "false");
-    } catch {
-      // A preference that cannot be stored is a preference for this session.
-      // Failing to persist it is not worth interrupting the user over, and the
-      // next change reclassifies either way.
-    }
+    // `writePref` reports whether the value stuck rather than throwing, so a
+    // browser that refuses the write (private mode, quota) leaves the setting
+    // working for this session and says so, instead of the UI implying a
+    // preference that will be gone on reload.
+    const stored = writePref(WHOLE_FRAME_KEY, on ? "true" : "false");
+    if (!stored) sendLog("pref_not_stored", { key: WHOLE_FRAME_KEY });
     sendLog("whole_frame_toggled", { includeWholeFrame: on, photos: previews.length });
     // A toggle is about every photo on screen, so it withdraws a re-run's scope
     // rather than inheriting it. `request()` during a re-run's pass sets the
@@ -2251,6 +2325,10 @@ function setupCropSurfaces() {
 
 // Execute Crop from Full Photo surface
 async function applyCropFromFullSurface(idx, rect, t0) {
+  // Drawing a crop re-runs inference, so a released tab has to come back first.
+  // A drag that started before the tab was hidden and ended after it was
+  // released lands here with no sessions, and used to compute against null.
+  if (idleRelease.released()) await idleRelease.ensure();
   const p = previews[idx];
   const fullCv = p.fullCanvas;
 // Surface fractions -> image fractions through the same contain window
@@ -2277,6 +2355,7 @@ async function applyCropFromFullSurface(idx, rect, t0) {
 
 // Execute Crop from Zoomed 50% Context surface (fine-tuning)
 async function applyCropFromZoomedSurface(idx, rect, t0) {
+  if (idleRelease.released()) await idleRelease.ensure();
   const p = previews[idx];
   if (!p.contextBox) return;
   const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
@@ -2568,6 +2647,118 @@ async function revertToFullPhoto(idx) {
 
 
 
+// ---- Releasing memory while the tab is in the background (#36) ----
+//
+// Several tabs of this app open at once is the normal case. Each holds an
+// onnxruntime session (the classifier alone is 1.26 GB of weights plus whatever
+// the execution provider has put on the device) and a WebGPU device, and
+// browsers keep background tabs alive, so all of it adds up.
+//
+// A hidden tab therefore hands its memory back after a grace period and takes it
+// back when it is next needed. What is kept across the release is everything
+// cheap and everything the reader would be angry to lose: the `File`s, the
+// thumbnails, and every computed result. What goes is the sessions, the device,
+// and the decoded bitmaps - all of which are rebuilt on demand, the weights from
+// the Cache API, so the cost of returning is a load the reader would have paid
+// anyway.
+//
+// The decisions that have to be right - the grace period, the generation
+// counter that stops a slow release landing after a restore, and the busy check
+// that keeps a release out of a running batch - live in `idleRelease.ts` and are
+// tested there. This is the wiring.
+
+// A session that will not release is not a reason to keep the others: some
+// execution providers have no release at all.
+function releaseSession(entry) {
+  try {
+    entry?.sess?.release?.();
+  } catch (err) {
+    console.warn("Session release failed:", err);
+  }
+}
+
+function releaseIdleMemory() {
+  const sessions = Object.values(clipSessions);
+  const hadDetector = Boolean(sessDet);
+  // Every session, not just the current one: a user who switched engines twice
+  // has three sessions alive, and releasing only the selected engine's leaves
+  // the rest pinned for the rest of the tab's life.
+  for (const entry of sessions) releaseSession(entry);
+  if (sessDet) releaseSession({ sess: sessDet });
+  for (const key of Object.keys(clipSessions)) delete clipSessions[key];
+  sessClip = null;
+  sessDet = null;
+  loadedClipEngine = null;
+  window.modelsReady = false;
+
+  // The device and everything the provider allocated on it. Dropping the
+  // reference is what lets the browser reclaim it; onnxruntime-web keeps no
+  // registry of its own beyond `ort.env.webgpu.device`.
+  if (ort.env.webgpu) ort.env.webgpu.device = undefined;
+
+  // Bitmaps still held by a photo mid-decode. `commitBatchSlot` already
+  // releases the ones a finished photo owned, so this is the decode pool's
+  // only, and it is what makes releasing mid-batch safe enough to be worth it:
+  // the slots whose bitmap goes are exactly the ones that have not started
+  // their inference, and a slot with no bitmap is re-decoded on the next run.
+  for (const p of previews) {
+    if (p.bitmap && typeof p.bitmap.close === "function") {
+      try {
+        p.bitmap.close();
+      } catch {
+        // Already closed. Nothing to reclaim.
+      }
+      p.bitmap = undefined;
+    }
+  }
+
+  updateReprocessButton();
+  sendLog("idle_released", { sessions: sessions.length + (hadDetector ? 1 : 0) });
+}
+
+async function restoreIdleMemory() {
+  // Counted on the seam: a tier-1 spec aborts every weights fetch, so the only
+  // thing it can observe about a restore is that it was reached at all. The
+  // failure this pins is the restore never being entered, which leaves the tab
+  // inert with nothing on the page saying why.
+  idleRestoreAttempts++;
+  if (currentEngine === "server-gpu") {
+    // Nothing was held locally: the server does the inference.
+    window.modelsReady = true;
+    updateReprocessButton();
+    drainQueuedBatches();
+    return;
+  }
+  await loadWebGPUModels(currentEngine);
+  updateReprocessButton();
+  drainQueuedBatches();
+}
+
+const idleRelease = createIdleRelease({
+  // A tab that flickers between two windows must not pay a reload it did not
+  // need, and the reader switching back and forth is the common case here - a
+  // reference page open beside the app is how this gets used.
+  delayMs: 60_000,
+  release: releaseIdleMemory,
+  restore: restoreIdleMemory,
+  // Read when the timer fires, not when the tab was hidden: work dropped before
+  // the tab went to the background is still work.
+  isBusy: () => isProcessingBatch || reprocessRunning || reclassifyRunner.inFlight,
+  onRelease: ({ waitedMs }) => sendLog("idle_release_timer_fired", { waitedMs }),
+});
+
+function wireIdleRelease() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      idleRelease.hidden();
+      sendLog("tab_hidden");
+    } else {
+      idleRelease.visible();
+      sendLog("tab_visible", { wasReleased: idleRelease.released() });
+    }
+  });
+}
+
 // ---- Initialization & Event Listeners ----
 window.addEventListener("DOMContentLoaded", () => {
   // First, so the address bar names the build before anything else runs: the
@@ -2581,6 +2772,7 @@ window.addEventListener("DOMContentLoaded", () => {
   setupCropSurfaces();
   wireStripActions();
   wireReprocessButton();
+  wireIdleRelease();
 
   // The viewer-aspect cache lives in the crop geometry module; these listeners
   // are wired here because they belong to the page's lifetime, not to that
@@ -2588,6 +2780,26 @@ window.addEventListener("DOMContentLoaded", () => {
   // importing it an act with a side effect.
   window.addEventListener("resize", invalidateViewerAspectCache);
   window.addEventListener("orientationchange", invalidateViewerAspectCache);
+  // A resize changes the strip's own box without moving the selection, so the
+  // tile that was in view before it need not be in view after it - and the
+  // scroll guard, which can only see the selection change, would not notice.
+  window.addEventListener("resize", invalidateScrollGuard);
+  window.addEventListener("orientationchange", invalidateScrollGuard);
+  // ...and a tile can change size with no resize event at all: `@media (pointer:
+  // coarse)` sizes tiles differently from a mouse-driven layout, so a hybrid
+  // whose input capability changes (a tablet undocked, a convertible switched to
+  // its keyboard) moves every tile without the window changing. There is no
+  // event for that, so the guard is invalidated on the next render that follows
+  // a match-media flip.
+  if (window.matchMedia) {
+    const coarse = window.matchMedia("(pointer: coarse)");
+    const onPointerChange = () => {
+      invalidateScrollGuard();
+      renderThumbnails();
+    };
+    if (typeof coarse.addEventListener === "function") coarse.addEventListener("change", onPointerChange);
+    else if (typeof coarse.addListener === "function") coarse.addListener(onPointerChange);
+  }
 
   // initRouter captures the classifier's own title once and returns the handler
   // that applies a route against it, so both the initial render and every
@@ -2665,26 +2877,26 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-next").onclick = () => selectPhoto(selectedIndex + 1);
   document.getElementById("btn-csv").onclick = () => downloadCSV(previews, sendLog);
 
-  const savedPooling = localStorage.getItem("mosquito_pooling");
+  const savedPooling = readPref("mosquito_pooling");
   if (savedPooling) {
     const radio = document.querySelector(`input[name="pooling-method"][value="${savedPooling}"]`);
     if (radio) radio.checked = true;
   }
   document.querySelectorAll('input[name="pooling-method"]').forEach(r => {
     r.onchange = (e) => {
-      localStorage.setItem("mosquito_pooling", e.target.value);
+      writePref("mosquito_pooling", e.target.value);
       updatePooling(EMB, previews, includedIndices);
     };
   });
 
   const corrSlider = document.getElementById("corr-slider");
-  const savedCorr = localStorage.getItem("mosquito_corr");
+  const savedCorr = readPref("mosquito_corr");
   if (savedCorr && corrSlider) {
     corrSlider.value = savedCorr;
     document.getElementById("corr-val").textContent = parseFloat(savedCorr).toFixed(2);
   }
   corrSlider.oninput = (e) => {
-    localStorage.setItem("mosquito_corr", e.target.value);
+    writePref("mosquito_corr", e.target.value);
     document.getElementById("corr-val").textContent = parseFloat(e.target.value).toFixed(2);
     updatePooling(EMB, previews, includedIndices);
   };
@@ -2696,7 +2908,12 @@ window.addEventListener("DOMContentLoaded", () => {
   // ends up pressing Enter on a different photo than the one the highlight is
   // on, which is the same defect as a click landing on the wrong tile.
   window.addEventListener("keydown", (e) => {
-    if (e.target instanceof HTMLInputElement) return;
+    // The handler owns the arrow/Home/End keys only when the user is not
+    // operating some other control. The old guard was `instanceof
+    // HTMLInputElement`, and a `<select>` is not one - so with the engine
+    // dropdown focused, ArrowDown changed the ENGINE and Home/End jumped the
+    // dropdown to its last option. See keyNav.ts.
+    if (keyEventBelongsElsewhere(describeKeyTarget(e.target), e)) return;
     if (e.key === "ArrowRight") {
       e.preventDefault();
       selectPhoto(selectedIndex + 1);
