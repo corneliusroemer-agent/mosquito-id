@@ -1345,6 +1345,27 @@ async function processFiles(fileList) {
         const cropCv = await dataUrlToCanvas(data.cropDataUrl);
         const contextCv = await dataUrlToCanvas(data.contextDataUrl);
 
+        // The photo's bytes become the server's frame, because from here on that
+        // frame is what the app holds: `commitBatchSlot` puts it in `fullCanvas`,
+        // the crop box is in its coordinates, and `cropGeometry` divides by its
+        // width and height. Leaving `file` as the upload would leave the viewer
+        // showing bytes that were never classified, beside a box positioned for
+        // pixels it does not have - and nothing downstream can detect that,
+        // because the server's decode is as correct a decode as the browser's
+        // own. What it is not guaranteed to be is the SAME decode: a re-encode, a
+        // downscale or a different EXIF reading on the server all produce a
+        // frame the browser's copy of the upload does not match.
+        //
+        // So the record is made self-consistent here rather than trusted to be:
+        // the object URL the viewer serves is minted from these bytes, and
+        // `photoObjectUrl` revokes the upload's URL when `file` changes, so the
+        // old one cannot outlive the frame it stood for.
+        //
+        // Encoding here rather than at selection is what keeps this cheap -
+        // `toBlob` is off the click, and it is paid once per photo against a
+        // network round trip that cost far more.
+        const serverFile = await sourceFileFor({ fullCanvas: fullCv, name: data.filename });
+
         // Second view over the same contract, no server change needed: the
         // endpoint already classifies whatever box it is given, so the whole
         // frame is one more request with crop_box spanning it. Skipped when the
@@ -1364,6 +1385,15 @@ async function processFiles(fileList) {
 
         commitBatchSlot(slots[i], {
           name: data.filename, scoredBy: engine,
+          // Null when the encode failed, and null is the safe answer here rather
+          // than the old upload: with no file the viewer falls back to encoding
+          // `fullCanvas` itself, which is this frame by definition. Keeping the
+          // upload instead would put back the mismatch this exists to remove.
+          //
+          // A re-run therefore re-classifies these bytes rather than the original
+          // upload, which is what makes it a re-run of the same photograph: the
+          // frame on screen is the frame that was classified.
+          file: serverFile,
           fullCanvas: fullCv, cropCanvas: cropCv, contextCanvas: contextCv,
           cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
           detail: fused.detail, logits: fused.logits, status: data.status,

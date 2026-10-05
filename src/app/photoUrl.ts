@@ -15,10 +15,6 @@
  */
 const urls = new WeakMap<object, { file: Blob; url: string }>();
 
-/** Every URL currently live, so a leak is observable from a test. */
-let live = 0;
-export const liveObjectUrlCount = (): number => live;
-
 export interface HasFile {
   file?: Blob | null;
 }
@@ -32,7 +28,6 @@ export function photoObjectUrl(p: HasFile): string | null {
   if (hit) releasePhotoUrl(p);
   const url = URL.createObjectURL(file);
   urls.set(p, { file, url });
-  live++;
   return url;
 }
 
@@ -42,5 +37,4 @@ export function releasePhotoUrl(p: object): void {
   if (!hit) return;
   urls.delete(p);
   URL.revokeObjectURL(hit.url);
-  live--;
 }

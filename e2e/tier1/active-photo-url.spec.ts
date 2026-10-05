@@ -16,6 +16,13 @@ const TWO = [
 /**
  * Give each populated photo a real File (and a full-size canvas to go with it),
  * and record every toDataURL call with the size of the canvas it was made on.
+ *
+ * The File is an encode of the very canvas it is compared against, so these
+ * tests are about the URL's lifecycle - minted once, reused, revoked on delete -
+ * and not about which bytes reach the screen. The case where the bytes on screen
+ * are NOT the canvas's own decode needs a File that genuinely differs from the
+ * canvas, which is `server-frame-bytes.spec.ts`: it drives `processFiles` with a
+ * 400x300 upload and a server that answers with a 200x150 frame.
  */
 async function attachFiles(page: Page): Promise<void> {
   await page.evaluate(async () => {
