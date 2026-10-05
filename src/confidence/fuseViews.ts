@@ -5,28 +5,6 @@ import { genusScores } from "./genusScores";
 import { verdictFrom } from "./verdict";
 import { viewAgreement } from "./viewAgreement";
 
-/**
- * Below this max species posterior the crop is scored on its own, not pooled.
- *
- * Equal-weight pooling spends the whole frame a vote it has not earned whenever
- * the crop is the view that knows something. On 1,199 held-out images in 1,188
- * specimen groups (n_classes 6, the shipped 2.5 temperature, detector at the
- * shipped 0.50 confidence), routing on this threshold is worth -0.051 nce
- * [-0.110, -0.004] out of sample, negative in 15 of 15 group-level partitions
- * and -0.0509 +- 0.0030 across them; the best fixed pooling weight reaches only
- * -0.020 with an interval covering zero. macro-F1 moves +0.075 in the same
- * direction in every partition. Accuracy is flat (+0.25 pp), so this is not an
- * accuracy win.
- *
- * Every threshold from 0.60 to 0.90 is negative (-0.036 to -0.065), so 0.80 is
- * read as mid-basin rather than as the fitted optimum: the fitted optimum moves
- * between partitions and a threshold fitted on one half occasionally lands
- * outside the basin and loses the effect entirely.
- *
- * Measurements: investigations/2026-10-02-mosquito-id/80-confidence-router.md.
- */
-export const CROP_ONLY_MAX_POSTERIOR = 0.8;
-
 export interface FusedResult {
   /** Genus -> summed posterior. */
   labels: Record<string, number>;
@@ -107,40 +85,23 @@ export function fuseViews(
     return fuseViews(head, [viewResults[0]!], floors);
   }
 
-  // An unconfident crop is scored on its own. Equal weighting spends the whole
-  // frame half the decision on rows where the crop is the view carrying the
-  // signal and the frame is close to flat, and the frame's vote is what decides
-  // them. `viewResults[0]` is the crop whenever there is one - every caller
-  // pushes it first and the whole frame second - so this is a statement about
-  // the crop and never about a pool of crops. With one view there is nothing to
-  // pool and the branch cannot fire, which keeps the single-view path the
-  // algebraically identical one the doc comment below describes.
-  if (V > 1 && Math.max(...viewResults[0]!.spP) < CROP_ONLY_MAX_POSTERIOR) {
-    return fuseViews(head, [viewResults[0]!], floors);
-  }
-
   const logSum = new Array<number>(S).fill(0);
   let logNu = 0;
   for (const v of viewResults) {
     for (let i = 0; i < S; i++) logSum[i]! += Math.log(Math.max(v.spP[i]!, 1e-12));
     logNu += Math.log(Math.max(v.nuTotal, 1e-12));
   }
-  const mx = Math.max(logNu, ...logSum);
-  const ex = logSum.map((l) => Math.exp(l - mx));
-  const nu = Math.exp(logNu - mx);
-  const sum = ex.reduce((a, b) => a + b, 0) + nu;
-  const spP = ex.map((e) => e / sum);
-  const nuP = [nu / sum];
 
-  const adjNames = adjacentNames(head);
-  const A = adjNames.length;
-  let adP: number[] = [];
   // Only pool the adjacent classes if some view actually scored them. A caller
   // passing views without `adP` (a server path, or an embeds file from before
   // the classes existed) gets none, and the non-mosquito gate then cannot fire
   // at all - which is right: it has no evidence to fire on.
-  if (A && viewResults.some((v) => v.adP)) {
-    const logAd = new Array<number>(A).fill(-Infinity);
+  const adjNames = adjacentNames(head);
+  const A = adjNames.length;
+  const hasAd = A > 0 && viewResults.some((v) => v.adP);
+  let logAd: number[] = [];
+  if (hasAd) {
+    logAd = new Array<number>(A).fill(-Infinity);
     for (const v of viewResults) {
       for (let i = 0; i < A; i++) {
         if (!v.adP || !Number.isFinite(v.adP[i]!)) continue;
@@ -148,14 +109,47 @@ export function fuseViews(
         logAd[i] = Number.isFinite(logAd[i]!) ? logAd[i]! + l : l;
       }
     }
-    const mxAd = Math.max(logNu, ...logSum, ...logAd.filter(Number.isFinite));
-    const exAd = logAd.map((l) => (Number.isFinite(l) ? Math.exp(l - mxAd) : 0));
-    const sumAd =
-      logSum.reduce((a, l) => a + Math.exp(l - mxAd), 0) +
-      Math.exp(logNu - mxAd) +
-      exAd.reduce((a, b) => a + b, 0);
-    adP = exAd.map((e) => e / sumAd);
   }
+
+  // ONE denominator for all three blocks. `softmaxJoint` produces a single
+  // softmax and slices it, so species, nuisance and adjacent already partition
+  // one probability; re-deriving that structure per block and normalising each
+  // separately inflated species by exactly 1/(1 - adjacentMass), which is
+  // unbounded and crosses the floors. The band where the non-mosquito gate stays
+  // silent but the inflated posterior crosses a floor is not empty.
+  //
+  // A class no view scored contributes NO mass here, the same rule the adjacent
+  // block has always used: a flat share would invent evidence nobody supplied and
+  // could carry the gate on its own.
+  const finite = (l: number) => Number.isFinite(l);
+  const mx = Math.max(logNu, ...logSum, ...logAd.filter(finite));
+  const ex = logSum.map((l) => Math.exp(l - mx));
+  const nu = Math.exp(logNu - mx);
+  const exAd = logAd.map((l) => (finite(l) ? Math.exp(l - mx) : 0));
+  const sum = ex.reduce((a, b) => a + b, 0) + nu + exAd.reduce((a, b) => a + b, 0);
+
+  const spP = ex.map((e) => e / sum);
+  // The nuisance vector keeps its class identities, for the same reason the
+  // adjacent block does: the gate reports WHICH nuisance class it matched, and a
+  // mass-only array makes every nuisance verdict name class 0.
+  // A view that scored no nuisance classes carries none, and a class no view
+  // scored contributes no mass - the same rule the adjacent block uses. Falling
+  // back to `nuTotal` spreads the mass flat, which is what the gate needs to
+  // still fire when only the combined mass survived to fuse time.
+  const nuNames = head.nuisance ?? [];
+  const nuP =
+    nuNames.length && viewResults.some((v) => v.nuP)
+      ? nuNames.map((_, i) => {
+          let l = 0;
+          for (const v of viewResults) {
+            l += Math.log(Math.max(v.nuP?.[i] ?? 0, 1e-12));
+          }
+          return Math.exp(l - mx) / sum;
+        })
+      : nuNames.length
+        ? [nu / sum]
+        : [];
+  const adP = exAd.map((e) => e / sum);
 
   // The pooling card needs logits on the scale the score panel plots them on.
   // Recovering them from the fused posterior is not an approximation: log p_i =

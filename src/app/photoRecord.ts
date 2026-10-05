@@ -36,8 +36,8 @@ export interface PhotoState {
    */
   bitmap?: ImageBitmap | null;
   /**
-   * A cheap identity for the geometry, so two runs can be compared without
-   * hashing pixels: `cropW x cropH - fullW x fullH`.
+   * SHA-256 of the file's bytes (`contentFingerprint`), or null where it could
+   * not be computed. Pooling de-duplicates on it and treats null as unique.
    */
   fingerprint: string | null;
 

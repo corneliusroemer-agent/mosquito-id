@@ -103,8 +103,7 @@ describe("which views a photo offers", () => {
 describe("what the view count does to the fused result", () => {
   // Two views that name different species: the case the disagreement veto exists
   // for, and the case that makes the fused top different from either view's.
-  // Above `CROP_ONLY_MAX_POSTERIOR`: a crop below it is scored on its own and
-  // never reaches the pooling this block is about (`confidence-router.test.ts`
+  // Two confident views, so the pair reaches the pooling this block is about
   // covers that branch). The assertions are unchanged.
   const crop = () => view("Aedes aegypti", 0.9);
   const whole = () => view("Culex pipiens", 0.45);
@@ -306,6 +305,9 @@ describe("every classify path asks the same question", () => {
   it("persists the setting under the key it reads", () => {
     const src = body("wireWholeFrameToggle");
     expect(src).toContain("readIncludeWholeFrame(");
-    expect(src).toContain(`localStorage.setItem(WHOLE_FRAME_KEY`);
+    // Through `writePref`, not `localStorage.setItem` directly: the write has to
+    // survive a browser that refuses storage, and the key it uses is the one the
+    // reader reads.
+    expect(src).toContain(`writePref(WHOLE_FRAME_KEY`);
   });
 });

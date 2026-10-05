@@ -19,7 +19,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "../src/app/reprocess";
+import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotoCount, stalePhotos } from "../src/app/reprocess";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HTML = readFileSync(join(root, "index.html"), "utf8");
@@ -161,6 +161,25 @@ describe("which photos need re-running", () => {
     const photos = [photo(FP16, "a.jpg"), photo(FP16, "b.jpg")];
     expect(stalePhotos(photos, CULICO)).toHaveLength(2);
     expect(stalePhotos(photos, FP16)).toEqual([]);
+  });
+
+  it("counts the same photos the list has, without building the list", () => {
+    // The button wants a number, and it is updated on every render - which
+    // during a batch is once per photo. Two predicates that can disagree about
+    // what is stale is two answers on the same button, so the count is pinned
+    // against the list it replaces over every state the list has an opinion on.
+    const photos = [
+      photo(FP16, "a.jpg"), photo(CULICO, "b.jpg"),
+      photo(null, "never-scored.jpg"), photo(FP16, "gone.jpg", { removed: true }),
+      photo(null, "failed.jpg", { removed: true }),
+    ];
+    for (const engine of [FP16, CULICO, "server-gpu"]) {
+      expect(stalePhotoCount(photos, engine)).toBe(stalePhotos(photos, engine).length);
+    }
+    // Against culico only the H/14 photo is stale: b was scored by culico, and
+    // the never-scored and deleted ones show no verdict at all.
+    expect(stalePhotoCount(photos, CULICO)).toBe(1);
+    expect(stalePhotoCount([], CULICO)).toBe(0);
   });
 
   it("re-runs only the photos the switch left behind", () => {
