@@ -74,6 +74,25 @@ async function stubServer(page: Page, frame: ServerFrame): Promise<void> {
 }
 
 /**
+ * Turn on the whole-frame view, which the crop-only default leaves off.
+ *
+ * The second request a cropped photo makes is conditional on it, so a test that
+ * reads two requests has to put the app in the configuration that makes two.
+ * Checked rather than assumed, and by the same control a user would, so this
+ * stays correct whichever way the default points. No photo is on screen yet at
+ * the point this is called, so there is nothing to re-classify and the wait
+ * only guards the handler having run.
+ */
+async function enableWholeFrame(page: Page): Promise<void> {
+  await page.locator("#chk-whole-frame").setChecked(true);
+  await page.waitForFunction(
+    () => !window.__mosqAsync!.previews.some((p: any) => p.pending),
+    null,
+    { timeout: 10_000 },
+  );
+}
+
+/**
  * Whether each `/api/predict` request carried a `crop_box` part at all.
  *
  * The two requests a batched photo makes are told apart by that, not by the box's
@@ -273,6 +292,7 @@ test.describe("server-gpu frame", () => {
       totalTime: 3,
     });
 
+    await enableWholeFrame(page);
     await selectServerEngine(page);
     await page.evaluate(() => window.__mosqAsync!.processFiles([(window as any).__upload]));
 
