@@ -75,16 +75,17 @@ describe("SelectedScrollGuard", () => {
     expect(g.needsScroll(fresh)).toBe(true);
   });
 
-  it("needs one after a deletion shifted the selection onto another photo", () => {
+  it("needs one when the selection lands on a different photo, and not when it does not", () => {
     const g = new SelectedScrollGuard();
     const selected = photo("c.jpg");
     g.record(selected);
-    // Deleting a photo before the selected one moves it up one index. The record
-    // at the new index is the same photo, so this is correctly not a scroll.
+    // The same photo is still selected - a deletion ABOVE it moved it up one
+    // index, so its position changed without the selection changing. The tile is
+    // still the one the user was looking at, so this is correctly not a scroll.
     expect(g.needsScroll(selected)).toBe(false);
-    // Deleting a photo before the SELECTED one leaves a different photo under it.
-    const nowSelected = photo("d.jpg");
-    expect(g.needsScroll(nowSelected)).toBe(true);
+    // A different photo under the selection index means the selected tile really
+    // did change, whatever happened to the list around it.
+    expect(g.needsScroll(photo("d.jpg"))).toBe(true);
   });
 
   it("needs one again after the strip's box changed under a still selection", () => {

@@ -40,6 +40,37 @@ async function countRectsWhile(page: Page, body: () => Promise<void>): Promise<n
       };
       window.__resizes = 0;
       window.addEventListener("resize", () => { window.__resizes = (window.__resizes ?? 0) + 1; });
+      // `offsetWidth`/`clientWidth` force a layout just as `getBoundingClientRect`
+      // does, and a regression that swapped one for the other would be invisible
+      // to a rect-only counter. Instrument the whole family, so "stop forcing a
+      // full-document layout" is tested as that and not as "stop calling one
+      // particular method". These are counted, not asserted individually - the
+      // app legitimately reads them outside the render path.
+      for (const [obj, prop] of [
+        [Element.prototype, "clientWidth"],
+        [Element.prototype, "clientHeight"],
+        [Element.prototype, "scrollWidth"],
+        [Element.prototype, "scrollHeight"],
+        [Element.prototype, "offsetWidth"],
+        [Element.prototype, "offsetHeight"],
+        [window, "innerWidth"],
+        [window, "innerHeight"],
+      ] as const) {
+        const d = Object.getOwnPropertyDescriptor(
+          obj === window ? Window.prototype : obj,
+          prop,
+        );
+        if (!d?.get || (d.get as { __patched?: boolean }).__patched) continue;
+        const original = d.get;
+        Object.defineProperty(d.get, "__patched", { value: true });
+        Object.defineProperty(obj, prop, {
+          configurable: true,
+          get(this: unknown) {
+            window.__rectReads = (window.__rectReads ?? 0) + 1;
+            return original.call(this);
+          },
+        });
+      }
     }
     window.__rectReads = 0;
   });

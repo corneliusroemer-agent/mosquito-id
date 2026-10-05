@@ -82,14 +82,15 @@ the shared transform cache serves entries recorded against the other tree and ev
 at collection. Clearing the cache and setting a private `TMPDIR` do not fix it; `npm ci` in the
 repo does. Before concluding a Playwright change broke the suite, run `npm ci`.
 
-**Constants fitted in one coordinate system have been applied in another.** The
-`CROP_ONLY_MAX_POSTERIOR` router threshold was fitted on a **6-class species-only**
-`predict_proba` posterior (report 80: `n = 1,199`, `n_classes = 6`), while the quantity
-`fuseViews` actually reads is `viewResults[0].spP` out of `softmaxJoint` — for the shipped B/16
-head a **25-class** joint softmax in which nine nuisance rows compete for mass. That makes the
-router fire on **10 of 10 shipped example photographs** (report 82), so the whole-frame view is
-never pooled on any of them. Check that a threshold's *input* is the quantity the app computes,
-not merely one with the same name.
+**Constants fitted in one coordinate system have been applied in another.** `CROP_ONLY_MAX_POSTERIOR`
+was fitted on a **6-class species-only** `predict_proba` posterior (report 80: `n = 1,199`,
+`n_classes = 6`), while the quantity `fuseViews` actually read was `viewResults[0].spP` out of
+`softmaxJoint` — for the shipped B/16 head a **25-class** joint softmax in which nine nuisance
+rows compete for mass. That made the router fire on **10 of 10 shipped example photographs**
+(report 82), and 93% of real in-domain crops, so the whole-frame view was discarded almost always
+and "include the whole photo" was a near-total no-op. **The router has been removed** (issues #85,
+#90; every view is now always pooled), but the trap is not: check that a threshold's *input* is the
+quantity the app computes, not merely one with the same name.
 
 **Never `git stash`** in a tree another agent is using: it sweeps every tracked modification
 into the stash, including their uncommitted work.
