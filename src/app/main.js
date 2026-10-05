@@ -50,7 +50,8 @@ import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
 import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
-import { embedCanvas as _embedCanvas } from "./embedding";
+import { clipTensor, embedCanvas as _embedCanvas } from "./embedding";
+import { halvingEnabled } from "./resizeMode";
 import { isUsableIntermediate } from "./downscale";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
          Superseded } from "./photoRecord";
@@ -284,6 +285,7 @@ const ASYNC = (window.__mosqAsync = {
   // predecessor did, and what made it break the moment the source was bundled.
   verdictFrom,
   verdictSentence,
+  clipTensor,
   selectPhoto,
   processFiles,
   deletePhoto,
@@ -832,7 +834,10 @@ function applyEngineNotices(engineKey) {
 // same picture, so a caller that passes the wrong canvas gets the direct read
 // rather than a stretched or enlarged embedding.
 async function clipEmbed(sourceCanvas, preScaled) {
-  const src = preScaled && isUsableIntermediate(preScaled, sourceCanvas, CLIP_SIZE) ? preScaled : sourceCanvas;
+  // With halving on, the whole view is read from the photo itself: the detector's
+  // 640 px canvas was a single non-anti-aliased reduction, and halving from it
+  // would only continue that.
+  const src = !halvingEnabled() && preScaled && isUsableIntermediate(preScaled, sourceCanvas, CLIP_SIZE) ? preScaled : sourceCanvas;
   return _embedCanvas(src, sessClip, EMB, (data, dims) => new ort.Tensor("float32", data, dims));
 }
 
