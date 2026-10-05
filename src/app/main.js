@@ -32,6 +32,7 @@ import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTO
 import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
+import { contentFingerprint } from "./contentHash";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
@@ -1071,7 +1072,6 @@ async function classifyImage(imgBitmap, filename) {
     is_cropped,
     rev: 0,
     error: null,
-    fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
     manual_full_photo: !best,
     detTime,
     clipTime,
@@ -1244,6 +1244,9 @@ async function processFiles(fileList) {
         if (i >= slots.length) return;
         const slot = slots[i];
         try {
+          // Hashed once, here: the slot's `fingerprint` is what pooling
+          // de-duplicates on, and `commitBatchSlot` does not overwrite it.
+          slot.fingerprint = await contentFingerprint(slot.file);
           slot.bitmap = await createImageBitmap(slot.file, { imageOrientation: "from-image" });
           // Paint the photo as soon as it is decoded, so the tile is the real
           // image (greyed) while its own inference is still to come.
@@ -1326,7 +1329,6 @@ async function processFiles(fileList) {
           adjacentDetail: fused.adjacentDetail,
           agreement: fused.agreement,
           viewsLanded: views.length, viewsTotal: views.length,
-          fingerprint: `${cropCv.width}x${cropCv.height}-${fullCv.width}x${fullCv.height}`,
           manual_full_photo: !data.is_cropped,
           detTime: data.detTime, clipTime: data.clipTime, totalTime: data.totalTime
         });

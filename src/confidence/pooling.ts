@@ -7,7 +7,8 @@ import { verdictFrom } from "./verdict";
 /** The minimum of what updatePooling() needs from a photo, so a test can pass a literal. */
 export interface PoolablePhoto {
   name?: string;
-  fingerprint?: string;
+  /** Content hash of the photo's file; null or absent means never de-duplicate. */
+  fingerprint?: string | null;
   pending?: boolean;
   error?: unknown;
   /** Species -> posterior, as rendered in the results table. Drives the lead. */
@@ -265,14 +266,21 @@ function methodWeights(included: PoolablePhoto[], method: PoolingMethod, r: numb
   if (method === "Accumulate evidence") return included.map(() => 1);
 
   // Dependent evidence.
+  // A photo with no fingerprint (null, absent or empty) is its own observation:
+  // it neither collapses into another nor makes another collapse into it.
   const seen = new Set<string>();
+  let unfingerprinted = 0;
   const effective = included.map((p) => {
     const fp = p.fingerprint;
-    if (fp !== undefined && seen.has(fp)) return 0;
-    if (fp !== undefined) seen.add(fp);
+    if (typeof fp !== "string" || fp === "") {
+      unfingerprinted++;
+      return 1;
+    }
+    if (seen.has(fp)) return 0;
+    seen.add(fp);
     return 1;
   });
-  const denom = 1 + (seen.size - 1) * r;
+  const denom = 1 + (seen.size + unfingerprinted - 1) * r;
   return effective.map((e) => e / denom);
 }
 
