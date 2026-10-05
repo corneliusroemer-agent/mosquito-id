@@ -28,20 +28,35 @@ const ONE: PhotoSpec[] = [{ name: "square_01.jpg", state: "species", species: "A
 const VIEWPORT = { width: 1280, height: 1600 };
 
 /**
- * Replace the photo with one whose colour encodes its coordinates.
+ * Replace the photo's pixels with an image whose colour encodes its coordinates.
  *
  * A flat fill would make every wrong placement indistinguishable from the right
  * one, which is the #77 trap. Here R carries x mod 256 and G carries y mod 256,
  * so a crop taken from the wrong place - or one taken through a mapping with its
  * axis confused - produces different bytes at the sampled points.
+ *
+ * The size comes from `fullW`/`fullH` - the photograph's own dimensions, which is
+ * what `photoFrame` reads and what every crop box is expressed in. It used to
+ * come from a `fullCanvas` the record retained; #107 removed that field, so the
+ * frame is now the only record of the box's unit, and a fixture that measured
+ * anything else would be measuring a different picture from the one the box names.
+ *
+ * The pattern is installed as `sourceCanvas`, which is where `fullCanvasFor`
+ * finds a record's pixels when it has no File to decode them from - and so is
+ * exactly the canvas `executeCrop` cuts the crop out of.
  */
 async function paintCoordinatePattern(page: import("@playwright/test").Page): Promise<void> {
   await page.evaluate(() => {
     const A = window.__mosqAsync!;
     const p = A.previews[0];
+    const w = p.fullW as number;
+    const h = p.fullH as number;
+    if (!(w > 0) || !(h > 0)) {
+      throw new Error("fixture photo carries no frame dimensions (fullW/fullH)");
+    }
     const cv = document.createElement("canvas");
-    cv.width = p.fullCanvas.width;
-    cv.height = p.fullCanvas.height;
+    cv.width = w;
+    cv.height = h;
     const ctx = cv.getContext("2d")!;
     const img = ctx.createImageData(cv.width, cv.height);
     for (let y = 0; y < cv.height; y++) {
@@ -54,7 +69,7 @@ async function paintCoordinatePattern(page: import("@playwright/test").Page): Pr
       }
     }
     ctx.putImageData(img, 0, 0);
-    p.fullCanvas = cv;
+    p.sourceCanvas = cv;
     p.contextCanvas = cv;
     p.contextBox = null;
   });
@@ -97,7 +112,7 @@ async function expectedSquareBox(
     ({ a, b }) => {
       const p = window.__mosqAsync!.previews[0];
       const surf = document.getElementById("crop-surface-full")!.getBoundingClientRect();
-      const img = { w: p.fullCanvas.width, h: p.fullCanvas.height };
+      const img = { w: p.fullW as number, h: p.fullH as number };
       const boxAspect = surf.width / surf.height;
       const imgAspect = img.w / img.h;
       const kx = Math.max(1, boxAspect / imgAspect);
@@ -186,8 +201,8 @@ async function expectedZoomBox(
       const x1 = Math.round((pa[0] + pb[0]) / 2 - side / 2);
       const y1 = Math.round((pa[1] + pb[1]) / 2 - side / 2);
       // Context-canvas pixels -> photo pixels.
-      const W = p.fullCanvas.width;
-      const H = p.fullCanvas.height;
+      const W = p.fullW as number;
+      const H = p.fullH as number;
       const box: [number, number, number, number] = [
         x1 + region.x1, y1 + region.y1, x1 + side + region.x1, y1 + side + region.y1,
       ];
@@ -265,14 +280,20 @@ test.describe("a manual crop is square", () => {
       ];
       const ctx = cv.getContext("2d")!;
       const got = pts.map(([x, y]) => Array.from(ctx.getImageData(x, y, 1, 1).data.slice(0, 3)));
-      const full = p.fullCanvas.getContext("2d")!;
-      const want = pts.map(([x, y]) => {
-        const sx = box[0] + x;
-        const sy = box[1] + y;
-        const d = full.getImageData(sx, sy, 1, 1).data;
-        return [d[0], d[1], d[2]];
+      // Read the source through the app's own accessor rather than off the
+      // record. The record no longer retains the frame (#107), so this is the
+      // function that hands the pixels back - and using it means the comparison
+      // is against the very canvas `executeCrop` cut from, decoded or not.
+      return window.__mosqAsync!.fullCanvasFor(p).then((fullCv: HTMLCanvasElement | null) => {
+        const full = fullCv!.getContext("2d")!;
+        const want = pts.map(([x, y]) => {
+          const sx = box[0] + x;
+          const sy = box[1] + y;
+          const d = full.getImageData(sx, sy, 1, 1).data;
+          return [d[0], d[1], d[2]];
+        });
+        return { box, cw: cv.width, ch: cv.height, got, want, fullW: p.fullW, fullH: p.fullH };
       });
-      return { box, cw: cv.width, ch: cv.height, got, want, fullW: p.fullCanvas.width, fullH: p.fullCanvas.height };
     });
 
     // The shape.
@@ -329,7 +350,7 @@ test.describe("a manual crop is square", () => {
     const expected = await expectedSquareBox(page, tallDrag.a, tallDrag.b);
     const photo = await page.evaluate(() => {
       const p = window.__mosqAsync!.previews[0];
-      return { w: p.fullCanvas.width, h: p.fullCanvas.height };
+      return { w: p.fullW as number, h: p.fullH as number };
     });
     const wanted = expected[2] - expected[0];
     const clamped = Math.min(wanted, photo.w, photo.h);
@@ -380,7 +401,7 @@ test.describe("a manual crop is square", () => {
       return {
         style: el ? { left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height } : null,
         box: p.cropBox!,
-        img: { w: p.fullCanvas.width, h: p.fullCanvas.height },
+        img: { w: p.fullW as number, h: p.fullH as number },
         surf: (() => {
           const r = document.getElementById("crop-surface-full")!.getBoundingClientRect();
           return { w: r.width, h: r.height };
@@ -421,14 +442,18 @@ test.describe("a manual crop is square", () => {
     await installFakeClassifier(page);
 
     // A context region genuinely offset from the photo's origin, so a missing
-    // ox/oy would show. Cut it 1:1 from the pattern, as extractContextCrop does.
-    const region = await page.evaluate(() => {
-      const p = window.__mosqAsync!.previews[0];
+    // ox/oy would show. Cut it 1:1 from the pattern, as extractContextCrop does -
+    // and read the pattern through the app's accessor, which is where the pixels
+    // live now that the record retains no frame (#107).
+    const region = await page.evaluate(async () => {
+      const A = window.__mosqAsync!;
+      const p = A.previews[0];
+      const full = (await A.fullCanvasFor(p))!;
       const [x1, y1, x2, y2] = [300, 220, 2100, 1500];
       const cv = document.createElement("canvas");
       cv.width = x2 - x1;
       cv.height = y2 - y1;
-      cv.getContext("2d")!.drawImage(p.fullCanvas, x1, y1, cv.width, cv.height, 0, 0, cv.width, cv.height);
+      cv.getContext("2d")!.drawImage(full, x1, y1, cv.width, cv.height, 0, 0, cv.width, cv.height);
       p.contextCanvas = cv;
       p.contextBox = [x1, y1, x2, y2];
       return { x1, y1, w: cv.width, h: cv.height };
@@ -449,8 +474,9 @@ test.describe("a manual crop is square", () => {
     // with the box the app's mapping produced, so the comparison succeeds for any
     // mapping at all, including one that is wrong. A mapping bug has to move the
     // box somewhere else before the pixels can disagree.
-    const r = await page.evaluate((exp: [number, number, number, number]) => {
-      const p = window.__mosqAsync!.previews[0];
+    const r = await page.evaluate(async (exp: [number, number, number, number]) => {
+      const A = window.__mosqAsync!;
+      const p = A.previews[0];
       const box = p.cropBox!;
       const cv = p.cropCanvas;
       // Sample the crop against the FULL photo at box-offset coordinates: that is
@@ -459,7 +485,7 @@ test.describe("a manual crop is square", () => {
         [[0, 0], [cv.width - 1, 0], [0, cv.height - 1], [cv.width - 1, cv.height - 1]];
       const ctx = cv.getContext("2d")!;
       const got = pts.map(([x, y]) => Array.from(ctx.getImageData(x, y, 1, 1).data.slice(0, 3)));
-      const full = p.fullCanvas.getContext("2d")!;
+      const full = (await A.fullCanvasFor(p))!.getContext("2d")!;
       const want = pts.map(([x, y]) => {
         const d = full.getImageData(exp[0] + x, exp[1] + y, 1, 1).data;
         return [d[0], d[1], d[2]];

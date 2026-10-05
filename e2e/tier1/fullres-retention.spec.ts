@@ -240,9 +240,13 @@ test.describe("full-resolution retention", () => {
       // The same rectangle a user would drag: 20%-70% across, 25%-75% down.
       await A.applyCropFromFullSurface(0, [0.2, 0.25, 0.7, 0.75], performance.now());
       const q = A.previews[0]!;
+      const r = document.getElementById("crop-surface-full")!.getBoundingClientRect();
       return {
         box: (q.cropBox as number[]).slice(),
         cropCanvas: q.cropCanvas ? [q.cropCanvas.width, q.cropCanvas.height] : null,
+        // The panel's own rect, so the expectation below is built from the map
+        // rather than from a constant that only held for one viewport.
+        surf: { w: r.width, h: r.height },
         // The frame was fetched, drawn from and released rather than moved onto
         // the photo. Measured by what the cache holds, which is the only place a
         // fetched frame can now be: the `fullCanvas` field this used to read was
@@ -266,18 +270,52 @@ test.describe("full-resolution retention", () => {
     // display canvas is a proportional reduction of the photograph, so if the
     // geometry read ITS dimensions the horizontal numbers would come out at
     // roughly 2048/4032 of these - the whole test would fail.
+    //
+    // CONTRARY TO WHAT THIS ASSERTION USED TO SAY: the committed box is not the
+    // dragged rectangle. #106 makes every manual crop square, and the agreed
+    // contract is CUT-THE-BOX - `squareBox` keeps the centre and drops the
+    // overflow off the longer axis, rather than padding the shorter one up to
+    // 1:1 with pixels the user never pointed at. So the side is the SHORTER of
+    // the two mapped extents, here 1928 rather than the dragged 2016, and the
+    // horizontal edges sit inside the drag's rather than on them. Do not
+    // "restore" the width assertion below: it encodes the pre-square contract,
+    // which is the one thing #106 changed.
+    const boxAspect = after.surf.w / after.surf.h;
+    const imgAspect = before.fullW! / before.fullH!;
+    // contain, as `fitMapping` computes it: the axis where the surface has room
+    // to spare keeps k = 1 and the other is scaled up, letterboxed.
+    const kx = Math.max(1, boxAspect / imgAspect);
+    const ky = Math.max(1, imgAspect / boxAspect);
+    // The dragged rectangle in photograph pixels, before the constraint.
+    const dragW = 0.5 * kx * before.fullW!;
+    const dragH = 0.5 * ky * before.fullH!;
+    // ...and the square the constraint commits: the shorter extent, centred.
+    const side = Math.floor(Math.min(dragW, dragH));
+
     const [x1, y1, x2, y2] = after.box as [number, number, number, number];
-    expect(x1).toBeCloseTo(0.2 * before.fullW, -2);
-    expect(x2).toBeCloseTo(0.7 * before.fullW, -2);
-    expect(x2 - x1).toBeCloseTo(0.5 * before.fullW, -2);
+    // The box is SQUARE. This is the contract #106 introduced, asserted in its
+    // own terms rather than as a side length that happens to match.
+    expect(x2 - x1).toBe(y2 - y1);
+    // Its side is the shorter of the two mapped extents - cut-the-box, not
+    // pad-to-1:1 - and not the dragged width, which is the longer one.
+    expect(x2 - x1).toBeCloseTo(side, -2);
+    expect(x2 - x1).not.toBeCloseTo(dragW, -2);
+    // The overflow is dropped symmetrically about the drag's centre, so the box
+    // is centred on the drag rather than anchored at either of its edges.
+    expect((x1 + x2) / 2).toBeCloseTo((0.2 + 0.7) / 2 * before.fullW!, -2);
+    // Still where the pointer was: the horizontal edges bracket the drag's, just
+    // inside it now that the longer axis has been trimmed.
+    expect(x1).toBeGreaterThanOrEqual(0.2 * before.fullW! - 1);
+    expect(x2).toBeLessThanOrEqual(0.7 * before.fullW! + 1);
     // The vertical extent is inside the photograph whatever the letterboxing,
     // and is a real region rather than a sliver.
     expect(y1).toBeGreaterThan(0);
-    expect(y2).toBeLessThan(before.fullH);
+    expect(y2).toBeLessThan(before.fullH!);
     expect(y2 - y1).toBeGreaterThan(300);
     // And the crop canvas is the box, not the photograph: a 2048-wide canvas
-    // would be far narrower than the 2016-pixel box asked for.
+    // would be nowhere near a square side computed from the photo's own pixels.
     expect(after.cropCanvas![0]).toBeCloseTo(x2 - x1, -2);
+    expect(after.cropCanvas![1]).toBeCloseTo(y2 - y1, -2);
     expect(after.cropCanvas![0]).toBeGreaterThan(1500);
     expect(before.box.length).toBe(4);
   });
