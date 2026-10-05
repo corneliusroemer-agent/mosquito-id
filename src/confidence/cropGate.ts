@@ -21,10 +21,13 @@ import { informativeRows } from "./softmax";
  * two shipped text heads are read in full, as they were.
  */
 export function cropPassesGate(head: Head, spP: number[], nuP: number[]): boolean {
-  const keep = informativeRows(head, head.nuisance_emb, head.nuisance?.length ?? 0);
+  const keep = informativeRows(head, head.nuisance_emb, Math.max(head.nuisance?.length ?? 0, nuP.length));
   let top = -Infinity;
   for (let k = 0; k < nuP.length; k++) {
-    if (keep[k]) top = Math.max(top, nuP[k]!);
+    // A non-finite posterior is skipped, as `nonMosquitoGate` skips it: the two
+    // gates must not disagree about which rows are evidence, and that includes
+    // which of them are readable.
+    if (keep[k] && Number.isFinite(nuP[k])) top = Math.max(top, nuP[k]!);
   }
   return Math.max(...spP) >= top;
 }

@@ -47,10 +47,30 @@ function withPlaceholderIntercept(head: Head, w: number): Head {
   const bias = head.biasIndex!;
   const nu = (head.nuisance_emb as number[]).slice();
   const n = head.nuisance?.length ?? 0;
+  const keep = informativeRows(head, head.nuisance_emb, n);
   for (let i = 0; i < n; i++) {
-    if (informativeRows(head, head.nuisance_emb, n)[i]) continue;
+    if (keep[i]) continue;
     nu[i * D + bias] = w;
   }
+  return { ...head, nuisance_emb: nu };
+}
+
+/**
+ * culico's nuisance block with ONE real detector among the placeholders.
+ *
+ * The all-placeholder block is the shape culico ships, and on its own it cannot
+ * tell "the gate filtered the placeholders out" apart from "the gate short-
+ * circuits when no row is fitted" - both return the crop. This is the shape a
+ * partial refit produces and the one that separates them: a head whose nuisance
+ * block is half real evidence must have that half read, and only that half.
+ */
+function partlyFittedHead(w: number): Head {
+  const head = withPlaceholderIntercept(culicoHead(), w);
+  const D = head.dim;
+  const nu = (head.nuisance_emb as number[]).slice();
+  // Row 0 becomes a detector: all its mass on its own coordinate, the bias zero.
+  for (let k = 0; k < D; k++) nu[k] = 0;
+  nu[0] = 1;
   return { ...head, nuisance_emb: nu };
 }
 
@@ -64,6 +84,33 @@ function hesitantCrop(head: Head): number[] {
   const emb = new Array<number>(head.dim).fill(0);
   emb[head.biasIndex!] = 1;
   return emb;
+}
+
+/**
+ * A two-species, N-nuisance head whose rows are unit vectors on their own
+ * coordinate, every one of them informative. Small enough to reason about by
+ * hand: an embedding is a list of the coordinates it points along, and each row's
+ * logit is that coordinate times the scale.
+ */
+function syntheticHead(nuisance: number): Head {
+  const D = 2 + nuisance;
+  const emb = (from: number, rows: number): number[] => {
+    const out: number[] = [];
+    for (let r = 0; r < rows; r++) {
+      const v = new Array<number>(D).fill(0);
+      v[from + r] = 1;
+      out.push(...v);
+    }
+    return out;
+  };
+  return {
+    species: ["Aedes aegypti", "Aedes albopictus"],
+    nuisance: Array.from({ length: nuisance }, (_, i) => `nuisance ${i}`),
+    dim: D,
+    logit_scale: 10,
+    species_emb: emb(0, 2),
+    nuisance_emb: emb(2, nuisance),
+  };
 }
 
 const real = culicoHead();
@@ -131,16 +178,73 @@ describe("the crop gate reads only rows that carry image information", () => {
   it("leaves the shipped heads' crops exactly where they were", () => {
     // The two text heads have no bias coordinate, so every row of theirs is
     // informative and the filter removes nothing: the gate's answer is the one
-    // the raw comparison gave.
+    // the raw comparison gave. Swept over every species row rather than one, so
+    // both answers of the comparison are exercised - a control that only ever
+    // sees crops the old gate kept cannot tell the gate from one that always
+    // keeps.
+    let sawARejection = false;
     for (const file of ["text_embeds.json", "text_embeds_b16.json"]) {
       const raw = JSON.parse(readFileSync(join(here, "..", "public", file), "utf8")) as Record<string, unknown>;
       const head = { ...raw } as unknown as Head;
-      const first = head.species_emb as number[];
-      const emb = new Array<number>(head.dim).fill(0);
-      for (let k = 0; k < head.dim; k++) emb[k] = first[k]!;
-      const j = softmaxJoint(head, emb);
-      const was = Math.max(...j.spP) >= Math.max(...j.nuP);
-      expect(cropPassesGate(head, j.spP, j.nuP), file).toBe(was);
+      const species = head.species_emb as number[];
+      for (let i = 0; i < head.species.length; i++) {
+        const emb = new Array<number>(head.dim).fill(0);
+        for (let k = 0; k < head.dim; k++) emb[k] = species[i * head.dim + k]!;
+        const j = softmaxJoint(head, emb);
+        const was = Math.max(...j.spP) >= Math.max(...j.nuP);
+        if (!was) sawARejection = true;
+        expect(cropPassesGate(head, j.spP, j.nuP), `${file} row ${i}`).toBe(was);
+      }
     }
+    expect(sawARejection).toBe(true);
+  });
+  it("reads the fitted half of a partly-fitted nuisance block, and only that half", () => {
+    // The all-placeholder block cannot tell a filter from a short circuit: with
+    // no fitted row there is nothing left to read, so both return the crop. Here
+    // one row of the eight carries real weight, which is the shape a partial
+    // refit produces, and the placeholders still outscore every species row.
+    const head = partlyFittedHead(1);
+    const keep = informativeRows(head, head.nuisance_emb, head.nuisance!.length);
+    expect(keep.filter(Boolean)).toHaveLength(1);
+
+    const j = softmaxJoint(head, hesitant);
+    // The raw comparison refuses this crop on the placeholders alone...
+    expect(Math.max(...j.nuP)).toBeGreaterThan(Math.max(...j.spP));
+    // ...and the one row that is evidence says no such thing.
+    expect(j.nuP[keep.indexOf(true)]!).toBeLessThan(Math.max(...j.spP));
+    expect(cropPassesGate(head, j.spP, j.nuP)).toBe(true);
+  });
+
+  it("compares the best nuisance class, not the block's total mass", () => {
+    // What the crop gate compares is unchanged by the row filter, and this is
+    // the case that says so: eight nuisance classes each weaker than the best
+    // species class, together heavier than it. Under a mass rule the crop would
+    // go; under the class rule it stays.
+    const head = syntheticHead(8);
+    const D = head.dim;
+    const emb = new Array<number>(D).fill(0);
+    emb[0] = 1;
+    emb[1] = 1;
+    for (let i = 0; i < 8; i++) emb[2 + i] = 0.9;
+    const j = softmaxJoint(head, emb);
+    const top = Math.max(...j.nuP);
+    const mass = j.nuP.reduce((a, b) => a + b, 0);
+    const best = Math.max(...j.spP);
+    expect(top).toBeLessThan(best);
+    expect(mass).toBeGreaterThan(best);
+    expect(cropPassesGate(head, j.spP, j.nuP)).toBe(true);
+  });
+
+  it("skips a nuisance posterior it cannot read, as the verdict gate does", () => {
+    // A NaN is not evidence either way. `nonMosquitoGate` skips it; a crop gate
+    // that folded it into its maximum would turn one unreadable row into a
+    // refusal, and the two gates would disagree about the same number.
+    const head = syntheticHead(8);
+    const D = head.dim;
+    const emb = new Array<number>(D).fill(0);
+    emb[2] = 5; // one nuisance row, overwhelmingly
+    const j = softmaxJoint(head, emb);
+    expect(cropPassesGate(head, j.spP, j.nuP)).toBe(false);
+    expect(cropPassesGate(head, j.spP, j.nuP.map(() => NaN))).toBe(true);
   });
 });
