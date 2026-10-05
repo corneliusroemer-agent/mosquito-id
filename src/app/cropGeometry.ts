@@ -81,11 +81,25 @@ export function surfacePointToFrame(pt: [number, number], img: CanvasLike, mappi
  * Force a box to be a square, keeping the centre and dropping the overflow off
  * the longer axis.
  *
- * Manual crops are square by force. The measurement behind that decision is
- * `investigations/2026-10-04-granularity/`: at the classifier's input size a
- * square crop is neither better nor worse than the free-form one it replaces, so
- * this buys geometry consistency and a predictable aspect across a batch - not
- * accuracy. What it costs is pixels on the longer axis, which is why the box
+ * Manual crops are square by force. This is a geometry-consistency decision, not
+ * an accuracy one, and the measurement behind it says so: comparing square
+ * upstream against centre-crop and letterbox on 4,172 held-out images
+ * (`investigations/2026-10-02-mosquito-id/64-crop-geometry.md`, in
+ * `scratch/2026-10-04-square-crop`) found the geometries indistinguishable on
+ * the headline - the candidates disagree with centre-crop on ~8% of images and
+ * split those disagreements evenly. That report also warns its design cannot
+ * resolve the ~2 pp macro-F1 differences this project treats as real, so its
+ * null is not a verdict; it is enough to say a square crop is not buying
+ * accuracy, which is what makes forcing one free to do for consistency's sake.
+ *
+ * That report's one resolved effect is worth stating rather than rediscovering:
+ * a square upstream LOWERS entropy at unchanged accuracy - more confident, not
+ * more righter - the wrong direction for a head feeding a confidence floor. The
+ * box is square here, which moves the geometry in the same direction, and it is
+ * deliberately left there: the crop is resized to the model's input size either
+ * way, so what is constrained is the box the user commits, not the tensor.
+ *
+ * What forcing a square costs is pixels on the longer axis, which is why the box
  * only ever shrinks and is anchored on its centre.
  *
  * Three properties make this the right place for the constraint:

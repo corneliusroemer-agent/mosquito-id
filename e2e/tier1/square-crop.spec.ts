@@ -295,6 +295,72 @@ test.describe("a manual crop is square", () => {
 
     expect(errors(page)).toHaveLength(0);
   });
+
+  test("a drag on the zoom panel squares the crop and adds the context offset", async ({ page }) => {
+    // The zoom panel is the branch a full-panel-only test never reaches: its
+    // frame is the CONTEXT region, not the whole photo, so the box it produces
+    // is in context-canvas coordinates and has to have the region's offset added
+    // before it is a box in photo pixels. Forget the offset and the crop is
+    // still perfectly square - just of entirely the wrong part of the photo,
+    // which is the failure a shape assertion cannot see.
+    await boot(page);
+    await populate(page, ONE);
+    await paintCoordinatePattern(page);
+    await installFakeClassifier(page);
+
+    // A context region genuinely offset from the photo's origin, so a missing
+    // ox/oy would show. Cut it 1:1 from the pattern, as extractContextCrop does.
+    const region = await page.evaluate(() => {
+      const p = window.__mosqAsync!.previews[0];
+      const [x1, y1, x2, y2] = [300, 220, 2100, 1500];
+      const cv = document.createElement("canvas");
+      cv.width = x2 - x1;
+      cv.height = y2 - y1;
+      cv.getContext("2d")!.drawImage(p.fullCanvas, x1, y1, cv.width, cv.height, 0, 0, cv.width, cv.height);
+      p.contextCanvas = cv;
+      p.contextBox = [x1, y1, x2, y2];
+      return { x1, y1, w: cv.width, h: cv.height };
+    });
+    await settle(page);
+
+    const from = { x: 0.25, y: 0.3 };
+    const to = { x: 0.75, y: 0.55 };
+    await dragOnSurface(page, "#crop-surface-zoomed", from.x, from.y, to.x, to.y);
+
+    const r = await page.evaluate(() => {
+      const p = window.__mosqAsync!.previews[0];
+      const box = p.cropBox!;
+      const cv = p.cropCanvas;
+      // Sample the crop against the FULL photo at box-offset coordinates: that is
+      // where the pixels have to have come from once the context offset is added.
+      const pts = [[0, 0], [cv.width - 1, 0], [0, cv.height - 1], [cv.width - 1, cv.height - 1]];
+      const ctx = cv.getContext("2d")!;
+      const got = pts.map(([x, y]) => Array.from(ctx.getImageData(x, y, 1, 1).data.slice(0, 3)));
+      const full = p.fullCanvas.getContext("2d")!;
+      const want = pts.map(([x, y]) => {
+        const d = full.getImageData(box[0] + x, box[1] + y, 1, 1).data;
+        return [d[0], d[1], d[2]];
+      });
+      return { box, cw: cv.width, ch: cv.height, got, want };
+    });
+
+    // Square...
+    expect(r.cw).toBe(r.ch);
+    expect(r.box[2] - r.box[0]).toBe(r.box[3] - r.box[1]);
+    // ...and the right pixels, which requires the offset to have been added.
+    expect(r.got).toEqual(r.want);
+
+    // The box must land INSIDE the context region, which is offset from the
+    // origin. A box that ignored the offset would sit around (0,0) rather than
+    // around the region's own (300,220).
+    expect(r.box[0]).toBeGreaterThanOrEqual(region.x1 - 1);
+    expect(r.box[1]).toBeGreaterThanOrEqual(region.y1 - 1);
+    expect(r.box[2]).toBeLessThanOrEqual(region.x1 + region.w + 1);
+    expect(r.box[3]).toBeLessThanOrEqual(region.y1 + region.h + 1);
+
+    expect(errors(page)).toHaveLength(0);
+  });
+
 });
 
 /** Press, move, release on the full-photo panel, in surface fractions. */
@@ -305,7 +371,19 @@ async function dragOnFullSurface(
   toX: number,
   toY: number,
 ): Promise<void> {
-  const surf = (await page.locator("#crop-surface-full").boundingBox())!;
+  return dragOnSurface(page, "#crop-surface-full", fromX, fromY, toX, toY);
+}
+
+/** The same gesture on either panel; the two differ only in which panel. */
+async function dragOnSurface(
+  page: import("@playwright/test").Page,
+  selector: string,
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+): Promise<void> {
+  const surf = (await page.locator(selector).boundingBox())!;
   const pt = (fx: number, fy: number) => ({
     x: surf.x + surf.width * fx,
     y: surf.y + surf.height * fy,
