@@ -77,18 +77,52 @@ describe("every view is pooled", () => {
   it("keeps the nuisance mass, the agreement and a verdict on the pooled result", () => {
     // Removing the router must not skip the rest of the fusion. Every field the
     // router's early return used to carry has to survive it.
-    const fused = fuseViews(head, [view("Aedes aegypti", 0.6), whole()])!;
-    expect(fused.nuP[0]!).toBeGreaterThan(0);
-    expect(fused.verdict).toBeTruthy();
+    //
+    // Asserted on VALUES, not on the objects merely being truthy or non-null:
+    // `verdictFrom` always returns something, and `viewAgreement` returns
+    // non-null whenever it is handed two views, so those checks would pass
+    // against an implementation that computed neither. An adversarial review
+    // caught exactly that.
+    const crop = view("Aedes aegypti", 0.6);
+    const fused = fuseViews(head, [crop, whole()])!;
+    const alone = fuseViews(head, [crop])!;
+
+    expect(fused.nuP.reduce((a, b) => a + b, 0)).toBeGreaterThan(0);
+    // Nuisance pools log-linearly, then shares ONE denominator with species and
+    // adjacent - so the fused mass is the geometric mean of the views' nuisance
+    // divided by that denominator, not the raw mean. Checked against the closed
+    // form rather than "between the inputs", which a renormalised value can fail.
+    const nuOf = (r: { nuP: number[] }) => r.nuP.reduce((a, b) => a + b, 0);
+    const w = whole();
+    // sqrt(0.05 * 0.05) = 0.05 pre-normalisation; the fused value is that scaled
+    // by the species+adjacent share, so strictly positive and below the raw mean.
+    expect(nuOf(fused)).toBeGreaterThan(0);
+    expect(nuOf(fused)).toBeLessThan(Math.sqrt(crop.nuTotal * w.nuTotal));
+    // A view whose nuisance is negligible must drag the pooled mass DOWN. If one
+    // view's nuisance were ignored the pooled value would sit at 0.9.
+    const skewed = { ...w, nuTotal: 0.9 };
+    expect(nuOf(fuseViews(head, [crop, skewed])!)).toBeLessThan(0.9);
+    // The verdict is computed FROM the fused posterior: two disagreeing views
+    // pool to a near-tie at genus level, which is a different answer than either
+    // view's own.
+    expect(fused.verdict.topGenusP).not.toBeCloseTo(alone.verdict.topGenusP, 6);
+    // And the agreement names the disagreement, which a crop-only answer cannot.
     expect(fused.agreement).not.toBeNull();
+    expect(fused.agreement!.agree).toBe(false);
+    expect(fused.agreement!.runnersUp.length).toBeGreaterThan(0);
     expect(Object.keys(fused.logits).length).toBe(head.species.length);
   });
 
-  it("still fuses a single view, and to that view's own numbers", () => {
-    // A photo with no whole frame offers one view; there is nothing to pool.
+  it("still fuses a single view rather than refusing it", () => {
+    // A photo with no whole frame offers one view; there is nothing to pool, and
+    // the result is that one view rather than null. The renormalisation invariant
+    // is pinned in router-removal.test.ts against a closed form.
     const c = view("Aedes aegypti", 0.3);
     const alone = fuseViews(head, [c])!;
     expect(alone.nViews).toBe(1);
+    expect(alone.spP.length).toBe(head.species.length);
+    // And no view means no agreement to report.
+    expect(alone.agreement).toBeNull();
   });
 
   it("two identical views sharpen rather than collapsing to one", () => {
