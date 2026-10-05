@@ -315,6 +315,29 @@ export const WEBGPU_MODELS: Record<string, ModelConfig> = {
     size: 172725427,
     reports: "species"
   },
+  // b16-ft: the same tower, crop-jitter fine-tuned (A2a epoch 6 - the primary crop
+  // of a box perturbed by the detector's own empirical error), with a 16-way linear
+  // probe refitted on top. On the MA DEV set the fine-tuned tower scores genus4 0.908
+  // on the primary crop alone against 0.856 for the frozen one at identical inference
+  // cost, because the robustness the multi-view arms were buying is absorbed into the
+  // encoder.
+  //
+  // It ships as a SELECTOR entry and NOT as the default. The gain above is DEV
+  // evidence; the dataset-v2 confirmation is not in, and the standing instruction is
+  // that the default does not flip if it comes out against. `webgpu-b16` stays
+  // selectable beside it, so promoting this is one line here and reversible.
+  //
+  // Its head is 513-wide against this engine's 513-wide graph, which appends a
+  // constant 1.0 so a fitted intercept has somewhere to live - see docs/HEADS.md.
+  "webgpu-b16-ft": {
+    path: "bioclip_b16_ft_fp16.onnx",
+    embedsPath: "text_embeds_b16ft.json",
+    taxonomyPath: "taxonomy_b16ft.json",
+    label: "BioCLIP B/16 fine-tuned (experimental · 174 MB)",
+    name: "BioCLIP B/16 crop-jitter FT FP16",
+    size: 173519440,
+    reports: "species"
+  },
   "webgpu-fp16": {
     path: "bioclip_2_5_fp16.onnx",
     embedsPath: "text_embeds.json",
