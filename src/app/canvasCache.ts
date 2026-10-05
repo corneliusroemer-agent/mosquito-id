@@ -183,6 +183,68 @@ export function thumbnailUrl(cv: HTMLCanvasElement | null, quality: number): str
   return url;
 }
 
+/**
+ * True when every sampled pixel of `data` (RGBA) is the same colour. A decoder
+ * that fails to fill a resized bitmap hands back a flat frame (black in #77,
+ * possibly white or grey elsewhere), and the tile then shows a flat square, so
+ * the result is checked rather than trusted. A genuinely flat photo takes the
+ * fallback path too, which is harmless.
+ */
+export function looksBlank(data: ArrayLike<number>): boolean {
+  const n = data.length / 4;
+  const stride = Math.max(1, Math.floor(n / 512));
+  for (let i = stride; i < n; i += stride) {
+    if (data[4 * i] !== data[0] || data[4 * i + 1] !== data[1] || data[4 * i + 2] !== data[2]) return false;
+  }
+  return true;
+}
+
+/**
+ * Fill the thumbnail memo for `cv` using the browser's own resize, so the
+ * synchronous `thumbnailUrl` that follows is a cache hit.
+ *
+ * `createImageBitmap(src, { resizeWidth, resizeQuality: "high" })` resamples
+ * natively, where `drawImage` of a 12-50 MP canvas reads every source pixel on
+ * the main thread. `src` is the photo's File when the tile shows the whole
+ * photo (the decoder then downsamples while decoding, with the EXIF
+ * orientation applied) and otherwise the canvas itself, which is already
+ * oriented. Anything that goes wrong leaves the memo empty, and `thumbnailUrl`
+ * falls back to its own resample.
+ */
+export async function prepareThumbnail(
+  cv: HTMLCanvasElement | null,
+  quality: number,
+  file?: Blob | null,
+): Promise<void> {
+  if (!cv || typeof createImageBitmap !== "function") return;
+  let byQuality = thumbUrlCache.get(cv);
+  if (byQuality?.has(quality)) return;
+  const size = thumbnailSize(cv.width, cv.height);
+  if (size.w === cv.width && size.h === cv.height) return;
+  try {
+    const bmp = file
+      ? await createImageBitmap(file, {
+          resizeWidth: size.w, resizeHeight: size.h, resizeQuality: "high", imageOrientation: "from-image",
+        })
+      : await createImageBitmap(cv, { resizeWidth: size.w, resizeHeight: size.h, resizeQuality: "high" });
+    try {
+      const out = document.createElement("canvas");
+      out.width = bmp.width;
+      out.height = bmp.height;
+      const ctx = out.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(bmp, 0, 0);
+      if (looksBlank(ctx.getImageData(0, 0, out.width, out.height).data)) return;
+      if (!byQuality) { byQuality = new Map(); thumbUrlCache.set(cv, byQuality); }
+      byQuality.set(quality, out.toDataURL("image/jpeg", quality));
+    } finally {
+      bmp.close();
+    }
+  } catch {
+    // Left to thumbnailUrl's own path.
+  }
+}
+
 // Setting an <img>'s src to the value it already holds is cheap to write and
 // not free to run: the element drops the decoded frame and re-decodes. The
 // caches above make the encode free, but only skipping the assignment makes the

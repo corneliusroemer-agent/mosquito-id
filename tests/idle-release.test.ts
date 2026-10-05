@@ -155,3 +155,76 @@ describe("dispose stops the timer", () => {
     expect(release).not.toHaveBeenCalled();
   });
 });
+
+describe("an async release and a restore cannot interleave", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /**
+   * The state machine only knows about the released flag; the app's own
+   * `sessClip`/`sessDet` are nulled by the release AFTER it has awaited the
+   * sessions. Before the release awaited anything that was unreachable, and it
+   * is reachable now that `release()` is async (which is where the weight
+   * buffers are actually freed). A restore that ran inside that window would be
+   * clobbered by the tail of the release it was supposed to undo.
+   */
+  it("a restore requested while the release is still awaiting runs after it", async () => {
+    const order: string[] = [];
+    let finishRelease: () => void = () => {};
+    const idle = createIdleRelease({
+      delayMs: 1,
+      release: () =>
+        new Promise<void>((r) => {
+          order.push("release-start");
+          finishRelease = () => {
+            order.push("release-end");
+            r();
+          };
+        }),
+      restore: async () => {
+        order.push("restore");
+      },
+    });
+
+    const releasing = idle.releaseNow();
+    // Still mid-release: the sessions have not resolved.
+    await vi.advanceTimersByTimeAsync(0);
+    const restoring = idle.ensure();
+    finishRelease();
+    await Promise.all([releasing, restoring]);
+
+    expect(order).toEqual(["release-start", "release-end", "restore"]);
+  });
+
+  it("a second releaseNow queues behind the first rather than overlapping it", async () => {
+    const order: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const idle = createIdleRelease({
+      delayMs: 1,
+      release: () =>
+        new Promise<void>((r) => {
+          order.push("start");
+          resolvers.push(() => {
+            order.push("end");
+            r();
+          });
+        }),
+      restore: vi.fn(),
+    });
+
+    const first = idle.releaseNow();
+    const second = idle.releaseNow();
+    await vi.advanceTimersByTimeAsync(0);
+    // The second is parked: only the first release has been entered.
+    expect(order).toEqual(["start"]);
+
+    resolvers[0]!();
+    await vi.advanceTimersByTimeAsync(0);
+    // The first finished, and only now did the second begin.
+    expect(order).toEqual(["start", "end", "start"]);
+
+    resolvers[1]!();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["start", "end", "start", "end"]);
+  });
+});

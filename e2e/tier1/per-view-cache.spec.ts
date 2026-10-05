@@ -79,6 +79,27 @@ async function displayedScores(page: Page): Promise<string[]> {
   );
 }
 
+/**
+ * Turn on the whole-frame view, which the crop-only default leaves off.
+ *
+ * This spec is about the round trip between the two views, so it needs the app
+ * in the configuration where both exist. The control boots unchecked since the
+ * crop-only default (#102), and setting an already-unchecked box fires no change
+ * at all - so a spec that warmed the cache by toggling off first would be
+ * warming nothing. Checked through the same control a user would, after
+ * `populate` has made the gallery visible (the control lives in a section that
+ * is `display:none` until then), so this also runs the pass that classifies
+ * every photo under both views.
+ */
+async function enableWholeFrame(page: Page): Promise<void> {
+  await page.locator("#chk-whole-frame").setChecked(true);
+  await page.waitForFunction(
+    () => !window.__mosqAsync!.previews.some((p: any) => p.pending),
+    null,
+    { timeout: 10_000 },
+  );
+}
+
 /** Click the checkbox and wait for the pass it triggers to settle. */
 async function toggleAndSettle(page: Page, checked: boolean, budgetMs = 5000) {
   await page.locator("#chk-whole-frame").setChecked(checked);
@@ -96,17 +117,18 @@ test.describe("a whole-frame toggle re-fuses cached views", () => {
     await installCountingClassifier(page);
     await settle(page);
 
-    // Populate writes records without classifying them, so the cache starts
-    // empty. The first toggle in each direction scores the view that has never
-    // been scored - that is real work, not a regression - and after the pair
-    // both views of every photo are on the record.
-    const warm0 = await classifierCalls(page);
-    await toggleAndSettle(page, false);
-    const warm1 = await classifierCalls(page);
-    expect(warm1, "the first toggle classified nothing").toBeGreaterThan(warm0);
-    await toggleAndSettle(page, true);
-    const warm2 = await classifierCalls(page);
-    expect(warm2, "widening back classified nothing").toBeGreaterThan(warm1);
+    // `populate` writes records without classifying them, so the cache starts
+    // empty. Crop-only is the default (#102), so the pass that fills the cache
+    // is the one that CHECKS the control: with both views pooled it scores the
+    // crop and the whole frame of every photo. That is real work, not a
+    // regression, and it is asserted rather than assumed - a pass that widened
+    // the pool without scoring the view it added would leave the toggles below
+    // free for the wrong reason.
+    await enableWholeFrame(page);
+    expect(
+      await classifierCalls(page),
+      "widening the pool classified nothing, so no view was ever cached",
+    ).toBeGreaterThan(0);
 
     const settledScores = await displayedScores(page);
 
