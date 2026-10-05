@@ -14,7 +14,8 @@
  * path that adds evidence to `FusedResult` and forgets to file it here is a
  * type error rather than a silent omission.
  */
-import type { Agreement, Verdict } from "../confidence/types";
+import type { Agreement, Verdict, ViewResult } from "../confidence/types";
+import type { ViewKind } from "./viewSelection";
 
 /**
  * One photo in the gallery, in full.
@@ -129,6 +130,24 @@ export interface PhotoState {
   agreement: Agreement | null;
   viewsLanded: number;
   viewsTotal: number;
+  /**
+   * What each view of this photo said, kept per view rather than as the one
+   * fused posterior `detail` holds.
+   *
+   * A view's posterior is a function of (the pixels of that view, the engine,
+   * the head), and nothing else. The whole-frame checkbox changes which views
+   * are POOLED, never what a view says, so a toggle is a re-fusion of these and
+   * not a re-classification. Caching the fused posterior instead would make the
+   * toggle look free and silently destroy what pooling needs: `viewAgreement`
+   * compares the views against each other, and a single fused distribution
+   * carries no per-view detail to compare.
+   *
+   * Keyed by view kind, so a crop-only photo holds one entry and a two-view
+   * photo holds two. Each entry is stamped with the identity of everything that
+   * produced it, and a mismatch is a miss rather than a stale read - see
+   * `ViewCacheEntry`.
+   */
+  viewCache?: Partial<Record<ViewKind, ViewCacheEntry>>;
 
   // --- which engine filed these numbers ---
   /**
@@ -145,6 +164,15 @@ export interface PhotoState {
    * that no longer matches and drops its result.
    */
   rev: number;
+  /**
+   * Bumped only when the photo's PIXELS change, not on every recompute.
+   *
+   * `rev` cannot key the view cache: a whole-frame toggle recomputes without
+   * changing a pixel, and bumping `rev` there would invalidate the very entries
+   * the toggle exists to reuse. This is that separate counter, and the cache key
+   * is built from it rather than from `rev`.
+   */
+  contentRev?: number;
   /** A computation is in flight; the tile shows a pending badge. */
   pending: boolean;
   error: string | null;
@@ -165,9 +193,18 @@ export interface PhotoState {
  *
  * Bumping the revision is what makes the last release win. Returns the new
  * revision, which the caller passes back to `ownsRecompute`.
+ *
+ * `contentChanged` says whether the photo's PIXELS are about to change, which is
+ * a separate question from whether its scores are being recomputed. A new crop
+ * release does both. A whole-frame toggle does only the second: the same crop
+ * canvas and the same whole frame are about to be scored, just pooled
+ * differently. Passing `false` is what lets `viewCache` survive a toggle, so it
+ * is stated at the call site rather than inferred. It defaults to `true` because
+ * that is the answer that cannot serve a stale posterior.
  */
-export function beginRecompute(p: PhotoState): number {
+export function beginRecompute(p: PhotoState, contentChanged = true): number {
   p.rev = (p.rev || 0) + 1;
+  if (contentChanged) p.contentRev = (p.contentRev || 0) + 1;
   p.pending = true;
   p.error = null;
   // The agreement on screen described the previous crop's views. It goes with
@@ -248,3 +285,88 @@ export function markComputeFailed(
  * can tell "nothing to do" from "the model failed".
  */
 export class Superseded extends Error {}
+
+/**
+ * One view's posteriors, stamped with everything that produced them.
+ *
+ * The stamp is the cache key. Keying on the view kind alone would serve the
+ * previous engine's numbers after a switch, or a previous head's after a refit,
+ * and neither is detectable downstream: the shape is identical, so a stale read
+ * is a confident wrong answer rather than an error. So each entry carries:
+ *
+ * - `contentRev` - the photo's PIXEL generation, bumped only by
+ *   `beginRecompute(p, true)`. A new crop release or a revert to the full frame
+ *   bumps it, so a photo whose content changed cannot match. This is the reuse
+ *   of the record's own guard: the cache is invalidated by exactly the event
+ *   that already invalidates a stale commit, rather than by a second,
+ *   separately-maintained notion of "this photo changed". It is deliberately NOT
+ *   `rev`, which a pooling-only recompute also bumps.
+ * - `engine` - the engine key, the same string `scoredBy` files. An engine switch
+ *   re-classifies, so a cached entry from another engine is a miss.
+ * - `head` - the head object the softmax ran against, compared by identity. A
+ *   refit replaces the head object rather than mutating it, so identity is the
+ *   test; a string of the species list would be a re-derivation of the same fact
+ *   that could go stale.
+ *
+ * `contentRev` is deliberately the record's own generation counter and NOT
+ * `fingerprint`: the fingerprint is the file's bytes, used for cross-photo
+ * de-duplication, and two different photos of one file share it while a single
+ * photo's crop changes without it changing at all. They answer different
+ * questions.
+ */
+export interface ViewCacheEntry {
+  /** The pixel generation this view was scored at. */
+  contentRev: number;
+  /** The engine key this view was scored by. */
+  engine: string;
+  /** The head object this view was scored against, by identity. */
+  head: unknown;
+  /** The per-view result, exactly as `fuseViews` consumes it. */
+  result: ViewResult;
+}
+
+/** The stamp every lookup is made against, read once per pass. */
+export interface ViewCacheStamp {
+  contentRev: number;
+  engine: string;
+  head: unknown;
+}
+
+/**
+ * The cached posterior for one view, or null when there is nothing usable.
+ *
+ * A missing entry and a stale one are the same answer here: run the classifier.
+ * Nothing here throws or repairs, so a cache can never be the reason a photo has
+ * no score - the miss falls through to the path that produces one.
+ */
+export function readViewCache(
+  p: PhotoState,
+  kind: ViewKind,
+  stamp: ViewCacheStamp,
+): ViewResult | null {
+  const e = p.viewCache?.[kind];
+  if (!e) return null;
+  if (e.contentRev !== stamp.contentRev || e.engine !== stamp.engine || e.head !== stamp.head) return null;
+  return e.result;
+}
+
+/**
+ * File one view's posteriors, replacing whatever was there for that kind.
+ *
+ * Written only by the computation that still owns the photo: the caller holds
+ * the same `rev` its `ownsRecompute` check just verified, so a classification
+ * overtaken by a newer crop cannot leave its result behind for the next read.
+ */
+export function writeViewCache(
+  p: PhotoState,
+  kind: ViewKind,
+  stamp: ViewCacheStamp,
+  result: ViewResult,
+): void {
+  (p.viewCache ??= {})[kind] = {
+    contentRev: stamp.contentRev,
+    engine: stamp.engine,
+    head: stamp.head,
+    result,
+  };
+}

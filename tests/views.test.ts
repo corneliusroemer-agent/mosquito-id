@@ -40,8 +40,8 @@ describe("viewsFor", () => {
     const crop = canvas(200, 200);
     const views = viewsFor(full, crop, [10, 10, 210, 210], true);
     expect(views).toHaveLength(2);
-    expect(views[0]).toEqual({ canvas: crop, box: [10, 10, 210, 210] });
-    expect(views[1]).toEqual({ canvas: full, box: [0, 0, 1000, 800] });
+    expect(views[0]).toEqual({ canvas: crop, box: [10, 10, 210, 210], kind: "crop" });
+    expect(views[1]).toEqual({ canvas: full, box: [0, 0, 1000, 800], kind: "whole" });
   });
 
   it("offers only the crop when the whole frame is turned off", () => {
@@ -58,7 +58,7 @@ describe("viewsFor", () => {
     const full = canvas(640, 480);
     const views = viewsFor(full, full, null, true);
     expect(views).toHaveLength(1);
-    expect(views[0]).toEqual({ canvas: full, box: [0, 0, 640, 480] });
+    expect(views[0]).toEqual({ canvas: full, box: [0, 0, 640, 480], kind: "whole" });
   });
 
   it("does not fuse a whole frame with itself when its crop is a different canvas", () => {
@@ -75,7 +75,7 @@ describe("viewsFor", () => {
     const display = canvas(2048, 1536);
     const views = viewsFor(full, display, null, true);
     expect(views).toHaveLength(1);
-    expect(views[0]).toEqual({ canvas: full, box: [0, 0, 4032, 3024] });
+    expect(views[0]).toEqual({ canvas: full, box: [0, 0, 4032, 3024], kind: "whole" });
   });
 
   it("still offers the crop when the box is there, whatever the canvases are", () => {
@@ -86,7 +86,7 @@ describe("viewsFor", () => {
     const box: Box = [10, 10, 210, 210];
     const views = viewsFor(full, full, box, true);
     expect(views).toHaveLength(2);
-    expect(views[0]).toEqual({ canvas: full, box });
+    expect(views[0]).toEqual({ canvas: full, box, kind: "crop" });
   });
 
   it("offers the whole frame alone for a photo with no crop", () => {

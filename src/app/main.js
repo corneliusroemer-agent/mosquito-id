@@ -62,7 +62,7 @@ import { clipTensor, embedCanvas as _embedCanvas } from "./embedding";
 import { halvingEnabled } from "./resizeMode";
 import { isUsableIntermediate } from "./downscale";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
-         Superseded } from "./photoRecord";
+         readViewCache, writeViewCache, Superseded } from "./photoRecord";
 import { releaseGpuResources } from "./gpuRelease";
 import { classifyCanvasServer as _classifyCanvasServer,
          classifyViewLocal as _classifyViewLocal,
@@ -1178,7 +1178,13 @@ async function classifyImage(imgBitmap, filename, file) {
   }
 
   const views = [];
-  if (cropView) views.push(cropView);
+  // Each view paired with the kind it is, so the record built below can be filed
+  // with the per-view posteriors the whole-frame toggle re-fuses. A first toggle
+  // after a batch that started empty would otherwise re-run every photo's
+  // inference, which is the case the toggle is most often used for: the photos
+  // were just classified, so their views are exactly what the toggle re-pools.
+  const viewCache = {};
+  if (cropView) { views.push(cropView); viewCache.crop = cropView; }
   // Which views this photo offers is one decision, in `viewKinds`, and it is not
   // "always both": the whole frame is the second opinion on a crop that passed
   // the gate, and that second opinion can be turned off. It stays the only view
@@ -1190,8 +1196,10 @@ async function classifyImage(imgBitmap, filename, file) {
     // this reads ~0.3 MP rather than reading the 12-50 MP frame a second time.
     const wholeEmb = await clipEmbed(fullCv, lb.content);
     const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(engine) });
-    views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
-                 adP: wholeJ.adP, scale: localViewScale() });
+    const wholeView = { spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
+                        adP: wholeJ.adP, scale: localViewScale() };
+    views.push(wholeView);
+    viewCache.whole = wholeView;
   }
 
   const clipTime = Math.round(performance.now() - tClip0);
@@ -1236,6 +1244,17 @@ async function classifyImage(imgBitmap, filename, file) {
     crop_rejected: cropRejected,
     is_cropped,
     rev: 0,
+    // A photo born from the batch has never been recomputed, so its pixel
+    // generation is 0 - the same value `classifyViews` reads on a toggle. Stamped
+    // here rather than by `writeViewCache` because the record does not exist yet:
+    // this is the object that becomes the record, and a stamp written after
+    // `commitBatchSlot` would have to trust that it landed.
+    contentRev: 0,
+    viewCache: Object.fromEntries(
+      Object.entries(viewCache).map(([kind, result]) => [
+        kind, { contentRev: 0, engine, head: EMB, result },
+      ]),
+    ),
     error: null,
     manual_full_photo: !best,
     detTime,
@@ -1512,13 +1531,20 @@ async function processFiles(fileList) {
         // anyway - then there is only one view to have - and when the user has
         // turned the whole-frame view off.
         const views = [serverView(data)];
+        // The same per-view filing as the local batch path: the whole-frame
+        // toggle re-pools what is already here rather than re-asking the server
+        // for it. A server view is a `ViewResult` like any other, so nothing
+        // downstream tells a cached one from a fetched one.
+        const viewCache = data.is_cropped ? { crop: views[0] } : { whole: views[0] };
         if (viewKinds(Boolean(data.is_cropped), includeWholeFrame).includes("whole")) {
           const fd2 = new FormData();
           fd2.append("file", slot.file);
           fd2.append("crop_box", JSON.stringify([0, 0, data.fullWidth, data.fullHeight]));
           const res2 = await fetch("/api/predict", { method: "POST", body: fd2 });
           if (!res2.ok) throw new Error("Server inference error " + res2.status);
-          views.push(serverView(await res2.json()));
+          const wholeView = serverView(await res2.json());
+          views.push(wholeView);
+          viewCache.whole = wholeView;
         }
         const fused = fuseViews(views);
 
@@ -1554,6 +1580,15 @@ async function processFiles(fileList) {
           adjacentDetail: fused.adjacentDetail,
           agreement: fused.agreement,
           viewsLanded: views.length, viewsTotal: views.length,
+          // As in the local batch path: stamped at generation 0, under the engine
+          // that produced it and the head it ran against, so a whole-frame toggle
+          // re-pools these instead of re-asking the server.
+          contentRev: 0,
+          viewCache: Object.fromEntries(
+            Object.entries(viewCache).map(([kind, result]) => [
+              kind, { contentRev: 0, engine, head: EMB, result },
+            ]),
+          ),
           manual_full_photo: !data.is_cropped,
           detTime: data.detTime, clipTime: data.clipTime, totalTime: data.totalTime
         });
@@ -2081,7 +2116,14 @@ const reclassifyRunner = createReclassifyRunner({
     // drops the result of every photo behind the deleted one, leaving each stuck
     // on the `pending` that `beginRecompute` set. The batch path has always
     // resolved by `indexOf` for exactly this reason.
-    const rev = beginRecompute(p);
+    // `false`: the pixels are not changing here. A whole-frame toggle re-pools
+    // the same crop and the same frame, so the per-view posteriors already on
+    // the record are still valid and `classifyViews` re-fuses them instead of
+    // re-running the classifier. An engine switch reaches the same call with
+    // different pixels in the sense that matters - a different arithmetic over
+    // the same ones - and it is caught by the engine and head fields of the
+    // cache stamp rather than by this counter.
+    const rev = beginRecompute(p, false);
     renderThumbnails();
     try {
       await classifyViews(p, previews.indexOf(p), rev, p.cropCanvas, p.cropBox);
@@ -2217,7 +2259,7 @@ function renderActivePhoto() {
     contextImg.style.display = "block";
     contextImg.style.width = "100%";
     contextImg.style.height = "100%";
-    contextImg.style.objectFit = "cover";
+    contextImg.style.objectFit = "contain";
     cropEmpty.style.display = "none";
 
     // Draw where the crop sits within the context region
@@ -2570,6 +2612,12 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
   const views = viewsFor(wholeCv, cutCropCv, cropBox);
   const landed = [];
   let dropped = false;
+  // The stamp every view lookup in this pass is made against, read once. It
+  // names the photo's pixels (`contentRev`), the engine, and the head object by
+  // identity, so a hit means "this exact view of this exact photo was already
+  // scored, by this arithmetic". See `ViewCacheEntry` in photoRecord.ts.
+  const stamp = { contentRev: p.contentRev || 0, engine, head: EMB };
+  let cached = 0;
   // The fused result for the views that have landed, kept for the log line below.
   // The loop recomputes it once per view as each lands; the last one is the pool
   // of every view, which is what a reader of `views_fused` wants to see.
@@ -2578,9 +2626,27 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
   for (const view of views) {
     await afterNextPaint();
     if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
-    const v = engine === "server-gpu"
-      ? await classifyViewServer(fullCv, p.name, view.box)
-      : await classifyViewLocal(view.canvas, engine);
+    // A view the photo record already holds. The whole-frame toggle reaches here
+    // with every view cached, so a toggle is a re-fusion: no ONNX call, and
+    // `landed` carries the same per-view results a fresh pass would have
+    // produced, which is what keeps the fused posterior and `viewAgreement`
+    // identical either way.
+    const hit = readViewCache(p, view.kind, stamp);
+    let v;
+    if (hit) {
+      cached++;
+      v = hit;
+    } else {
+      v = engine === "server-gpu"
+        ? await classifyViewServer(fullCv, p.name, view.box)
+        : await classifyViewLocal(view.canvas, engine);
+      // Filed only here, and only after the guard above has passed: a
+      // classification overtaken mid-flight writes neither the record nor the
+      // cache, so a later toggle cannot re-fuse a view of pixels the photo no
+      // longer shows.
+      if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
+      writeViewCache(p, view.kind, stamp, v);
+    }
     if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
     landed.push(v);
     // Paint what is known so far. The fused verdict is recomputed from the views
@@ -2604,6 +2670,11 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
     name: p.name,
     rev,
     views: landed.length,
+    // How many of this photo's views came from the cache. The whole-frame
+    // toggle's structural claim is that this is every view of every photo, which
+    // is the same statement as "no inference ran", and it is checkable from a log
+    // line without a stopwatch.
+    cached,
     ...posteriorSummary(fused || {}),
     ...verdictSummary(p),
   });

@@ -21,7 +21,7 @@ import { genusOf } from "../confidence/genus";
 import type { Head, VerdictState, ViewResult } from "../confidence/types";
 import type { FusedResult } from "../confidence/fuseViews";
 import { cosineOffsetsFor } from "./modelConfig";
-import { viewKinds } from "./viewSelection";
+import { viewKinds, type ViewKind } from "./viewSelection";
 import type { PhotoState } from "./photoRecord";
 
 /** A box in [x1, y1, x2, y2] pixel coordinates. */
@@ -31,6 +31,15 @@ export type Box = [number, number, number, number];
 export interface ViewRequest {
   canvas: HTMLCanvasElement | null;
   box: Box | null;
+  /**
+   * Which view this is.
+   *
+   * Carried on the request rather than inferred by the caller from the canvas
+   * identity, because the photo record's view cache is keyed by kind and a
+   * caller that had to work it out again would be a second implementation of the
+   * decision `viewKinds` just made.
+   */
+  kind: ViewKind;
 }
 
 /**
@@ -63,7 +72,7 @@ export function viewsFor(
   includeWholeFrame: boolean,
 ): ViewRequest[] {
   if (!full) return [];
-  const whole: ViewRequest = { canvas: full, box: [0, 0, full.width, full.height] };
+const whole: ViewRequest = { canvas: full, box: [0, 0, full.width, full.height], kind: "whole" };
   // The crop box is the predicate, not canvas identity. It used to be identity:
   // an uncropped photo's `cropCanvas` WAS the same canvas as its whole frame, so
   // `cropCv !== full` happened to mean "this photo has a crop". Once the record
@@ -78,7 +87,7 @@ export function viewsFor(
   // a null check and nothing more: a photo with a box and no pixels to put in it
   // is better off with one view than with a crop view that throws.
   return viewKinds(Boolean(cropBox) && Boolean(cropCv), includeWholeFrame).map((kind) =>
-    kind === "crop" ? { canvas: cropCv, box: cropBox } : whole,
+    kind === "crop" ? { canvas: cropCv, box: cropBox, kind } : whole,
   );
 }
 

@@ -89,7 +89,7 @@ export function cropBoxInZoomSurface(p: Preview): BoxPercent | null {
   // The context region is measured by the canvas that holds it, because that is
   // the region's shape; with no context canvas the whole photograph is.
   const region = p.contextCanvas ?? frame;
-  const { kx, ox, ky, oy } = fitMapping(surfaceZoomed, region, "cover");
+  const { kx, ox, ky, oy } = fitMapping(surfaceZoomed, region, "contain");
   const l = ((cx1 - ctx_x1) / ctx_w - ox) / kx;
   const t = ((cy1 - ctx_y1) / ctx_h - oy) / ky;
   return {
@@ -160,7 +160,7 @@ export function fitMapping(surface: HTMLElement | null, img: CanvasLike | null |
  * panel's subject explicit at the call site instead of implied.
  */
 export function zoomedSurfaceMapping(p?: Preview): Mapping {
-  return fitMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas, "cover");
+  return fitMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas, "contain");
 }
 
 export function fullSurfaceMapping(p?: Preview): Mapping {
@@ -267,14 +267,11 @@ export function extractContextCrop(
     ctx_w = ctx_h * targetAspect;
   }
 
-  if (ctx_w > frame.width) {
-    ctx_w = frame.width;
-    ctx_h = ctx_w / targetAspect;
-  }
-  if (ctx_h > frame.height) {
-    ctx_h = frame.height;
-    ctx_w = ctx_h * targetAspect;
-  }
+  // Clamp each axis against the photo on its own. Re-deriving one axis from
+  // the panel aspect after clamping the other can shrink an axis below the crop
+  // box, and the box then runs off the panel's edge.
+  ctx_w = Math.min(ctx_w, frame.width);
+  ctx_h = Math.min(ctx_h, frame.height);
 
   let x1 = cx - ctx_w / 2;
   let y1 = cy - ctx_h / 2;

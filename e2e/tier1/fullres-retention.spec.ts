@@ -418,13 +418,32 @@ test.describe("full-resolution retention", () => {
           cropIsDisplay: A.previews[1]!.cropCanvas === A.previews[1]!.displayCanvas,
         },
       };
+      // First pass, cache intact. The toggle above already scored every view
+      // these photos offer, and `beginRecompute(p, false)` left `contentRev`
+      // alone, so this re-fuses what is cached and infers nothing. That is the
+      // per-view cache's whole claim (#105), asserted here rather than assumed.
+      await A.reprocess();
+      for (let i = 0; i < 600 && A.previews.some((p: any) => p.pending); i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+      const cachedRuns = (window.__countedRuns ?? 0) - before;
+
+      // Second pass with the cache dropped, so the run COUNT is measured on
+      // pixels nothing has been scored from yet. What this test is really about
+      // is the predicate - how many views a photo offers - and the count is
+      // the evidence for it: three inferences means one view for the uncropped
+      // photo and two for the cropped one. Asserting the count against a warm
+      // cache would measure the cache instead of the predicate.
+      A.previews.forEach((p: any) => { p.viewCache = {}; });
+      const beforeFresh = window.__countedRuns ?? 0;
       await A.reprocess();
       for (let i = 0; i < 600 && A.previews.some((p: any) => p.pending); i++) {
         await new Promise((r) => requestAnimationFrame(r));
       }
       return {
         reads,
-        runs: (window.__countedRuns ?? 0) - before,
+        cachedRuns,
+        runs: (window.__countedRuns ?? 0) - beforeFresh,
         viewsLanded: A.previews.map((p: any) => p.viewsLanded),
         viewsTotal: A.previews.map((p: any) => p.viewsTotal),
         detail: A.previews.map((p: any) => ({ name: p.name, err: p.error, is_cropped: p.is_cropped,
@@ -438,7 +457,12 @@ test.describe("full-resolution retention", () => {
     expect(r.reads.cropped.cropBox).not.toBeNull();
     expect(r.reads.cropped.cropIsDisplay).toBe(false);
 
-    // Three runs total: one for the uncropped photo, two for the cropped one.
+    // A re-run over views the toggle already scored infers nothing, and still
+    // lands the same number of views per photo.
+    expect(r.cachedRuns, `cachedRuns=${r.cachedRuns} viewsTotal=${JSON.stringify(r.viewsTotal)} landed=${JSON.stringify(r.viewsLanded)} detail=${JSON.stringify(r.detail)}`).toBe(0);
+
+    // Three runs on uncached pixels: one for the uncropped photo, two for the
+    // cropped one.
     expect(r.runs, `runs=${r.runs} viewsTotal=${JSON.stringify(r.viewsTotal)} landed=${JSON.stringify(r.viewsLanded)} detail=${JSON.stringify(r.detail)}`).toBe(3);
     expect(r.viewsTotal).toEqual([1, 2]);
     expect(r.viewsLanded).toEqual([1, 2]);

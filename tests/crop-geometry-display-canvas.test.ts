@@ -107,15 +107,22 @@ describe("cropBoxInZoomSurface holds its place through a display canvas", () => 
       contextBox: ctx,
       contextCanvas: { width: ctx[2] - ctx[0], height: ctx[3] - ctx[1] } as HTMLCanvasElement,
     }))!;
-    // cover on a square panel against a 4:3 context region crops the sides: the
-    // middle 5/6 of the region's width fills the panel, so a crop sitting left
-    // of centre is pushed towards the left edge and magnified.
+    // The zoom panel is object-fit:contain, so the region is shown whole rather
+    // than windowed. On the axis the region fills - width here, since the 4:3
+    // region is wider than the square panel - nothing is cropped or padded, so
+    // the box is exactly its own fraction of the region. Under the cover this
+    // replaced, that fraction was MAGNIFIED: the middle of the region's width
+    // filled the panel. Measuring the region from a display canvas instead of
+    // the photograph moves both numbers without raising either way.
     const regionW = ctx[2] - ctx[0];
-    expect(box.width).toBeGreaterThan(((CROP_BOX[2] - CROP_BOX[0]) / regionW) * 100);
-    expect(box.left).toBeLessThan(((CROP_BOX[0] - ctx[0]) / regionW) * 100);
-    // The height is not magnified: cover crops the width of this region, not
-    // its height.
-    expect(box.height).toBeCloseTo(((CROP_BOX[3] - CROP_BOX[1]) / (ctx[3] - ctx[1])) * 100, 6);
+    const regionH = ctx[3] - ctx[1];
+    expect(box.width).toBeCloseTo(((CROP_BOX[2] - CROP_BOX[0]) / regionW) * 100, 6);
+    expect(box.left).toBeCloseTo(((CROP_BOX[0] - ctx[0]) / regionW) * 100, 6);
+    // On the padded axis the box is scaled by the fit: the region is taller than
+    // the square panel, so a box that is 3/4 of the region's height is a little
+    // over half the panel's - not 3/4 of it, which is what cover reported.
+    expect(box.height).toBeLessThan(((CROP_BOX[3] - CROP_BOX[1]) / regionH) * 100);
+    expect(box.height).toBeCloseTo(50, 6);
   });
 
   it("falls back to the photo's own bounds when there is no context region", () => {
@@ -173,16 +180,21 @@ describe("golden crop boxes for a 4032x3024 photo", () => {
     expect(cropBoxInZoomSurface(photo({
       contextBox: ctx,
       contextCanvas: { width: ctx[2] - ctx[0], height: ctx[3] - ctx[1] } as HTMLCanvasElement,
-    }))).toEqual({ left: 10, top: 15, width: 70, height: 60 });
+    }))).toEqual({
+      left: 16.666666666666664,
+      top: 20.833333333333332,
+      width: 58.333333333333336,
+      height: 50,
+    });
   });
 
   it("places the no-context zoom box where the full-resolution canvas placed it", () => {
     setSurface("crop-surface-zoomed", 700, 700);
     expect(cropBoxInZoomSurface(photo({ contextBox: null, contextCanvas: null }))).toEqual({
-      left: 23.015873015873016,
-      top: 23.14814814814815,
-      width: 46.296296296296305,
-      height: 39.68253968253968,
+      left: 29.761904761904763,
+      top: 29.86111111111111,
+      width: 34.72222222222223,
+      height: 29.761904761904763,
     });
   });
 
