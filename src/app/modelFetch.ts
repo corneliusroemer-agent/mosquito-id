@@ -117,8 +117,8 @@ function bytesAsStream(buf: ArrayBuffer): ReadableStream<Uint8Array> {
   });
 }
 
-export async function fetchWithProgress(url: string, onBytes?: OnBytes): Promise<ArrayBuffer> {
-  const resp = await fetch(url);
+export async function fetchWithProgress(url: string, onBytes?: OnBytes, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const resp = await fetch(url, signal ? { signal } : undefined);
   if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
   const total = Number(resp.headers.get("content-length")) || 0;
   if (!resp.body) throw new Error(`${url}: response has no body`);
@@ -170,6 +170,7 @@ export async function fetchWithCache(
   onBytes?: OnBytes,
   log?: LogFn,
   sha: string | undefined = COMMIT_SHA,
+  signal?: AbortSignal,
 ): Promise<ArrayBuffer> {
   const versioned = versionedModelUrl(url, sha);
   if ("caches" in window) {
@@ -193,7 +194,7 @@ export async function fetchWithCache(
     }
     if (cache) console.log(`[CacheStorage] MISS for ${versioned}, fetching from network...`);
     log?.("cache_miss", { url: versioned });
-    const buf = await fetchWithProgress(versioned, onBytes);
+    const buf = await fetchWithProgress(versioned, onBytes, signal);
     // Written after the bytes are in hand and outside the path that can fall
     // through to a second fetch. A quota error on the put used to be caught by
     // the same catch as a network failure, which threw away a finished download
@@ -214,7 +215,7 @@ export async function fetchWithCache(
     }
     return buf;
   }
-  return await fetchWithProgress(versioned, onBytes);
+  return await fetchWithProgress(versioned, onBytes, signal);
 }
 
 /**
