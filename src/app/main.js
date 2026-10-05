@@ -76,7 +76,7 @@ import { classifyCanvasServer as _classifyCanvasServer,
          posteriorSummary as _posteriorSummary, round4, serverView as _serverView,
          verdictSummary as _verdictSummary, viewsFor as _viewsFor,
          aliasesWholeFrame } from "./views";
-import { FULL_RES_MIN_EDGE, armLayoutCounters, disarmLayoutCounters,
+import { armLayoutCounters, disarmLayoutCounters,
          noteClassifierCall, noteDetectorCall, noteServerViewCall,
          registerFullResSource, registerOrtSessionSource, resetCounters,
          snapshot, withRenderScope } from "./perfCounters";
@@ -278,12 +278,14 @@ window.modelsReady = false;
 // detector's letterbox intermediate and a thumbnail are display copies and are
 // deliberately not counted.
 function liveFullResFrameCount() {
-  let n = 0;
-  for (const p of previews) {
-    const cv = p && p.fullCanvas;
-    if (cv && Math.max(cv.width, cv.height) > FULL_RES_MIN_EDGE) n++;
-  }
-  return n;
+  // `retainedFullCanvasCount()` -- the cache's own resident count -- not a walk of
+  // the photo records. #107 removed `fullCanvas` from the record and re-decodes on
+  // demand via fullCanvasFor, so reading `p.fullCanvas` here found nothing on
+  // every photo and this gauge reported 0 unconditionally: a number that looks
+  // like a healthy measurement and is really a broken one. A gauge that can only
+  // read 0 is worse than no gauge, because it is indistinguishable from "memory
+  // is fine".
+  return retainedFullCanvasCount();
 }
 
 // Every session the app can still reach, de-duplicated by identity: each entry

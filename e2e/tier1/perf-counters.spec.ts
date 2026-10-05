@@ -439,45 +439,69 @@ test.describe("counter 4: live full-resolution frames stay inside the cache", ()
     // precisely so this cannot pass vacuously.
     expect(after, "the full-res gauge reported no measurement").not.toBeNull();
 
-    // Since #107 the answer is 0, not merely "<= 2". That PR stopped retaining
-    // full-resolution canvases on the photo record and re-decodes on demand via
-    // fullCanvasFor, so a photo no longer holds a frame at all. The bound is
-    // therefore 0 rather than `FULL_RES_CACHE_FRAMES`, and this is a STRICTER
-    // assertion than the one it replaces: "at most the cache size" would still
-    // pass if retention came back at up to two frames per photo.
+    // The gauge counts the CACHE's resident frames, not a field on the record.
+    // #107 removed `fullCanvas` from the photo record and re-decodes on demand via
+    // fullCanvasFor, so a gauge that walked the records read undefined on every
+    // photo and reported 0 unconditionally -- which is what this assertion
+    // previously encoded, having been written while that bug was live. A gauge
+    // that can only read 0 is indistinguishable from healthy memory use, which is
+    // why the bound is now asserted from ABOVE: asking for frames and expecting
+    // them to appear is the only reading that cannot pass on a broken gauge.
+    await page.evaluate(() => window.__mosqAsync!.perf.snapshot());
+    const admitted = (await page.evaluate(async () => {
+      const A = window.__mosqAsync!;
+      await (A as any).applyCropFromFullSurface(0, [0.2, 0.2, 0.8, 0.8], performance.now());
+      return A.perf.snapshot().fullResFrames;
+    })) as number;
     expect(
-      after,
-      `${after} full-resolution frames are live; #107 retains none on the record`,
-    ).toBe(0);
+      admitted,
+      "asking a photo for its full-resolution frame admitted nothing, so the gauge is not measuring the cache",
+    ).toBeGreaterThan(0);
+    expect(
+      admitted,
+      `${admitted} frames resident; the cache is bounded at ${2}`,
+    ).toBeLessThanOrEqual(2);
   });
 
   test("deleting a photo gives its frame back", async ({ page }) => {
-    // REGRESSION GUARD, and it is the other half of the bound: a cache that
-    // holds at most two frames has to release them on a delete, or the bound is
-    // enforced only by the cache filling up rather than by the photo going away.
-    // Since #107 there is nothing to give back: no record holds a frame, so the
-    // count is 0 before the delete and 0 after it. The regression this originally
-    // guarded - a photo's frame outliving the photo - is now prevented structurally
-    // rather than by a cache bound, which is a stronger property than the one this
-    // test used to assert. Both sides are pinned so a regression that reintroduces
-    // retention shows up here as a non-zero reading.
+    // The other half of the bound: a cache holding at most two frames has to release
+    // them on a delete, or the bound is enforced only by the cache filling up rather
+    // than by the photo going away.
+    //
+    // Read through the cache, not the records. The gauge used to walk
+    // `p.fullCanvas`, which #107 removed, so it reported 0 no matter what the cache
+    // held -- and an assertion of `toBe(0)` therefore passed against a gauge that
+    // could measure nothing. This test instead puts the cache in a state where the
+    // answer must be non-zero, and checks that deleting a photo gives the slot back.
     await boot(page);
     await installCountingSessions(page);
     await dropPhotos(page, 3, 2400, 1800);
     await settled(page);
 
-    const three = await page.evaluate(() => window.__mosqAsync!.perf.snapshot().fullResFrames);
-    expect(three, "a photo is holding a full-resolution frame; #107 retains none").toBe(0);
+    const held = (await page.evaluate(async () => {
+      const A = window.__mosqAsync!;
+      await (A as any).applyCropFromFullSurface(0, [0.2, 0.2, 0.8, 0.8], performance.now());
+      return A.perf.snapshot().fullResFrames;
+    })) as number;
+    expect(held, "the cache admitted nothing, so the delete path is untested").toBeGreaterThan(0);
 
-    await page.evaluate(() => window.__mosqAsync!.deletePhoto(1));
+    // Delete the photo whose frame was actually admitted. The crop above ran on
+    // index 0, so deleting index 1 would leave that frame resident and the test
+    // would report a leak that is only a mismatch about which photo was removed.
+    await page.evaluate(() => window.__mosqAsync!.deletePhoto(0));
     await settle(page);
 
-    const two = await page.evaluate(() => window.__mosqAsync!.perf.snapshot().fullResFrames);
-    expect(two, "a deleted photo's full-resolution frame is still held").toBe(0);
-  });
-});
+    const after = await page.evaluate(() => window.__mosqAsync!.perf.snapshot().fullResFrames);
+    // null means the gauge has no provider, which is a different failure from
+    // "released nothing" -- assert it separately rather than letting null compare.
+    expect(after, "the gauge lost its provider").not.toBeNull();
+    expect(
+      after as number,
+      "a deleted photo's frame is still resident in the full-resolution cache",
+    ).toBeLessThan(held);
 
-test.describe("counter 5: an idle release leaves zero ORT sessions", () => {
+  });
+
   test("a completed release empties every session the app can reach", async ({ page }) => {
     // REGRESSION GUARD. `gpu-release.spec.ts` already asserts the per-engine
     // cache is emptied and that each session's `release()` resolved; what it does
