@@ -1468,6 +1468,12 @@ async function processFiles(fileList) {
   const engineLabel = currentEngine === "server-gpu" ? `Server (${serverEngineLabel})` : "WebGPU";
   let processed = 0;
   async function inferSlot(slot, i) {
+    // The photo's revision as it stood when this inference started, read before
+    // the first await below. Everything between here and `commitBatchSlot` is a
+    // suspension point a crop release can come through, and the release bumps
+    // `rev`, so this is the only reading of it that can tell afterwards whether
+    // the photo moved under this run.
+    const startRev = slot.rev;
     // Read once, so the photos a batch scores all carry one engine in
     // `scoredBy` rather than one each, and the footer naming the last of them
     // cannot leave a reader unable to tell which scores are whose. The batch
@@ -1548,7 +1554,7 @@ async function processFiles(fileList) {
         }
         const fused = fuseViews(views);
 
-        commitBatchSlot(slots[i], {
+        commitBatchSlot(slots[i], startRev, {
           name: data.filename, scoredBy: engine,
           // Null when the encode failed, and null is the safe answer here rather
           // than the old upload: with no file the viewer falls back to encoding
@@ -1600,7 +1606,7 @@ async function processFiles(fileList) {
         });
       } else {
         const res = await classifyImage(slot.bitmap, slot.name, slot.file);
-        commitBatchSlot(slots[i], res);
+        commitBatchSlot(slots[i], startRev, res);
       }
     } catch (err) {
       // One unreadable photo must not take the batch down with it.
@@ -1651,10 +1657,23 @@ async function processFiles(fileList) {
 // A batch result lands on its own slot, under the same guard a crop release
 // uses: if the photo was deleted, or a crop release overtook it while its
 // inference was in flight, the result is dropped rather than painted.
-function commitBatchSlot(slot, res) {
-  const rev = slot.rev;
-  if (slot.removed || previews.indexOf(slot) < 0 || slot.rev !== rev) {
-    sendLog("batch_slot_superseded", { name: slot.name, rev, currentRev: slot.rev });
+//
+// `startRev` is the photo's revision as it stood when this inference began, read
+// before its first await. Reading it here instead would compare the photo against
+// itself: nothing runs between the read and the comparison, so the guard could
+// never fire and `Object.assign` would put the detector's crop box, its canvases
+// and its scores back over the crop the user had just released, and write `rev`
+// backwards from the release's to the batch result's own seed of 0. The crop's
+// own classification then failed its `ownsRecompute` and was discarded, so the
+// crop silently reverted to the detector's box.
+//
+// Dropping is not a second way to leave the photo unfinished: the release that
+// took the revision is itself a recompute in flight, and it settles the pending
+// badge itself, through `commitScores` or `markComputeFailed`. Re-running the
+// photo here would only race the release that already owns it.
+function commitBatchSlot(slot, startRev, res) {
+  if (slot.removed || previews.indexOf(slot) < 0 || slot.rev !== startRev) {
+    sendLog("batch_slot_superseded", { name: slot.name, rev: startRev, currentRev: slot.rev });
     return;
   }
   Object.assign(slot, res);
