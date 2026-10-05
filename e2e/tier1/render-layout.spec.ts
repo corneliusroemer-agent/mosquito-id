@@ -38,11 +38,26 @@ async function countRectsWhile(page: Page, body: () => Promise<void>): Promise<n
         window.__rectReads = (window.__rectReads ?? 0) + 1;
         return original.call(this);
       };
+      window.__resizes = 0;
+      window.addEventListener("resize", () => { window.__resizes = (window.__resizes ?? 0) + 1; });
     }
     window.__rectReads = 0;
   });
   await body();
   return page.evaluate(() => window.__rectReads ?? 0);
+}
+
+/**
+ * Resize, and wait for the page to have been told.
+ *
+ * `setViewportSize` returns before the resize event is delivered, so a render
+ * issued straight after it races the listener that invalidates the scroll guard
+ * - and would read no layout for the right reason at the wrong moment.
+ */
+async function resizeAndSettle(page: Page, width: number): Promise<void> {
+  const before = await page.evaluate(() => window.__resizes ?? 0);
+  await page.setViewportSize({ width, height: 900 });
+  await page.waitForFunction((n) => (window.__resizes ?? 0) > n, before);
 }
 
 test.describe("a render that changes nothing reads nothing", () => {
@@ -126,7 +141,7 @@ test.describe("a render that changes the selection still scrolls", () => {
     // nothing; the strip's box moved, so the next one has to look again.
     await countRectsWhile(page, () => page.evaluate(() => window.__mosqAsync!.renderThumbnails()));
 
-    await page.setViewportSize({ width: 700, height: 900 });
+    await resizeAndSettle(page, 700);
     const reads = await countRectsWhile(page, () =>
       page.evaluate(() => window.__mosqAsync!.renderThumbnails()),
     );

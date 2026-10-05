@@ -54,6 +54,8 @@ declare global {
     __rectReads?: number;
     /** Whether that probe is already installed on `Element.prototype`. */
     __rectPatched?: boolean;
+    /** `resize` events the page has been told about. See `__rectPatched`. */
+    __resizes?: number;
   }
 }
 
