@@ -71,6 +71,12 @@ declare global {
     __mosqShiftLog?: string[];
     /** The app's own "engine settled" flag. False once a load has failed. */
     modelsReady?: boolean;
+    /** `getBoundingClientRect` calls since the last reset. Set by a probe. */
+    __rectReads?: number;
+    /** Whether that probe is already installed on `Element.prototype`. */
+    __rectPatched?: boolean;
+    /** `resize` events the page has been told about. See `__rectPatched`. */
+    __resizes?: number;
   }
 }
 

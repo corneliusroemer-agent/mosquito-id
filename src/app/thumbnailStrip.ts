@@ -270,3 +270,51 @@ export function validateIncluded(indices: Iterable<number>, length: number): Set
 export function shiftIncludedForPrepend(indices: Iterable<number>, count: number): Set<number> {
   return new Set(Array.from(indices, (i) => i + count));
 }
+
+/**
+ * Whether the strip has to be scrolled to bring the selected photo into view.
+ *
+ * Reading a tile's rect is a synchronous layout of the whole document, and the
+ * render path runs once per photo as a batch lands - so asking on every render
+ * turned 200-odd forced layouts into the largest single cost of a batch, for an
+ * answer that was already known. The answer is known because the strip only has
+ * to move when the *photo it is showing* changes, and a batch does not change
+ * the selection: it changes everything around it.
+ *
+ * Keyed on the photo record rather than on `selectedIndex`, because the two
+ * answers different questions. An index alone says "same slot", which a prepend
+ * answers wrongly: prepending a batch leaves the selection at 0 and puts a
+ * different photo in slot 0, so an index-keyed guard would skip the scroll the
+ * new first tile needs. The record is the identity `tileNodes` is keyed by, so
+ * the guard and the tile cache agree on what "the same tile" means.
+ *
+ * The state is the record of the last photo actually scrolled to, so a caller
+ * that could not scroll - no strip, no tile yet - has not recorded anything and
+ * is still owed a scroll on the next render. `invalidate` is for the one thing
+ * this cannot see: the strip's box changing underneath it, which a window
+ * resize does without the selection moving at all.
+ */
+export class SelectedScrollGuard {
+  private last: ClassifiedPhoto | null = null;
+
+  /**
+   * Whether `photo` must be scrolled into view now.
+   *
+   * False only when it is the exact photo the last successful scroll landed on.
+   * `undefined` - nothing selected - is always a no, since there is nothing to
+   * scroll to.
+   */
+  needsScroll(photo: ClassifiedPhoto | undefined | null): boolean {
+    return !!photo && photo !== this.last;
+  }
+
+  /** Note that `photo` has been scrolled into view. */
+  record(photo: ClassifiedPhoto): void {
+    this.last = photo;
+  }
+
+  /** Forget the last scroll, so the next render scrolls again. */
+  invalidate(): void {
+    this.last = null;
+  }
+}
