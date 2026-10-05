@@ -826,7 +826,7 @@ async function reprocessLoadedPhotos() {
   // refusing the re-run. The button is disabled for the duration either way,
   // and the weights come from the Cache API, so the cost is a load the reader
   // was going to pay on their next photo drop anyway.
-  if (idleRelease.released()) await idleRelease.ensure();
+  await idleRelease.ensure();
   if (isProcessingBatch || !window.modelsReady || reprocessRunning) return;
   // A whole-frame or crop re-classification holds the single inference slot
   // without ever setting `isProcessingBatch`, and this app runs onnxruntime on
@@ -1291,7 +1291,7 @@ async function processFiles(fileList) {
   // than queueing the photos and waiting for something else to notice. This is
   // a no-op unless a release actually happened, so it costs nothing on the
   // normal path.
-  if (idleRelease.released()) await idleRelease.ensure();
+  await idleRelease.ensure();
   if (isProcessingBatch) {
     // A drop during a batch is not nothing: the photos have to run, so they
     // queue behind the batch rather than being dropped on the floor. Silently
@@ -2449,7 +2449,7 @@ async function applyCropFromFullSurface(idx, rect, t0) {
   // Drawing a crop re-runs inference, so a released tab has to come back first.
   // A drag that started before the tab was hidden and ended after it was
   // released lands here with no sessions, and used to compute against null.
-  if (idleRelease.released()) await idleRelease.ensure();
+  await idleRelease.ensure();
   const p = previews[idx];
   const fullCv = p.fullCanvas;
 // Surface fractions -> image fractions through the same contain window
@@ -2476,7 +2476,7 @@ async function applyCropFromFullSurface(idx, rect, t0) {
 
 // Execute Crop from Zoomed 50% Context surface (fine-tuning)
 async function applyCropFromZoomedSurface(idx, rect, t0) {
-  if (idleRelease.released()) await idleRelease.ensure();
+  await idleRelease.ensure();
   const p = previews[idx];
   if (!p.contextBox) return;
   const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;

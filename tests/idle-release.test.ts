@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { createIdleRelease, DEFAULT_IDLE_RELEASE_MS } from "../src/app/idleRelease";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("a hidden tab gives its memory back, and a visible one takes it back", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -331,5 +336,143 @@ describe("a release that is still in flight when the tab comes back", () => {
 
     expect(order).toEqual(["release-start", "release-end", "restore"]);
     expect(ready).toBe(true);
+  });
+});
+
+describe("the app's call sites, not just ensure()", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /**
+   * The shape every inference entry point in `main.js` has. It used to read
+   * the flag first and only then await the restore, and that order is what made
+   * the wait inside `ensure()` unreachable: the flag is set at the END of a
+   * release, so an inference arriving mid-release read false, skipped
+   * `ensure` entirely, and ran against sessions the release was in the middle
+   * of taking away. Calling `ensure()` directly proves nothing about that -
+   * only the guard order reproduces it.
+   *
+   * Both shapes are exercised below. The guarded one is the failure, kept so
+   * the test says why the guard is gone rather than only that it is.
+   */
+  function appEntryPoint(
+    idle: ReturnType<typeof createIdleRelease>,
+    sessions: { clip: object | null },
+    useFlagGuard: boolean,
+  ) {
+    return async (): Promise<boolean> => {
+      if (!useFlagGuard || idle.released()) await idle.ensure();
+      return sessions.clip !== null;
+    };
+  }
+
+  /** A release in flight, with the sessions already taken away. */
+  function midRelease() {
+    const session = { name: "session" };
+    const sessions = { clip: session as object | null };
+    let finishRelease: () => void = () => {};
+    const idle = createIdleRelease({
+      delayMs: 1,
+      release: () =>
+        new Promise<void>((r) => {
+          sessions.clip = null;
+          finishRelease = r;
+        }),
+      restore: () => {
+        sessions.clip = session;
+      },
+    });
+    return { idle, sessions, finish: () => finishRelease() };
+  }
+
+  it("an inference landing mid-release blocks until the sessions are back", async () => {
+    const { idle, sessions, finish } = midRelease();
+
+    idle.hidden();
+    await vi.advanceTimersByTimeAsync(1);
+
+    const infer = appEntryPoint(idle, sessions, false)();
+    await vi.advanceTimersByTimeAsync(0);
+    // Still awaiting the release: returning `false` here is the tab running
+    // inference against no session at all.
+    expect(sessions.clip).toBeNull();
+
+    finish();
+    await expect(infer).resolves.toBe(true);
+    expect(sessions.clip).not.toBeNull();
+  });
+
+  it("the flag guard it replaced skipped the wait entirely", async () => {
+    const { idle, sessions, finish } = midRelease();
+
+    idle.hidden();
+    await vi.advanceTimersByTimeAsync(1);
+
+    // The flag is still false mid-release, so the old guard never called
+    // `ensure()` and the entry point returned with no session - the reason the
+    // guard is gone rather than merely redundant.
+    const infer = appEntryPoint(idle, sessions, true)();
+    await expect(infer).resolves.toBe(false);
+    expect(sessions.clip).toBeNull();
+
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+});
+
+describe("main.js calls ensure() without gating on the flag", () => {
+  const source = readFileSync(join(root, "src", "app", "main.js"), "utf8");
+
+  it("no call site reads released() on the way into ensure()", () => {
+    // Every inference entry point has to reach `ensure()` while a release is
+    // still running, which is exactly when `released()` is false.
+    const gated = [...source.matchAll(/if\s*\(\s*idleRelease\.released\(\)\s*\)\s*await\s*idleRelease\.ensure\(\)/g)];
+    expect(gated.map((m) => m[0])).toEqual([]);
+  });
+
+  it("still calls ensure() at each of the four entry points", () => {
+    expect([...source.matchAll(/await idleRelease\.ensure\(\)/g)]).toHaveLength(4);
+  });
+});
+
+describe("a re-entrant ensure() from inside the restore", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /**
+   * `restoreIdleMemory` ends by draining the queue, and draining calls
+   * `processFiles`, which calls `ensure()` - from inside the restore, while it
+   * is still the link running on the chain. That await has to come back, or a
+   * released tab with queued photos hangs instead of rebuilding.
+   */
+  it("returns instead of waiting on the chain it is already part of", async () => {
+    const order: string[] = [];
+    let reentrant: Promise<boolean> | null = null;
+    let sessClip: object | null = { name: "session" };
+    const idle = createIdleRelease({
+      delayMs: 1,
+      release: () => {
+        sessClip = null;
+      },
+      restore: async () => {
+        order.push("restore-start");
+        sessClip = { name: "session" };
+        reentrant = idle.ensure().then(() => sessClip !== null);
+        order.push("restore-end");
+      },
+    });
+
+    await idle.releaseNow();
+    const drained = idle.ensure().then(async () => {
+      order.push("drained");
+      if (reentrant) await reentrant;
+      return order;
+    });
+    // A re-entrant ensure() that waited on its own chain would leave `drained`
+    // unresolved, which vitest reports as a timeout rather than a failure.
+    await vi.advanceTimersByTimeAsync(0);
+    await drained;
+
+    expect(order).toEqual(["restore-start", "restore-end", "drained"]);
   });
 });
