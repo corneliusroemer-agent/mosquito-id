@@ -1639,6 +1639,16 @@ async function processFiles(fileList) {
   // finishes rather than all at the end. A placeholder carries the same
   // rev/pending contract as a crop release, so a photo deleted or superseded
   // mid-flight is never painted as finished.
+  //
+  // `batchRev` is the revision this batch claims the photo at, which is the one
+  // the placeholder is born with. It is a separate field from `rev` because the
+  // two answer different questions: `rev` is where the photo's revision is NOW,
+  // and a photo can be recomputed between being queued and being inferred. A
+  // guard that captured `rev` when the photo's turn came would read the
+  // recompute's own number and compare the photo against itself - and a photo
+  // is draggable from the moment its decode lands, so that gap is the whole
+  // batch's remaining work, not a theoretical one. Captured here, the claim
+  // predates every recompute that could overtake it.
   const slots = imageFiles.map((file) => ({
     name: file.name, file,
     displayCanvas: null, fullW: null, fullH: null, sourceCanvas: null,
@@ -1647,7 +1657,7 @@ async function processFiles(fileList) {
     scores: {}, detail: {}, logits: null, adP: null,
     status: "queued…", crop_rejected: false, is_cropped: false, verdict: null,
     manual_full_photo: false, fingerprint: null,
-    rev: 0, pending: true, error: null,
+    rev: 0, batchRev: 0, pending: true, error: null,
     agreement: null, viewsLanded: 0, viewsTotal: 0,
     detTime: null, clipTime: null, totalTime: null
   }));
@@ -1712,12 +1722,15 @@ async function processFiles(fileList) {
   const engineLabel = currentEngine === "server-gpu" ? `Server (${serverEngineLabel})` : "WebGPU";
   let processed = 0;
   async function inferSlot(slot, i) {
-    // The photo's revision as it stood when this inference started, read before
-    // the first await below. Everything between here and `commitBatchSlot` is a
-    // suspension point a crop release can come through, and the release bumps
-    // `rev`, so this is the only reading of it that can tell afterwards whether
-    // the photo moved under this run.
-    const startRev = slot.rev;
+    // The revision this batch claimed the photo at, not a reading of where the
+    // photo's revision is now. Those differ whenever the photo was recomputed
+    // between being queued and being inferred, which is every crop released
+    // while an earlier photo was still being classified: a tile is draggable
+    // from the moment its own decode lands, and nothing disables the crop
+    // surface while `isProcessingBatch` is set. A capture of `slot.rev` here
+    // reads the crop's number, so `commitBatchSlot` compares the photo against
+    // itself and the detector's box lands on top of the crop.
+    const startRev = slot.batchRev;
     // Read once, so the photos a batch scores all carry one engine in
     // `scoredBy` rather than one each, and the footer naming the last of them
     // cannot leave a reader unable to tell which scores are whose. The batch
@@ -1901,17 +1914,29 @@ async function processFiles(fileList) {
 }
 
 // A batch result lands on its own slot, under the same guard a crop release
-// uses: if the photo was deleted, or a crop release overtook it while its
-// inference was in flight, the result is dropped rather than painted.
+// uses: if the photo was deleted, or a recompute overtook it, the result is
+// dropped rather than painted.
 //
-// `startRev` is the photo's revision as it stood when this inference began, read
-// before its first await. Reading it here instead would compare the photo against
-// itself: nothing runs between the read and the comparison, so the guard could
-// never fire and `Object.assign` would put the detector's crop box, its canvases
-// and its scores back over the crop the user had just released, and write `rev`
-// backwards from the release's to the batch result's own seed of 0. The crop's
-// own classification then failed its `ownsRecompute` and was discarded, so the
-// crop silently reverted to the detector's box.
+// `startRev` is the revision the batch CLAIMED the photo at, which is the one
+// the placeholder was born with - not a reading of where the photo's revision
+// is when this photo's turn to be inferred arrives. The two come apart whenever
+// the photo was recomputed in between, and the gap is the whole of the batch's
+// remaining work: the photo is draggable from the moment its own decode lands,
+// so a crop drawn on a photo still queued behind the others is already on the
+// record by the time this capture would have run. Reading `rev` here therefore
+// compares the photo against itself - the guard cannot fire, and
+// `Object.assign` puts the detector's crop box, its canvases and its scores
+// back over the crop the user drew, which then silently reverts.
+//
+// `rev` is not among the fields assigned. `classifyImage` builds a whole record
+// and its base literal carries `rev: 0`, but a batch result is a set of
+// findings to apply, not a claim on the counter, and `beginRecompute` is the
+// only thing that may move it. Assigning it rewound the counter, and since
+// `beginRecompute` allocates from the current value, the next release was
+// issued a number a release already in flight was holding - so that older
+// release passed `ownsRecompute` and its stale scores landed over the newer
+// crop. Every consumer of `rev` assumes strict monotonicity and none of them
+// defends against reuse.
 //
 // Dropping is not a second way to leave the photo unfinished: the release that
 // took the revision is itself a recompute in flight, and it settles the pending
@@ -1922,7 +1947,8 @@ function commitBatchSlot(slot, startRev, res) {
     sendLog("batch_slot_superseded", { name: slot.name, rev: startRev, currentRev: slot.rev });
     return;
   }
-  Object.assign(slot, res);
+  const { rev: _claimed, ...fields } = res;
+  Object.assign(slot, fields);
   // A photo with no File cannot be re-decoded, so for that one the
   // full-resolution frame stays on the record as `sourceCanvas`. Every photo the
   // app's own intake produces has a File - a drop, a paste, a zip entry and the
