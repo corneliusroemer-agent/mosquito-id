@@ -37,11 +37,21 @@ jobs:
     # live site. A `workflow_dispatch` run has no triggering workflow to consult and
     # deploys the dispatched ref, as it always has.
     #
+    # The `event == 'push'` clause is load-bearing, not defensive. `branches:` above
+    # filters on the triggering run's `head_branch`, which for a `pull_request` run
+    # is the PR's head branch - named by whoever opened the PR. A fork PR with its
+    # branch called `main` passes that filter, and a green run on it would reach a
+    # job holding `pages: write` and `id-token: write` with `npm ci` running the
+    # fork's lifecycle scripts. The `github-pages` environment policy does not help:
+    # under `workflow_run` the workflow's own ref is always the default branch, so
+    # the policy evaluates `main` and passes. Only a `push`-triggered run may deploy.
+    #
     # A skipped job still leaves this workflow green, so read the job list, not the
     # run's conclusion, to tell whether a deploy happened.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success')
     # `GITHUB_SHA` is the default branch tip under `workflow_run`, not the commit CI
     # verified, so both the checkout and the SHA Vite inlines are pinned to the
     # triggering run's head. Without this a second merge landing while CI is still
