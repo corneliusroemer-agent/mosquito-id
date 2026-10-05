@@ -31,8 +31,9 @@ export interface PhotoState {
   /** The dropped File. Retained across inference so a re-run does not re-encode. */
   file?: File | null;
   /**
-   * The decoded bitmap, released once `fullCanvas` holds the same pixels. A
-   * decoded copy of a 12-megapixel photograph is the largest thing a photo holds.
+   * The decoded bitmap, released once the batch has classified the photo. A
+   * decoded copy of a 12-megapixel photograph is the largest thing a photo
+   * holds, and nothing about it outlives that one call.
    */
   bitmap?: ImageBitmap | null;
   /**
@@ -42,7 +43,35 @@ export interface PhotoState {
   fingerprint: string | null;
 
   // --- geometry ---
-  fullCanvas: HTMLCanvasElement | null;
+  /**
+   * A display-sized copy of the photograph, longest edge at most
+   * `DISPLAY_MAX_EDGE`: what the panels paint and what the thumbnail encodes.
+   *
+   * The full-resolution frame is NOT held here. On a 12 MP photograph it is
+   * 45.8 MiB, and retaining one per photo cost the gallery ten gigabytes at a
+   * hundred photos with no plateau in the curve. The two paths that read
+   * full-resolution pixels - cutting a crop, and re-running the classifier -
+   * get the frame back from `fullResSource`, which holds at most one.
+   */
+  displayCanvas: HTMLCanvasElement | null;
+  /**
+   * The photograph's own pixel dimensions, measured once at decode, in the
+   * orientation the frame is drawn in.
+   *
+   * Every box below is in these pixels and every mapping that places one divides
+   * by them. They are carried separately from `displayCanvas` precisely because
+   * that canvas has different dimensions: read them off it and each box is a
+   * fraction of the wrong picture, which is a wrong crop with nothing to say so.
+   */
+  fullW: number | null;
+  fullH: number | null;
+  /**
+   * Full-resolution pixels kept for a photo whose File is gone, and only for
+   * one: with no bytes there is nothing to re-decode, so holding the frame is
+   * the whole of what this photo can offer. Null on every photo the app's own
+   * intake produces, because every intake mints a File.
+   */
+  sourceCanvas?: HTMLCanvasElement | null;
   cropCanvas: HTMLCanvasElement | null;
   contextCanvas: HTMLCanvasElement | null;
   cropBox: [number, number, number, number] | null;

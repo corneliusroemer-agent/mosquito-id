@@ -7,7 +7,7 @@
 // so nothing required a view to carry the fields they read - which is what
 // `views.ts` now states, and what these tests pin.
 import { describe, it, expect, beforeAll, vi } from "vitest";
-import { viewsFor, viewResultFrom, serverView, classifyCanvasServer,
+import { aliasesWholeFrame, viewsFor, viewResultFrom, serverView, classifyCanvasServer,
          posteriorSummary, verdictSummary, genusTotals, round4 } from "../src/app/views";
 import { realHead } from "./fixtures";
 import { softmaxJoint } from "../src/confidence/softmax";
@@ -34,14 +34,11 @@ function ramp(): Record<string, number> {
 const canvas = (w: number, h: number): HTMLCanvasElement =>
   ({ width: w, height: h }) as HTMLCanvasElement;
 
-const photo = (full: HTMLCanvasElement | null): Pick<PhotoState, "fullCanvas"> =>
-  ({ fullCanvas: full }) as Pick<PhotoState, "fullCanvas">;
-
 describe("viewsFor", () => {
   it("offers the crop and the whole frame for a cropped photo", () => {
     const full = canvas(1000, 800);
     const crop = canvas(200, 200);
-    const views = viewsFor(photo(full), crop, [10, 10, 210, 210], true);
+    const views = viewsFor(full, crop, [10, 10, 210, 210], true);
     expect(views).toHaveLength(2);
     expect(views[0]).toEqual({ canvas: crop, box: [10, 10, 210, 210], kind: "crop" });
     expect(views[1]).toEqual({ canvas: full, box: [0, 0, 1000, 800], kind: "whole" });
@@ -49,7 +46,7 @@ describe("viewsFor", () => {
 
   it("offers only the crop when the whole frame is turned off", () => {
     const full = canvas(1000, 800);
-    const views = viewsFor(photo(full), canvas(200, 200), [0, 0, 200, 200], false);
+    const views = viewsFor(full, canvas(200, 200), [0, 0, 200, 200], false);
     expect(views).toHaveLength(1);
     expect(views[0]!.canvas).not.toBe(full);
   });
@@ -59,19 +56,47 @@ describe("viewsFor", () => {
     // nothing in. Treating that as a crop would run the same pixels twice and
     // fuse a view with itself, which is not a second opinion.
     const full = canvas(640, 480);
-    const views = viewsFor(photo(full), full, null, true);
+    const views = viewsFor(full, full, null, true);
     expect(views).toHaveLength(1);
     expect(views[0]).toEqual({ canvas: full, box: [0, 0, 640, 480], kind: "whole" });
   });
 
+  it("does not fuse a whole frame with itself when its crop is a different canvas", () => {
+    // What an uncropped photo's record actually looks like now. There is no crop
+    // box, and the "crop" the caller falls back to is the record's display
+    // canvas - a DIFFERENT object from the freshly-decoded full-resolution frame.
+    // Deciding "does this photo have a crop" by canvas identity therefore said
+    // yes, and the photograph was pooled against itself as two independent views:
+    // a second full inference every pass, one view mislabelled as the crop, and
+    // on the server path a literal "null" crop_box posted for the whole frame.
+    // The predicate is the crop box, which is null here and cannot be anything
+    // else for a photo with no crop.
+    const full = canvas(4032, 3024);
+    const display = canvas(2048, 1536);
+    const views = viewsFor(full, display, null, true);
+    expect(views).toHaveLength(1);
+    expect(views[0]).toEqual({ canvas: full, box: [0, 0, 4032, 3024], kind: "whole" });
+  });
+
+  it("still offers the crop when the box is there, whatever the canvases are", () => {
+    // The other half of the predicate: a real box must win even if the crop
+    // canvas happens to be the frame, or a genuine crop would lose its first
+    // view to an identity check.
+    const full = canvas(4032, 3024);
+    const box: Box = [10, 10, 210, 210];
+    const views = viewsFor(full, full, box, true);
+    expect(views).toHaveLength(2);
+    expect(views[0]).toEqual({ canvas: full, box, kind: "crop" });
+  });
+
   it("offers the whole frame alone for a photo with no crop", () => {
-    const views = viewsFor(photo(canvas(640, 480)), null, null, true);
+    const views = viewsFor(canvas(640, 480), null, null, true);
     expect(views).toHaveLength(1);
     expect(views[0]!.box).toEqual([0, 0, 640, 480]);
   });
 
   it("offers nothing when there is no frame", () => {
-    expect(viewsFor(photo(null), null, null, true)).toEqual([]);
+    expect(viewsFor(null, null, null, true)).toEqual([]);
   });
 });
 
@@ -157,8 +182,8 @@ describe("classifyCanvasServer", () => {
       ok: true,
       json: async () => ({ labels: {}, detail: {}, logits: {}, cropBox: [0, 0, 1, 1] }),
     })));
-    const p = { fullCanvas: { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement, name: "a.jpg" };
-    await classifyCanvasServer(p, wanted as Box, log);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement;
+    await classifyCanvasServer(p, "a.jpg", wanted as Box, log);
     expect(log).toHaveBeenCalledWith("server_crop_box_diverged", { requested: wanted, returned: [0, 0, 1, 1] });
     vi.unstubAllGlobals();
   });
@@ -169,22 +194,57 @@ describe("classifyCanvasServer", () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, json: async () => ({ labels: {}, detail: {}, logits: {}, cropBox: box }),
     })));
-    const p = { fullCanvas: { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement, name: "a.jpg" };
-    await classifyCanvasServer(p, box, log);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement;
+    await classifyCanvasServer(p, "a.jpg", box, log);
     expect(log).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 
   it("throws on a server error rather than scoring nothing", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503 })));
-    const p = { fullCanvas: { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement, name: "a.jpg" };
-    await expect(classifyCanvasServer(p, [0, 0, 1, 1], vi.fn())).rejects.toThrow(/503/);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement;
+    await expect(classifyCanvasServer(p, "a.jpg", [0, 0, 1, 1], vi.fn())).rejects.toThrow(/503/);
+    vi.unstubAllGlobals();
+  });
+
+  it("sends NO crop_box for a whole-frame request, not the string \"null\"", async () => {
+    // `JSON.stringify(null)` is the four-character string "null", and a server
+    // that parses that as a box answers confidently about a crop that is not
+    // one. The assertion is on ABSENCE, not on a value: asserting
+    // `crop_box === "null"` would pass on exactly the bug this is about.
+    const log = vi.fn();
+    const fetchMock = vi.fn(async (_url: unknown, _init: RequestInit) => {
+      void _url; void _init;
+      return { ok: true, json: async () => ({ labels: {}, detail: {}, logits: {}, cropBox: null }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement;
+    await classifyCanvasServer(p, "a.jpg", null, log);
+    const body = fetchMock.mock.calls[0]![1]!.body as FormData;
+    expect(body.has("crop_box")).toBe(false);
+    // And it is not present as that string in any field either.
+    expect([...body.entries()].map(([, v]) => String(v))).not.toContain("null");
+    // No box requested, so there is nothing to have diverged from.
+    expect(log).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("still sends a real crop_box as a JSON array when there is one", async () => {
+    const fetchMock = vi.fn(async (_url: unknown, _init: RequestInit) => {
+      void _url; void _init;
+      return { ok: true, json: async () => ({ labels: {}, detail: {}, logits: {}, cropBox: [1, 2, 3, 4] }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement;
+    await classifyCanvasServer(p, "a.jpg", [1, 2, 3, 4], vi.fn());
+    const body = fetchMock.mock.calls[0]![1]!.body as FormData;
+    expect(body.get("crop_box")).toBe("[1,2,3,4]");
     vi.unstubAllGlobals();
   });
 
   it("throws rather than posting a null body", async () => {
-    const p = { fullCanvas: { toBlob: (r: (b: Blob | null) => void) => r(null) } as unknown as HTMLCanvasElement, name: "a.jpg" };
-    await expect(classifyCanvasServer(p, [0, 0, 1, 1], vi.fn())).rejects.toThrow(/Could not encode/);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(null) } as unknown as HTMLCanvasElement;
+    await expect(classifyCanvasServer(p, "a.jpg", [0, 0, 1, 1], vi.fn())).rejects.toThrow(/Could not encode/);
   });
 });
 
@@ -249,5 +309,29 @@ describe("verdictSummary", () => {
                  topGenusP: 0.91, topSpeciesP: 0.83, runnersUp: [] },
     });
     expect(s).toMatchObject({ state: "species", genus: "Aedes", topGenusP: 0.91, topSpeciesP: 0.83 });
+  });
+});
+
+describe("aliasesWholeFrame", () => {
+  it("reports the server's no-detection case: all three images are the frame", () => {
+    const data = { fullDataUrl: "data:image/jpeg;base64,AAA", cropDataUrl: "data:image/jpeg;base64,AAA",
+                   contextDataUrl: "data:image/jpeg;base64,AAA" };
+    expect(aliasesWholeFrame(data)).toEqual({ crop: true, context: true });
+  });
+
+  it("reports a real detection: the crop and the context are their own images", () => {
+    const data = { fullDataUrl: "AAA", cropDataUrl: "BBB", contextDataUrl: "CCC" };
+    expect(aliasesWholeFrame(data)).toEqual({ crop: false, context: false });
+  });
+
+  it("mixes: a crop region with no context region of its own", () => {
+    expect(aliasesWholeFrame({ fullDataUrl: "AAA", cropDataUrl: "BBB", contextDataUrl: "AAA" }))
+      .toEqual({ crop: false, context: true });
+  });
+
+  it("says nothing aliases when the server sent nothing to compare", () => {
+    expect(aliasesWholeFrame({})).toEqual({ crop: false, context: false });
+    expect(aliasesWholeFrame({ fullDataUrl: null, cropDataUrl: null, contextDataUrl: null }))
+      .toEqual({ crop: false, context: false });
   });
 });

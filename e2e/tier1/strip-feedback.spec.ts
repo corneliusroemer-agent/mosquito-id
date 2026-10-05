@@ -29,7 +29,7 @@ async function queue(page: import("@playwright/test").Page, indices: number[]): 
   await page.evaluate((idx) => {
     const A = window.__mosqAsync!;
     for (const i of idx) {
-      A.previews[i].fullCanvas = null;
+      A.previews[i].displayCanvas = null;
       A.previews[i].cropCanvas = null;
       A.previews[i].contextCanvas = null;
       A.previews[i].pending = true;

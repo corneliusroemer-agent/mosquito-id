@@ -39,7 +39,9 @@ const poolable = (p: ClassifiedPhoto): PoolablePhoto => p as unknown as Poolable
 function photo(over: Partial<ClassifiedPhoto> = {}): ClassifiedPhoto {
   return {
     name: "photo.jpg",
-    fullCanvas: null,
+    displayCanvas: null,
+    fullW: null,
+    fullH: null,
     cropCanvas: null,
     cropBox: null,
     contextBox: null,
@@ -105,8 +107,8 @@ describe("canView (spec §1.1)", () => {
   });
 
   it("is true for a photo that failed before it had any pixels", () => {
-    expect(canView(photo({ pending: true, fullCanvas: null, cropCanvas: null }))).toBe(true);
-    expect(canView(photo({ error: "decode failed", fullCanvas: null }))).toBe(true);
+    expect(canView(photo({ pending: true, displayCanvas: null, cropCanvas: null }))).toBe(true);
+    expect(canView(photo({ error: "decode failed", displayCanvas: null }))).toBe(true);
   });
 });
 
