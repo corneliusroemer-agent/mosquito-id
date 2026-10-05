@@ -195,7 +195,20 @@ export type PoolingMethod =
   | "Equal weight"
   | "Weight by lead"
   | "Accumulate evidence"
-  | "Dependent evidence";
+  | "Dependent evidence"
+  | "Fitted correlation";
+
+/**
+ * The method name `poolRhoFor` supplies a correlation for.
+ *
+ * "Dependent evidence" and this are the same arithmetic - `w_i = 1/(1+(n-1) rho)`
+ * with byte-identical fingerprints collapsed to one - and they differ in where
+ * `rho` comes from. That method reads it off a slider a user can set to anything;
+ * this one reads a value fitted on held-out data for the engine in use, so
+ * nothing has to be tuned by hand for the discounting to be right. See
+ * `POOL_RHO` in ../app/modelConfig.
+ */
+export const FITTED_RHO_METHOD = "Fitted correlation" as const satisfies PoolingMethod;
 
 /**
  * The per-photo weights for one pooling method.
@@ -205,6 +218,9 @@ export type PoolingMethod =
  * picture carry near the same evidence, so counting them at full weight is
  * counting one observation several times. A duplicate still gets weight 0, so
  * the discount is on the distinct photos, not on all of them.
+ *
+ * "Fitted correlation" is that same rule with `r` read from `POOL_RHO` rather
+ * than off a slider - see FITTED_RHO_METHOD.
  *
  * The method's weights are then scaled by the `poolWeight` `splitPoolable`
  * attached to each photo, and the result is rescaled to the same total, so the
@@ -265,23 +281,52 @@ function methodWeights(included: PoolablePhoto[], method: PoolingMethod, r: numb
 
   if (method === "Accumulate evidence") return included.map(() => 1);
 
-  // Dependent evidence.
-  // A photo with no fingerprint (null, absent or empty) is its own observation:
-  // it neither collapses into another nor makes another collapse into it.
-  const seen = new Set<string>();
-  let unfingerprinted = 0;
-  const effective = included.map((p) => {
-    const fp = p.fingerprint;
-    if (typeof fp !== "string" || fp === "") {
-      unfingerprinted++;
+  // Dependent evidence, and Fitted correlation: the same rule, a different
+  // source for `r`.
+  if (method === "Dependent evidence" || method === FITTED_RHO_METHOD) {
+    // A photo with no fingerprint (null, absent or empty) is its own observation:
+    // it neither collapses into another nor makes another collapse into it.
+    const seen = new Set<string>();
+    let unfingerprinted = 0;
+    const effective = included.map((p) => {
+      const fp = p.fingerprint;
+      if (typeof fp !== "string" || fp === "") {
+        unfingerprinted++;
+        return 1;
+      }
+      if (seen.has(fp)) return 0;
+      seen.add(fp);
       return 1;
-    }
-    if (seen.has(fp)) return 0;
-    seen.add(fp);
-    return 1;
-  });
-  const denom = 1 + (seen.size + unfingerprinted - 1) * r;
-  return effective.map((e) => e / denom);
+    });
+    const distinct = seen.size + unfingerprinted;
+    if (method === FITTED_RHO_METHOD) assertRho(r);
+    // `n` is the number of DISTINCT observations, so a pool holding one photo and
+    // a copy of it is a pool of one: w = 1, and the answer is that photo's. That
+    // is the property equal weight cannot express.
+    const denom = 1 + (distinct - 1) * r;
+    return effective.map((e) => e / denom);
+  }
+
+  throw new Error(`unknown pooling method: ${method as string}`);
+}
+
+/**
+ * A correlation factor has to be a correlation.
+ *
+ * `rho = 1` is perfect correlation, where the pool's total weight stays at 1 and
+ * a second photograph of the same mosquito never sharpens the claim; `rho > 1`
+ * is worse than meaningless, because the pool's total weight then falls below 1
+ * and checking another photograph makes the answer FLATTER. Neither is a number
+ * a caller should get past this module by typing it, so the fitted method
+ * refuses rather than pooling on it.
+ *
+ * The slider-driven "Dependent evidence" is deliberately not checked: a slider
+ * has an end stop at 1.0 and refusing there would throw from a UI event handler.
+ */
+function assertRho(rho: number): void {
+  if (!Number.isFinite(rho) || rho < 0 || rho >= 1) {
+    throw new Error(`rho must be a correlation in [0, 1); got ${rho}`);
+  }
 }
 
 /** Sum the included photos' per-species logits under `weights`, zeroing absent ones. */

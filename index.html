@@ -1182,6 +1182,7 @@
             <label>Method</label>
             <div class="radio-group" id="pooling-methods">
               <label><input type="radio" name="pooling-method" value="Dependent evidence" checked> Dependent evidence</label>
+              <label><input type="radio" name="pooling-method" value="Fitted correlation"> Fitted correlation (ρ from the engine)</label>
               <label><input type="radio" name="pooling-method" value="Accumulate evidence"> Accumulate evidence</label>
               <label><input type="radio" name="pooling-method" value="Weight by lead"> Weight by lead</label>
               <label><input type="radio" name="pooling-method" value="Equal weight"> Equal weight</label>
@@ -1192,6 +1193,7 @@
             <input type="range" id="corr-slider" min="0" max="1" step="0.05" value="0.5" style="width:100%;">
           </div>
           <p class="option-hint">Dependent evidence sums species logits, counts identical crops once, then divides by 1 + (n − 1) × assumed correlation. Scores are relative model affinities.</p>
+          <p class="option-hint" id="pooling-note" hidden></p>
           <div class="contribution-table-wrap">
             <table class="data-table" id="contribution-table">
               <thead><tr><th>Photo</th><th style="text-align:right">Share (%)</th></tr></thead>
