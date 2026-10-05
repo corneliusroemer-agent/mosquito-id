@@ -91,22 +91,17 @@ export function fuseViews(
     for (let i = 0; i < S; i++) logSum[i]! += Math.log(Math.max(v.spP[i]!, 1e-12));
     logNu += Math.log(Math.max(v.nuTotal, 1e-12));
   }
-  const mx = Math.max(logNu, ...logSum);
-  const ex = logSum.map((l) => Math.exp(l - mx));
-  const nu = Math.exp(logNu - mx);
-  const sum = ex.reduce((a, b) => a + b, 0) + nu;
-  const spP = ex.map((e) => e / sum);
-  const nuP = [nu / sum];
 
-  const adjNames = adjacentNames(head);
-  const A = adjNames.length;
-  let adP: number[] = [];
   // Only pool the adjacent classes if some view actually scored them. A caller
   // passing views without `adP` (a server path, or an embeds file from before
   // the classes existed) gets none, and the non-mosquito gate then cannot fire
   // at all - which is right: it has no evidence to fire on.
-  if (A && viewResults.some((v) => v.adP)) {
-    const logAd = new Array<number>(A).fill(-Infinity);
+  const adjNames = adjacentNames(head);
+  const A = adjNames.length;
+  const hasAd = A > 0 && viewResults.some((v) => v.adP);
+  let logAd: number[] = [];
+  if (hasAd) {
+    logAd = new Array<number>(A).fill(-Infinity);
     for (const v of viewResults) {
       for (let i = 0; i < A; i++) {
         if (!v.adP || !Number.isFinite(v.adP[i]!)) continue;
@@ -114,14 +109,47 @@ export function fuseViews(
         logAd[i] = Number.isFinite(logAd[i]!) ? logAd[i]! + l : l;
       }
     }
-    const mxAd = Math.max(logNu, ...logSum, ...logAd.filter(Number.isFinite));
-    const exAd = logAd.map((l) => (Number.isFinite(l) ? Math.exp(l - mxAd) : 0));
-    const sumAd =
-      logSum.reduce((a, l) => a + Math.exp(l - mxAd), 0) +
-      Math.exp(logNu - mxAd) +
-      exAd.reduce((a, b) => a + b, 0);
-    adP = exAd.map((e) => e / sumAd);
   }
+
+  // ONE denominator for all three blocks. `softmaxJoint` produces a single
+  // softmax and slices it, so species, nuisance and adjacent already partition
+  // one probability; re-deriving that structure per block and normalising each
+  // separately inflated species by exactly 1/(1 - adjacentMass), which is
+  // unbounded and crosses the floors. The band where the non-mosquito gate stays
+  // silent but the inflated posterior crosses a floor is not empty.
+  //
+  // A class no view scored contributes NO mass here, the same rule the adjacent
+  // block has always used: a flat share would invent evidence nobody supplied and
+  // could carry the gate on its own.
+  const finite = (l: number) => Number.isFinite(l);
+  const mx = Math.max(logNu, ...logSum, ...logAd.filter(finite));
+  const ex = logSum.map((l) => Math.exp(l - mx));
+  const nu = Math.exp(logNu - mx);
+  const exAd = logAd.map((l) => (finite(l) ? Math.exp(l - mx) : 0));
+  const sum = ex.reduce((a, b) => a + b, 0) + nu + exAd.reduce((a, b) => a + b, 0);
+
+  const spP = ex.map((e) => e / sum);
+  // The nuisance vector keeps its class identities, for the same reason the
+  // adjacent block does: the gate reports WHICH nuisance class it matched, and a
+  // mass-only array makes every nuisance verdict name class 0.
+  // A view that scored no nuisance classes carries none, and a class no view
+  // scored contributes no mass - the same rule the adjacent block uses. Falling
+  // back to `nuTotal` spreads the mass flat, which is what the gate needs to
+  // still fire when only the combined mass survived to fuse time.
+  const nuNames = head.nuisance ?? [];
+  const nuP =
+    nuNames.length && viewResults.some((v) => v.nuP)
+      ? nuNames.map((_, i) => {
+          let l = 0;
+          for (const v of viewResults) {
+            l += Math.log(Math.max(v.nuP?.[i] ?? 0, 1e-12));
+          }
+          return Math.exp(l - mx) / sum;
+        })
+      : nuNames.length
+        ? [nu / sum]
+        : [];
+  const adP = exAd.map((e) => e / sum);
 
   // The pooling card needs logits on the scale the score panel plots them on.
   // Recovering them from the fused posterior is not an approximation: log p_i =

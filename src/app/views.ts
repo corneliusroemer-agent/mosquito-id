@@ -83,7 +83,7 @@ export function viewResultFrom(
   scale: number,
 ): ViewResult {
   const { spP, nuP, adP } = softmaxJoint(head, emb, { offsets: cosineOffsetsFor(engineKey) });
-  return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), adP, scale };
+  return { spP, nuTotal: nuP.reduce((a, b) => a + b, 0), nuP, adP, scale };
 }
 
 /** One classified view, plus the async embed it came from. */
