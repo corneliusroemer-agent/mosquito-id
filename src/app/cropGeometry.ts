@@ -6,8 +6,8 @@
  * and a photo object, and nothing else - no session, no classifier state - so
  * the geometry of both crop panels can be read in one place.
  *
- * The two panels deliberately disagree: the full panel fits with contain (the
- * whole photo, letterboxed) and the zoom panel with cover, so each needs its own
+ * Both panels fit with contain, but they map different images - the full panel
+ * the whole photo, the zoom panel the context region - so each needs its own
  * map and neither can be reused for the other.
  */
 
@@ -32,12 +32,11 @@ export function hasCropBox(p?: Preview): boolean {
 }
 
 // The same p.cropBox expressed as fractions of each panel's surface. Both take
-// p.cropBox in full-image pixels; each panel shows a different image through a
-// different object-fit, so each needs its own map. The full panel fits with
-// contain (the whole photo, letterboxed) and the zoom panel with cover (a
-// deliberate crop), so the two panels disagree by construction and each has to
-// ask for its own. Returns null when the panel cannot place the box (no image,
-// or no context region).
+// p.cropBox in full-image pixels; each panel shows a different image, so each
+// needs its own map. The full panel fits the whole photo with contain, the
+// zoom panel fits the context region with contain, so the two panels disagree
+// by subject and each has to ask for its own. Returns null when the panel
+// cannot place the box (no image, or no context region).
 export function cropBoxInFullSurface(p: Preview): BoxPercent | null {
   if (!hasCropBox(p) || !p.fullCanvas) return null;
   const surfaceFull = document.getElementById("crop-surface-full");
@@ -221,7 +220,7 @@ export function isCropTooSmall(box: Box, frame?: CanvasLike, minPx = MIN_CROP_PX
 }
 
 // The zoom panel shows the context region, not the whole photo, so the box has
-// to be expressed relative to that region before it goes through the cover map.
+// to be expressed relative to that region before it goes through the zoom map.
 // With no context region the panel shows the whole photo instead (zoomSource
 // falls back the same way), so the whole photo is the coordinate frame here too
 // - which keeps a real crop drawable on both panels in every state.

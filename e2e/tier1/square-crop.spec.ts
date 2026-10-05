@@ -134,9 +134,11 @@ async function expectedSquareBox(
  *
  *  - the frame is the CONTEXT region, so the surface map runs against the
  *    context canvas's own dimensions;
- *  - the fit is `cover`, the mirror image of `contain` - the frame fills the
- *    surface, so it is the axis where the frame OVERFLOWS that is magnified and
- *    the other that is pinned at 1, and the offset is negative;
+ *  - the fit is `contain`, so the axis where the frame OVERFLOWS the surface is
+ *    pinned at 1 and the other is magnified, with a negative offset
+ *    letterboxing the frame. #104 moved the zoom panel to `contain` because
+ *    `cover` cropped the context region, and took the box with it when the box
+ *    sat near a region edge;
  *  - the result carries the region's own offset back into the photo, and is then
  *    clamped to the photo and squared, which is the order `applySquareCrop`
  *    commits in.
@@ -163,9 +165,12 @@ async function expectedZoomBox(
       const img = { w: region.w, h: region.h };
       const boxAspect = surf.width / surf.height;
       const imgAspect = img.w / img.h;
-      // cover: min, where contain is max.
-      const kx = Math.min(1, boxAspect / imgAspect);
-      const ky = Math.min(1, imgAspect / boxAspect);
+      // contain: max, matching `zoomedSurfaceMapping` and #104. Under `cover`
+      // this would be min, and every box below would come out at a different
+      // place in the photo - still square, still carrying the region offset,
+      // just not the one a drag actually commits.
+      const kx = Math.max(1, boxAspect / imgAspect);
+      const ky = Math.max(1, imgAspect / boxAspect);
       const ox = (1 - kx) / 2;
       const oy = (1 - ky) / 2;
 
@@ -470,7 +475,7 @@ test.describe("a manual crop is square", () => {
 
     // The box itself, all four edges, at precision 0. This is the assertion the
     // round trip cannot make for itself: `zoomedSurfaceMapping` fixes `fit` to
-    // `cover` and multiplies k by 1.08, and the letterbox offset's sign in
+    // `contain` and multiplies k by 1.08, and the letterbox offset's sign in
     // `fitMapping`, and before these four lines every one of those mutations
     // passed this spec.
     expect(r.box[0]).toBeCloseTo(expected[0], 0);
