@@ -31,6 +31,35 @@ function need<T extends Element>(id: string): T {
   return el as unknown as T;
 }
 
+/**
+ * What the app claims about one photo, in words: the species (as the loaded head
+ * can separate it), the genus alone, or that it is not confident.
+ *
+ * A photo with no verdict at all - one the gate never ran on - has no claim, and
+ * says so. It used to be read as a species verdict, which named the top of the
+ * ranking as though the app had stood behind it.
+ */
+export function claimFor(p: ClassifiedPhoto, topSpec: [string, number] | (string | number)[]): string {
+  const v = p.verdict;
+  if (!v) return "No verdict";
+  if (v.state === "species") return activeName(String(topSpec[0])) ?? String(topSpec[0]);
+  if (v.state === "genus") return `${v.genus} (genus only)`;
+  return "Not confident";
+}
+
+/**
+ * One CSV field, quoted, with embedded quotes doubled (RFC 4180 section 2.7).
+ *
+ * A text starting with = + - @ (or tab/CR) is prefixed with an apostrophe so a
+ * spreadsheet reads it as text rather than evaluating it as a formula; file and
+ * zip-entry names are user-controlled. A lone "-" is the placeholder and stays.
+ */
+export function csvField(value: unknown): string {
+  let t = String(value ?? "");
+  if (t !== "-" && /^[=+\-@\t\r]/.test(t)) t = `'${t}`;
+  return `"${t.replace(/"/g, '""')}"`;
+}
+
 // ---- Results Table & CSV Export ----
 export function renderResultsTable(previews: ClassifiedPhoto[]): void {
   const tbody = need<HTMLTableElement>("results-table").querySelector("tbody");
@@ -71,13 +100,11 @@ export function renderResultsTable(previews: ClassifiedPhoto[]): void {
     // What the app would claim about the photo. It is a coarser claim than the
     // ranking when the species gate abstains, never a fabricated one: a photo
     // the classifier cannot place shows the genus it did place, or nothing.
-    const v = p.verdict || { state: "species" };
-    // `activeName` is what keeps the table honest: a species the loaded head
+    // `claimFor` is what keeps the table honest: a species the loaded head
     // cannot separate from its group-mates is written as the group here, so the
     // column never shows a name the model did not earn. A head that separates
     // every row returns the name unchanged.
-    const topCell = v.state === "species" ? (activeName(String(topSpec[0])) ?? String(topSpec[0]))
-      : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
+    const topCell = claimFor(p, topSpec);
     const specPct = (topSpec[1] || 0) * 100;
     tr.innerHTML = `
       <td title="${escapeHtml(ref)}">${escapeHtml(ref)}</td>
@@ -90,9 +117,8 @@ export function renderResultsTable(previews: ClassifiedPhoto[]): void {
   });
 }
 
-export function downloadCSV(previews: ClassifiedPhoto[], sendLog: LogFn): void {
-  if (!previews.length) return;
-  sendLog("download_csv");
+/** The export, as text: one header and one record per photo. */
+export function buildCsv(previews: ClassifiedPhoto[]): string {
   let csv = "Photo,Filename,Status,Cropped,Top Genus,Genus Score (%),Top Species,Species Score (%)\n";
   previews.forEach((p, i) => {
     // The number the strip shows, beside the filename rather than inside it: a
@@ -102,7 +128,7 @@ export function downloadCSV(previews: ClassifiedPhoto[], sendLog: LogFn): void {
     if (p.pending || p.error) {
       // Exporting the previous crop's numbers under the new crop's name would be
       // a wrong result, not a stale one.
-      csv += `${num},"${p.name}","${(p.error || "classifying").replace(/"/g, "'")}",${p.is_cropped},"-","-","-","-"\n`;
+      csv += `${num},${csvField(p.name)},${csvField(p.error || "classifying")},${p.is_cropped},"-","-","-","-"\n`;
       return;
     }
     const sortedGenus = Object.entries(p.scores).sort((a, b) => b[1] - a[1]);
@@ -111,12 +137,17 @@ export function downloadCSV(previews: ClassifiedPhoto[], sendLog: LogFn): void {
     const topSpec = sortedSpec[0] || ["-", 0];
     // Same rule as the results table: the export carries the claim the app made,
     // so a photo the app would not name cannot leave the machine looking named.
-    const v = p.verdict || { state: "species" };
-    const claim = v.state === "species" ? (activeName(String(topSpec[0])) ?? String(topSpec[0]))
-      : v.state === "genus" ? `${v.genus} (genus only)` : "Not confident";
+    const claim = claimFor(p, topSpec);
     const specPct = ((topSpec[1] || 0) * 100).toFixed(1);
-    csv += `${num},"${p.name}","${p.status}",${p.is_cropped},"${topGenus[0]}",${(topGenus[1] * 100).toFixed(1)},"${claim}",${specPct}\n`;
+    csv += `${num},${csvField(p.name)},${csvField(p.status)},${p.is_cropped},${csvField(topGenus[0])},${(topGenus[1] * 100).toFixed(1)},${csvField(claim)},${specPct}\n`;
   });
+  return csv;
+}
+
+export function downloadCSV(previews: ClassifiedPhoto[], sendLog: LogFn): void {
+  if (!previews.length) return;
+  sendLog("download_csv");
+  const csv = buildCsv(previews);
 
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
