@@ -862,6 +862,18 @@ async function initEngine() {
   if (engineSelect) {
     engineSelect.value = chosenEngine;
     engineSelect.addEventListener("change", async (e) => {
+      // The selector is disabled for the length of a pass, so a user cannot
+      // reach this while one is in flight. Guarded anyway, because `disabled` is
+      // only a statement about the control and not about the batch: a `change`
+      // dispatched from anywhere else would still land here, and the batch pins
+      // its engine per photo, so honouring one now leaves the gallery holding
+      // two. The value is put back rather than left wherever it was sent, so the
+      // dropdown never names an engine that is not the one scoring.
+      if (reprocessRunning || isProcessingBatch || reclassifyRunner.inFlight) {
+        e.target.value = currentEngine;
+        sendLog("engine_switch_blocked", { engine: currentEngine, reason: ENGINE_BLOCKED_BATCH });
+        return;
+      }
       const chosen = e.target.value;
       // Reported rather than thrown: a browser that refuses the write would
       // otherwise leave the selector showing an engine that reverts on reload,
@@ -1009,6 +1021,14 @@ function labelEngineOptions() {
 // Both the rule and the button's drawing live in ./reprocess, because which
 // photos are stale is a question about the photos and not about the DOM.
 const REPROCESS_BLOCKED_BATCH = "A batch is being analysed - re-run when it finishes";
+// The same rule as REPROCESS_BLOCKED_BATCH, for the control that starts one. A
+// batch pins the engine per photo (`inferSlot` reads it once and threads it
+// through), so a switch landing mid-pass leaves the photos already scored on the
+// old engine and the ones behind them on the new one, with nothing on the page
+// saying so. Deferring the switch to the end of the pass would need a queue and
+// a way to show a choice that has not taken effect yet; a blocked selector that
+// says why is the state this app already has a word for.
+const ENGINE_BLOCKED_BATCH = "A batch is being analysed - switch engines when it finishes";
 // Set when a switch's weights could not be fetched, and cleared by the next
 // switch. It is the difference between "still loading" and "did not load", which
 // are the same button state and not the same thing to be told.
@@ -1023,20 +1043,50 @@ function engineLabel() {
 
 function updateReprocessButton() {
   const btn = document.getElementById("btn-reprocess");
-  if (!btn) return;
-  const stale = stalePhotoCount(previews, currentEngine);
-  // Checked in this order because a re-run is a batch is a re-run. The last is
-  // the dangerous one: the dropdown already names an engine whose session is not
-  // the one loaded, so pressing would stamp the new engine's name on the
-  // previous engine's result.
-  const blockedBy = reprocessRunning || isProcessingBatch || reclassifyRunner.inFlight
-    ? REPROCESS_BLOCKED_BATCH
-    : engineLoadError
-      ? `${engineLoadError} - the engine in the dropdown is not the one that scored these photos`
-      : !window.modelsReady
-        ? "The selected engine is still loading - re-run when it has"
-        : null;
-  renderReprocessButton(btn, { stale, engineLabel: engineLabel(), blockedBy });
+  if (btn) {
+    const stale = stalePhotoCount(previews, currentEngine);
+    // Checked in this order because a re-run is a batch is a re-run. The last is
+    // the dangerous one: the dropdown already names an engine whose session is not
+    // the one loaded, so pressing would stamp the new engine's name on the
+    // previous engine's result.
+    const blockedBy = reprocessRunning || isProcessingBatch || reclassifyRunner.inFlight
+      ? REPROCESS_BLOCKED_BATCH
+      : engineLoadError
+        ? `${engineLoadError} - the engine in the dropdown is not the one that scored these photos`
+        : !window.modelsReady
+          ? "The selected engine is still loading - re-run when it has"
+          : null;
+    renderReprocessButton(btn, { stale, engineLabel: engineLabel(), blockedBy });
+  }
+  // Outside the `btn` guard: the selector is blocked by the same pass the button
+  // is, and a build without the button must not leave it switchable mid-batch.
+  updateEngineSelect(reprocessRunning || isProcessingBatch || reclassifyRunner.inFlight);
+}
+
+/**
+ * Draw the engine `<select>`'s availability for a pass in flight.
+ *
+ * Called from `updateReprocessButton` because that is already called wherever a
+ * pass starts, ends or settles - the two controls are blocked by the same thing
+ * for the same reason, and one caller is where they cannot drift apart.
+ *
+ * A `<select>` disabled this way cannot be opened, so the reason is only ever
+ * read by a screen reader or from the markup; it is still written, because a
+ * blocked control that does not say why is the defect R4.6 names for the tile
+ * checkbox and the same rule here.
+ */
+function updateEngineSelect(passInFlight) {
+  const sel = document.getElementById("engine-select");
+  if (!sel) return;
+  sel.disabled = passInFlight;
+  if (passInFlight) {
+    sel.title = ENGINE_BLOCKED_BATCH;
+    sel.setAttribute("aria-label", ENGINE_BLOCKED_BATCH);
+  } else {
+    // The `<label for="engine-select">` is what names it once it is usable again.
+    sel.removeAttribute("title");
+    sel.removeAttribute("aria-label");
+  }
 }
 
 /**
@@ -1727,15 +1777,19 @@ async function processFiles(fileList) {
     // between being queued and being inferred, which is every crop released
     // while an earlier photo was still being classified: a tile is draggable
     // from the moment its own decode lands, and nothing disables the crop
-    // surface while `isProcessingBatch` is set. A capture of `slot.rev` here
-    // reads the crop's number, so `commitBatchSlot` compares the photo against
-    // itself and the detector's box lands on top of the crop.
+    // surface while `isProcessingBatch` is set. `slot.batchRev` is stamped at
+    // queue time and so has no interval in which it can go stale; a capture of
+    // `slot.rev` here reads the crop's number, so `commitBatchSlot` compares the
+    // photo against itself and the detector's box lands on top of the crop.
     const startRev = slot.batchRev;
     // Read once, so the photos a batch scores all carry one engine in
     // `scoredBy` rather than one each, and the footer naming the last of them
-    // cannot leave a reader unable to tell which scores are whose. The batch
-    // itself does not straddle a switch: `processFiles` is unreachable while the
-    // engine is unusable, so the session and head are settled for its duration.
+    // cannot leave a reader unable to tell which scores are whose. A batch does
+    // not straddle a switch: `processFiles` is unreachable while the engine is
+    // unusable, and the engine `<select>` is disabled for the whole pass, so a
+    // switch landing mid-batch is refused rather than allowed to leave the
+    // gallery holding two engines.
+
     const engine = currentEngine;
     if (isBatchAborted) {
       // Aborted before this photo started: say so rather than leaving a tile
