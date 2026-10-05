@@ -38,6 +38,8 @@ const arg = (name, dflt) => {
 };
 const N_PHOTOS = parseInt(arg("photos", "20"), 10);
 const ENGINE = arg("engine", "local");
+const BASE_ENGINE = ENGINE.replace(/-nodet$/, "");
+// "local-nodet" and "server-nodet" stub a detector that finds nothing.
 const PATTERN = arg("pattern", "alternating");
 const PORT = parseInt(arg("port", process.env.MOSQ_E2E_PORT ?? "4199"), 10);
 const BASE = arg("base", `http://127.0.0.1:${PORT}`);
@@ -62,7 +64,7 @@ await ctx.route("**/*.r2.dev/**", (r) => r.abort());
 
 const page = await ctx.newPage();
 
-if (ENGINE === "server") {
+if (BASE_ENGINE === "server") {
   // The server-gpu batch path asks /api/predict for three data URLs per photo
   // and decodes each into its own canvas - which is exactly what finding 4 is
   // about, so the stub answers with real JPEG data URLs at the photograph's own
@@ -85,7 +87,7 @@ if (ENGINE === "server") {
     return c.toDataURL("image/jpeg", 0.85);
   }, [w, h, hue]);
 
-  const UNCROPPED = argv.includes("--server-uncropped");
+  const UNCROPPED = argv.includes("--server-uncropped") || BASE_ENGINE.endsWith("-nodet");
   const full = await mk(FULL_W, FULL_H, 0);
   // With the server's detection finding nothing, the crop and the context ARE
   // the whole frame - the same data URL, sent three times, which is the case the
@@ -111,7 +113,7 @@ if (ENGINE === "server") {
 await page.goto(BASE, { waitUntil: "domcontentloaded" });
 await page.waitForFunction(() => !!window.__mosqAsync?.renderThumbnails, null, { timeout: 20_000 });
 
-if (ENGINE === "server") {
+if (BASE_ENGINE === "server") {
   // `?engine=server-gpu` does not work: `selectable()` returns false for
   // server-gpu unconditionally, so a URL parameter cannot select it. The engine
   // is switched through the dropdown, which is also the only route through which
@@ -136,18 +138,21 @@ await page.evaluate(() => {
 /** The stubbed sessions, plus `n` photographs built by the page's own canvas. */
 await page.evaluate(async ([n, engine]) => {
   const A = window.__mosqAsync;
+  window.__noDetectionBox = engine.endsWith("-nodet");
   // The head is needed on BOTH engines: the server path fuses the server's
   // response through the same `serverView`, which reads the module's EMB. Without
   // it the batch commits a classification error rather than a photo.
   const embeds = await fetch("text_embeds.json").then((r) => r.json());
   for (const k of ["species_emb", "nuisance_emb"]) embeds[k] = Float32Array.from(embeds[k]);
   A.embeds = embeds;
-  if (engine === "local") {
+  if (engine.startsWith("local")) {
     A.sessDet = {
       inputNames: ["images"],
       async run() {
         const N = 8400;
         const d = new Float32Array(5 * N);
+        const noBox = window.__noDetectionBox === true;
+        if (noBox) return { output0: { dims: [1, 5, N], data: new Float32Array(5 * N) } };
         d[0] = 320; d[N] = 240; d[2 * N] = 900; d[3 * N] = 800; d[4 * N] = 0.9;
         return { output0: { dims: [1, 5, N], data: d } };
       },
