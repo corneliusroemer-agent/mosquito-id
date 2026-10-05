@@ -49,6 +49,8 @@ import { badge, canView, checkLabel, contributesToPool, photoRef,
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
+import { keyEventBelongsElsewhere, describeKeyTarget } from "./keyNav";
+import { readPref, writePref } from "./safeStorage";
 import { createIdleRelease } from "./idleRelease";
 import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
 import { clipTensor, embedCanvas as _embedCanvas } from "./embedding";
@@ -529,7 +531,7 @@ async function initEngine() {
   const defaultEngine = "webgpu-fp16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
-  const savedEngine = localStorage.getItem("mosquito_engine");
+  const savedEngine = readPref("mosquito_engine");
   const selectable = (e) =>
     (e === "server-gpu" ? false : !!WEBGPU_MODELS[e]) && (e !== "webgpu-fp16" || FP16_AVAILABLE);
 
@@ -546,7 +548,12 @@ async function initEngine() {
     engineSelect.value = chosenEngine;
     engineSelect.addEventListener("change", async (e) => {
       const chosen = e.target.value;
-      localStorage.setItem("mosquito_engine", chosen);
+      // Reported rather than thrown: a browser that refuses the write would
+      // otherwise leave the selector showing an engine that reverts on reload,
+      // with nothing said. The switch itself still happens either way.
+      if (!writePref("mosquito_engine", chosen)) {
+        sendLog("pref_not_stored", { key: "mosquito_engine" });
+      }
       sendLog("engine_switched", { from: currentEngine, to: chosen });
       applyEngineNotices(chosen);
       currentEngine = chosen;
@@ -1787,13 +1794,12 @@ function wireWholeFrameToggle() {
     const on = box.checked;
     if (on === includeWholeFrame) return;
     includeWholeFrame = on;
-    try {
-      localStorage.setItem(WHOLE_FRAME_KEY, on ? "true" : "false");
-    } catch {
-      // A preference that cannot be stored is a preference for this session.
-      // Failing to persist it is not worth interrupting the user over, and the
-      // next change reclassifies either way.
-    }
+    // `writePref` reports whether the value stuck rather than throwing, so a
+    // browser that refuses the write (private mode, quota) leaves the setting
+    // working for this session and says so, instead of the UI implying a
+    // preference that will be gone on reload.
+    const stored = writePref(WHOLE_FRAME_KEY, on ? "true" : "false");
+    if (!stored) sendLog("pref_not_stored", { key: WHOLE_FRAME_KEY });
     sendLog("whole_frame_toggled", { includeWholeFrame: on, photos: previews.length });
     // A toggle is about every photo on screen, so it withdraws a re-run's scope
     // rather than inheriting it. `request()` during a re-run's pass sets the
@@ -2764,26 +2770,26 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-next").onclick = () => selectPhoto(selectedIndex + 1);
   document.getElementById("btn-csv").onclick = () => downloadCSV(previews, sendLog);
 
-  const savedPooling = localStorage.getItem("mosquito_pooling");
+  const savedPooling = readPref("mosquito_pooling");
   if (savedPooling) {
     const radio = document.querySelector(`input[name="pooling-method"][value="${savedPooling}"]`);
     if (radio) radio.checked = true;
   }
   document.querySelectorAll('input[name="pooling-method"]').forEach(r => {
     r.onchange = (e) => {
-      localStorage.setItem("mosquito_pooling", e.target.value);
+      writePref("mosquito_pooling", e.target.value);
       updatePooling(EMB, previews, includedIndices);
     };
   });
 
   const corrSlider = document.getElementById("corr-slider");
-  const savedCorr = localStorage.getItem("mosquito_corr");
+  const savedCorr = readPref("mosquito_corr");
   if (savedCorr && corrSlider) {
     corrSlider.value = savedCorr;
     document.getElementById("corr-val").textContent = parseFloat(savedCorr).toFixed(2);
   }
   corrSlider.oninput = (e) => {
-    localStorage.setItem("mosquito_corr", e.target.value);
+    writePref("mosquito_corr", e.target.value);
     document.getElementById("corr-val").textContent = parseFloat(e.target.value).toFixed(2);
     updatePooling(EMB, previews, includedIndices);
   };
@@ -2795,7 +2801,12 @@ window.addEventListener("DOMContentLoaded", () => {
   // ends up pressing Enter on a different photo than the one the highlight is
   // on, which is the same defect as a click landing on the wrong tile.
   window.addEventListener("keydown", (e) => {
-    if (e.target instanceof HTMLInputElement) return;
+    // The handler owns the arrow/Home/End keys only when the user is not
+    // operating some other control. The old guard was `instanceof
+    // HTMLInputElement`, and a `<select>` is not one - so with the engine
+    // dropdown focused, ArrowDown changed the ENGINE and Home/End jumped the
+    // dropdown to its last option. See keyNav.ts.
+    if (keyEventBelongsElsewhere(describeKeyTarget(e.target), e)) return;
     if (e.key === "ArrowRight") {
       e.preventDefault();
       selectPhoto(selectedIndex + 1);
