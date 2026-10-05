@@ -35,7 +35,7 @@ import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCac
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
-import { downloadCSV, renderResultsTable, scheduleResultsTable } from "./resultsTable";
+import { downloadCSV, renderResultsTable } from "./resultsTable";
 import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
@@ -1361,9 +1361,7 @@ async function processFiles(fileList) {
     renderThumbnails();
     renderActivePhoto();
     updatePooling(EMB, previews, includedIndices);
-    // The one place in the app where the table is rebuilt once per photo: the
-    // sync render is there for the end of the batch, after this loop.
-    scheduleResultsTable(() => previews);
+    renderResultsTable(previews);
   }
 
   // Inference, one photo at a time, each result painted as it lands.

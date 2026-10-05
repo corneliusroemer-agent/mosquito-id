@@ -32,53 +32,7 @@ function need<T extends Element>(id: string): T {
 }
 
 // ---- Results Table & CSV Export ----
-
-/**
- * A pending coalesced render, and what it was asked for.
- *
- * Kept out of `renderResultsTable` itself because that function's contract is
- * "the table shows these photos when this returns", and half its callers mean
- * it literally: a test that calls it and reads the row, and the render at the
- * end of a batch that the next assertion depends on. Coalescing would be free to
- * change all of those.
- */
-let pendingFrame: number | null = null;
-
-/**
- * Render the table at most once per frame, however many times it is asked for.
- *
- * Rebuilding it clears the tbody and re-derives every row, sorting two object
- * pairs per row over the whole class list. A batch calls it once per photo, and
- * the photos land faster than frames arrive, so the n rebuilds collapse into one
- * that sees all n results - the table still updates as the batch runs, at the
- * rate the page can paint, which is the only rate anyone can read it at.
- *
- * The list is read through a getter rather than taken, because the batch path
- * replaces the array wholesale on every prepend. A frame that captured the
- * array it was scheduled with would redraw the list as it stood when the batch
- * started, which is precisely the stale table the sync path never showed.
- */
-export function scheduleResultsTable(read: () => readonly ClassifiedPhoto[]): void {
-  if (pendingFrame !== null) return;
-  pendingFrame = requestAnimationFrame(() => {
-    pendingFrame = null;
-    renderResultsTable([...read()]);
-  });
-}
-
-/** Whether a coalesced render is still owed. A probe asserts on this. */
-export function resultsTableRenderPending(): boolean {
-  return pendingFrame !== null;
-}
-
 export function renderResultsTable(previews: ClassifiedPhoto[]): void {
-  // A synchronous render is the better one - it is being asked for because the
-  // caller is about to read the table - so a queued frame would only redraw the
-  // same rows over it.
-  if (pendingFrame !== null) {
-    cancelAnimationFrame(pendingFrame);
-    pendingFrame = null;
-  }
   const tbody = need<HTMLTableElement>("results-table").querySelector("tbody");
   if (!tbody) throw new Error("#results-table has no tbody");
   tbody.innerHTML = "";
