@@ -228,3 +228,104 @@ describe("an async release and a restore cannot interleave", () => {
     expect(order).toEqual(["start", "end", "start", "end"]);
   });
 });
+
+describe("a release that is still in flight when the tab comes back", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /**
+   * The app's own view of the world: `release` takes the sessions away and
+   * `restore` puts them back. `main.js` gates every inference entry point on
+   * these being non-null, so "released" and "sessions present" have to agree -
+   * a tab that holds nothing and does not know it is holding nothing never
+   * rebuilds, because every later inference returns early.
+   */
+  function harness() {
+    const session = { name: "session" };
+    const app = { sessClip: session as object | null, sessDet: session as object | null };
+    let releaseIt: () => void = () => {};
+    const release = vi.fn(
+      () =>
+        new Promise<void>((r) => {
+          app.sessClip = null;
+          app.sessDet = null;
+          releaseIt = r;
+        }),
+    );
+    const restore = vi.fn(() => {
+      app.sessClip = session;
+      app.sessDet = session;
+    });
+    const idle = createIdleRelease({ delayMs: 1, release, restore });
+    /** The shape an inference entry point in `main.js` has: always ensure. */
+    const inferenceEntryPoint = async (): Promise<boolean> => {
+      await idle.ensure();
+      return Boolean(app.sessClip && app.sessDet);
+    };
+    return { app, idle, release, restore, releaseIt: () => releaseIt(), inferenceEntryPoint };
+  }
+
+  it("still counts as released, so the next inference rebuilds the sessions", async () => {
+    const { idle, releaseIt, app, inferenceEntryPoint } = harness();
+
+    idle.hidden();
+    await vi.advanceTimersByTimeAsync(1);
+    // The tab comes back while the release is still awaiting its sessions.
+    idle.visible();
+    releaseIt();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(app.sessClip).toBeNull();
+    expect(app.sessDet).toBeNull();
+    // The sessions are gone, so the tab has to know that, or it never rebuilds.
+    expect(idle.released()).toBe(true);
+
+    await expect(inferenceEntryPoint()).resolves.toBe(true);
+    expect(app.sessClip).not.toBeNull();
+    expect(app.sessDet).not.toBeNull();
+  });
+
+  it("ensure() waits for the release it raced rather than returning before it", async () => {
+    const order: string[] = [];
+    let releaseIt: () => void = () => {};
+    const session = { name: "session" };
+    let sessClip: object | null = session;
+    const idle = createIdleRelease({
+      delayMs: 1,
+      release: () =>
+        new Promise<void>((r) => {
+          order.push("release-start");
+          sessClip = null;
+          releaseIt = () => {
+            order.push("release-end");
+            r();
+          };
+        }),
+      restore: () => {
+        order.push("restore");
+        sessClip = session;
+      },
+    });
+
+    idle.hidden();
+    await vi.advanceTimersByTimeAsync(1);
+    idle.visible();
+
+    // An inference lands mid-release, and blocks on it.
+    let ready: boolean | null = null;
+    const inference = idle.ensure().then(() => {
+      ready = sessClip !== null;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    // Nothing has been restored yet, and the entry point has not returned: the
+    // flag is only set at the END of a release, so reading it here would say
+    // "not released" and skip the rebuild entirely.
+    expect(order).toEqual(["release-start"]);
+
+    releaseIt();
+    await inference;
+
+    expect(order).toEqual(["release-start", "release-end", "restore"]);
+    expect(ready).toBe(true);
+  });
+});
