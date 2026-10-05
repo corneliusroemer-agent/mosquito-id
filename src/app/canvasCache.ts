@@ -184,15 +184,17 @@ export function thumbnailUrl(cv: HTMLCanvasElement | null, quality: number): str
 }
 
 /**
- * True when `data` (RGBA) is every sampled pixel black. A decoder that fails to
- * fill a resized bitmap hands back exactly that (issue #77), and the tile then
- * shows a black square, so the result is checked rather than trusted.
+ * True when every sampled pixel of `data` (RGBA) is the same colour. A decoder
+ * that fails to fill a resized bitmap hands back a flat frame (black in #77,
+ * possibly white or grey elsewhere), and the tile then shows a flat square, so
+ * the result is checked rather than trusted. A genuinely flat photo takes the
+ * fallback path too, which is harmless.
  */
 export function looksBlank(data: ArrayLike<number>): boolean {
   const n = data.length / 4;
   const stride = Math.max(1, Math.floor(n / 512));
-  for (let i = 0; i < n; i += stride) {
-    if (data[4 * i]! > 0 || data[4 * i + 1]! > 0 || data[4 * i + 2]! > 0) return false;
+  for (let i = stride; i < n; i += stride) {
+    if (data[4 * i] !== data[0] || data[4 * i + 1] !== data[1] || data[4 * i + 2] !== data[2]) return false;
   }
   return true;
 }

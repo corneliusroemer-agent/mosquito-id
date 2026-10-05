@@ -9,8 +9,11 @@ describe("looksBlank (issue #77: a black thumbnail must not pass)", () => {
     expect(looksBlank(rgba(4096, [0, 0, 0, 255]))).toBe(true);
     expect(looksBlank(rgba(4096, [0, 0, 0, 0]))).toBe(true);
   });
-  it("accepts a uniform non-black frame and a frame with one lit pixel", () => {
-    expect(looksBlank(rgba(4096, [120, 90, 60, 255]))).toBe(false);
+  it("flags a flat white or grey frame too", () => {
+    expect(looksBlank(rgba(4096, [255, 255, 255, 255]))).toBe(true);
+    expect(looksBlank(rgba(4096, [120, 90, 60, 255]))).toBe(true);
+  });
+  it("accepts a frame with one lit pixel", () => {
     const d = rgba(1000, [0, 0, 0, 255]);
     d[0] = 200; // pixel 0 is always sampled
     expect(looksBlank(d)).toBe(false);
