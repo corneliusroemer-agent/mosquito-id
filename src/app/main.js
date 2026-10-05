@@ -35,7 +35,7 @@ import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCac
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
-import { downloadCSV, renderResultsTable } from "./resultsTable";
+import { downloadCSV, renderResultsTable, scheduleResultsTable } from "./resultsTable";
 import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
 import { initRouter } from "./router";
@@ -43,12 +43,13 @@ import { renderBuildLink, stampBuildSha } from "./buildSha";
 import { renderFooterTiming } from "./footerTiming";
 import { updatePooling } from "./poolingPanel";
 import { badge, canView, checkLabel, contributesToPool, photoRef,
-         removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
-         validateIncluded, viewLabel } from "./thumbnailStrip";
+         removeLabel, SelectedScrollGuard, shiftIncluded,
+         shiftIncludedForPrepend, shiftSelected, validateIncluded,
+         viewLabel } from "./thumbnailStrip";
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
-import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
+import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotoCount } from "./reprocess";
 import { embedCanvas as _embedCanvas } from "./embedding";
 import { isUsableIntermediate } from "./downscale";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
@@ -214,6 +215,15 @@ window.modelsReady = false;
 let previews = [];
 let includedIndices = new Set();
 let selectedIndex = 0;
+// Which photo the strip was last scrolled to. Lives here rather than in the
+// render because the question "does the strip need scrolling" is about the
+// selection's history, not about any one render: the strip's box changing under
+// a still selection (a resize) is the only thing that revives it.
+const scrollGuard = new SelectedScrollGuard();
+/** The strip's box moved under a selection that did not: scroll again on the next render. */
+function invalidateScrollGuard() {
+  scrollGuard.invalidate();
+}
 let isProcessingBatch = false;
 // A re-run in progress: the window between emptying the gallery and the batch
 // that refills it starting. See reprocessLoadedPhotos.
@@ -660,7 +670,7 @@ function engineLabel() {
 function updateReprocessButton() {
   const btn = document.getElementById("btn-reprocess");
   if (!btn) return;
-  const stale = stalePhotos(previews, currentEngine).length;
+  const stale = stalePhotoCount(previews, currentEngine);
   // Checked in this order because a re-run is a batch is a re-run. The last is
   // the dangerous one: the dropdown already names an engine whose session is not
   // the one loaded, so pressing would stamp the new engine's name on the
@@ -1351,7 +1361,9 @@ async function processFiles(fileList) {
     renderThumbnails();
     renderActivePhoto();
     updatePooling(EMB, previews, includedIndices);
-    renderResultsTable(previews);
+    // The one place in the app where the table is rebuilt once per photo: the
+    // sync render is there for the end of the batch, after this loop.
+    scheduleResultsTable(() => previews);
   }
 
   // Inference, one photo at a time, each result painted as it lands.
@@ -1568,6 +1580,11 @@ function renderThumbnails() {
       node = buildTile();
       tileNodes.set(p, node);
     }
+    // Whether this tile can already be in the right place, read before `idx` is
+    // overwritten: a tile keeps its index exactly when nothing before it was
+    // added or removed, so the tiles before it kept theirs too and none of them
+    // moved - which means it is still ahead of them, where it belongs.
+    const alreadyInPlace = node.idx === idx;
     node.idx = idx;
 
     // A photo still being analyzed is visibly unsettled: greyed tile, pending
@@ -1629,8 +1646,11 @@ function renderThumbnails() {
     node.chk.disabled = !contributesToPool(p);
 
     // One appendChild on an already-present child moves it to the end, which is
-    // how the strip is put into index order after a deletion.
-    strip.appendChild(node.tile);
+    // how the strip is put into index order after a deletion - so it has to
+    // happen for every tile whose index moved, and only for those. Doing it for
+    // the rest too is a real remove-and-insert per tile per render, on the one
+    // path that runs n times per photo of a batch.
+    if (!alreadyInPlace) strip.appendChild(node.tile);
   });
 
   scrollSelectedIntoView();
@@ -1647,10 +1667,19 @@ function renderThumbnails() {
  * `scrollIntoView`, which walks up the tree and scrolls whatever ancestor it
  * finds - including the page, which is a layout shift the strip has no business
  * causing.
+ *
+ * Both rect reads below force a synchronous layout of the whole document, over a
+ * strip and a results table the render that just preceded them rebuilt. This
+ * runs at the end of every render and a render runs once per photo as a batch
+ * lands, so the cost is paid n times per batch for an answer that only changes
+ * when the selection does - and a batch never changes the selection. The guard
+ * is what makes it once.
  */
 function scrollSelectedIntoView() {
+  const photo = previews[selectedIndex];
+  if (!scrollGuard.needsScroll(photo)) return;
   const strip = document.getElementById("thumbnail-strip");
-  const node = tileNodes.get(previews[selectedIndex]);
+  const node = tileNodes.get(photo);
   if (!strip || !node) return;
   const pad = 8;
   const stripBox = strip.getBoundingClientRect();
@@ -1663,6 +1692,7 @@ function scrollSelectedIntoView() {
   } else if (tileBox.right > stripBox.right - pad) {
     strip.scrollLeft += tileBox.right - (stripBox.right - pad);
   }
+  scrollGuard.record(photo);
 }
 
 function setAllSelected(on) {
@@ -2537,6 +2567,11 @@ window.addEventListener("DOMContentLoaded", () => {
   // importing it an act with a side effect.
   window.addEventListener("resize", invalidateViewerAspectCache);
   window.addEventListener("orientationchange", invalidateViewerAspectCache);
+  // A resize changes the strip's own box without moving the selection, so the
+  // tile that was in view before it need not be in view after it - and the
+  // scroll guard, which can only see the selection change, would not notice.
+  window.addEventListener("resize", invalidateScrollGuard);
+  window.addEventListener("orientationchange", invalidateScrollGuard);
 
   // initRouter captures the classifier's own title once and returns the handler
   // that applies a route against it, so both the initial render and every
