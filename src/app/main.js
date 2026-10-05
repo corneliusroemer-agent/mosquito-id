@@ -44,13 +44,16 @@ import { renderBuildLink, stampBuildSha } from "./buildSha";
 import { renderFooterTiming } from "./footerTiming";
 import { updatePooling } from "./poolingPanel";
 import { badge, canView, checkLabel, contributesToPool, photoRef,
-         removeLabel, shiftIncluded, shiftIncludedForPrepend, shiftSelected,
-         validateIncluded, viewLabel } from "./thumbnailStrip";
+         removeLabel, SelectedScrollGuard, shiftIncluded,
+         shiftIncludedForPrepend, shiftSelected, validateIncluded,
+         viewLabel } from "./thumbnailStrip";
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
+import { keyEventBelongsElsewhere, describeKeyTarget } from "./keyNav";
+import { readPref, writePref } from "./safeStorage";
 import { createIdleRelease } from "./idleRelease";
-import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
+import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotoCount } from "./reprocess";
 import { clipTensor, embedCanvas as _embedCanvas } from "./embedding";
 import { halvingEnabled } from "./resizeMode";
 import { isUsableIntermediate } from "./downscale";
@@ -217,6 +220,15 @@ window.modelsReady = false;
 let previews = [];
 let includedIndices = new Set();
 let selectedIndex = 0;
+// Which photo the strip was last scrolled to. Lives here rather than in the
+// render because the question "does the strip need scrolling" is about the
+// selection's history, not about any one render: the strip's box changing under
+// a still selection (a resize) is the only thing that revives it.
+const scrollGuard = new SelectedScrollGuard();
+/** The strip's box moved under a selection that did not: scroll again on the next render. */
+function invalidateScrollGuard() {
+  scrollGuard.invalidate();
+}
 let isProcessingBatch = false;
 let idleRestoreAttempts = 0;
 // A re-run in progress: the window between emptying the gallery and the batch
@@ -529,7 +541,7 @@ async function initEngine() {
   const defaultEngine = "webgpu-fp16";
   const params = new URLSearchParams(window.location.search);
   const requestedEngine = params.get("engine");
-  const savedEngine = localStorage.getItem("mosquito_engine");
+  const savedEngine = readPref("mosquito_engine");
   const selectable = (e) =>
     (e === "server-gpu" ? false : !!WEBGPU_MODELS[e]) && (e !== "webgpu-fp16" || FP16_AVAILABLE);
 
@@ -546,7 +558,12 @@ async function initEngine() {
     engineSelect.value = chosenEngine;
     engineSelect.addEventListener("change", async (e) => {
       const chosen = e.target.value;
-      localStorage.setItem("mosquito_engine", chosen);
+      // Reported rather than thrown: a browser that refuses the write would
+      // otherwise leave the selector showing an engine that reverts on reload,
+      // with nothing said. The switch itself still happens either way.
+      if (!writePref("mosquito_engine", chosen)) {
+        sendLog("pref_not_stored", { key: "mosquito_engine" });
+      }
       sendLog("engine_switched", { from: currentEngine, to: chosen });
       applyEngineNotices(chosen);
       currentEngine = chosen;
@@ -678,7 +695,7 @@ function engineLabel() {
 function updateReprocessButton() {
   const btn = document.getElementById("btn-reprocess");
   if (!btn) return;
-  const stale = stalePhotos(previews, currentEngine).length;
+  const stale = stalePhotoCount(previews, currentEngine);
   // Checked in this order because a re-run is a batch is a re-run. The last is
   // the dangerous one: the dropdown already names an engine whose session is not
   // the one loaded, so pressing would stamp the new engine's name on the
@@ -1600,6 +1617,19 @@ function renderThumbnails() {
       node = buildTile();
       tileNodes.set(p, node);
     }
+    // Whether this tile can already be in the right place, read before `idx` is
+    // overwritten: a tile keeps its index exactly when nothing before it was
+    // added or removed, so the tiles before it kept theirs too and none of them
+    // moved - which means it is still ahead of them, where it belongs.
+    //
+    // That implication only holds while nothing is *replaced* rather than added
+    // or removed: a tile whose index is unchanged can still have lost its
+    // neighbours, if the tiles before it were swapped one-for-one or reordered.
+    // No caller does that today - `previews` is appended to, prepended to,
+    // filtered and spliced, never reordered within a render - so this is safe
+    // now and wrong-by-omission if that ever changes. A caller that adds a sort
+    // must revisit this line rather than trust it.
+    const alreadyInPlace = node.idx === idx;
     node.idx = idx;
 
     // A photo still being analyzed is visibly unsettled: greyed tile, pending
@@ -1661,8 +1691,11 @@ function renderThumbnails() {
     node.chk.disabled = !contributesToPool(p);
 
     // One appendChild on an already-present child moves it to the end, which is
-    // how the strip is put into index order after a deletion.
-    strip.appendChild(node.tile);
+    // how the strip is put into index order after a deletion - so it has to
+    // happen for every tile whose index moved, and only for those. Doing it for
+    // the rest too is a real remove-and-insert per tile per render, on the one
+    // path that runs n times per photo of a batch.
+    if (!alreadyInPlace) strip.appendChild(node.tile);
   });
 
   scrollSelectedIntoView();
@@ -1679,10 +1712,19 @@ function renderThumbnails() {
  * `scrollIntoView`, which walks up the tree and scrolls whatever ancestor it
  * finds - including the page, which is a layout shift the strip has no business
  * causing.
+ *
+ * Both rect reads below force a synchronous layout of the whole document, over a
+ * strip and a results table the render that just preceded them rebuilt. This
+ * runs at the end of every render and a render runs once per photo as a batch
+ * lands, so the cost is paid n times per batch for an answer that only changes
+ * when the selection does - and a batch never changes the selection. The guard
+ * is what makes it once.
  */
 function scrollSelectedIntoView() {
+  const photo = previews[selectedIndex];
+  if (!scrollGuard.needsScroll(photo)) return;
   const strip = document.getElementById("thumbnail-strip");
-  const node = tileNodes.get(previews[selectedIndex]);
+  const node = tileNodes.get(photo);
   if (!strip || !node) return;
   const pad = 8;
   const stripBox = strip.getBoundingClientRect();
@@ -1695,6 +1737,7 @@ function scrollSelectedIntoView() {
   } else if (tileBox.right > stripBox.right - pad) {
     strip.scrollLeft += tileBox.right - (stripBox.right - pad);
   }
+  scrollGuard.record(photo);
 }
 
 function setAllSelected(on) {
@@ -1787,13 +1830,12 @@ function wireWholeFrameToggle() {
     const on = box.checked;
     if (on === includeWholeFrame) return;
     includeWholeFrame = on;
-    try {
-      localStorage.setItem(WHOLE_FRAME_KEY, on ? "true" : "false");
-    } catch {
-      // A preference that cannot be stored is a preference for this session.
-      // Failing to persist it is not worth interrupting the user over, and the
-      // next change reclassifies either way.
-    }
+    // `writePref` reports whether the value stuck rather than throwing, so a
+    // browser that refuses the write (private mode, quota) leaves the setting
+    // working for this session and says so, instead of the UI implying a
+    // preference that will be gone on reload.
+    const stored = writePref(WHOLE_FRAME_KEY, on ? "true" : "false");
+    if (!stored) sendLog("pref_not_stored", { key: WHOLE_FRAME_KEY });
     sendLog("whole_frame_toggled", { includeWholeFrame: on, photos: previews.length });
     // A toggle is about every photo on screen, so it withdraws a re-run's scope
     // rather than inheriting it. `request()` during a re-run's pass sets the
@@ -2687,6 +2729,26 @@ window.addEventListener("DOMContentLoaded", () => {
   // importing it an act with a side effect.
   window.addEventListener("resize", invalidateViewerAspectCache);
   window.addEventListener("orientationchange", invalidateViewerAspectCache);
+  // A resize changes the strip's own box without moving the selection, so the
+  // tile that was in view before it need not be in view after it - and the
+  // scroll guard, which can only see the selection change, would not notice.
+  window.addEventListener("resize", invalidateScrollGuard);
+  window.addEventListener("orientationchange", invalidateScrollGuard);
+  // ...and a tile can change size with no resize event at all: `@media (pointer:
+  // coarse)` sizes tiles differently from a mouse-driven layout, so a hybrid
+  // whose input capability changes (a tablet undocked, a convertible switched to
+  // its keyboard) moves every tile without the window changing. There is no
+  // event for that, so the guard is invalidated on the next render that follows
+  // a match-media flip.
+  if (window.matchMedia) {
+    const coarse = window.matchMedia("(pointer: coarse)");
+    const onPointerChange = () => {
+      invalidateScrollGuard();
+      renderThumbnails();
+    };
+    if (typeof coarse.addEventListener === "function") coarse.addEventListener("change", onPointerChange);
+    else if (typeof coarse.addListener === "function") coarse.addListener(onPointerChange);
+  }
 
   // initRouter captures the classifier's own title once and returns the handler
   // that applies a route against it, so both the initial render and every
@@ -2764,26 +2826,26 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-next").onclick = () => selectPhoto(selectedIndex + 1);
   document.getElementById("btn-csv").onclick = () => downloadCSV(previews, sendLog);
 
-  const savedPooling = localStorage.getItem("mosquito_pooling");
+  const savedPooling = readPref("mosquito_pooling");
   if (savedPooling) {
     const radio = document.querySelector(`input[name="pooling-method"][value="${savedPooling}"]`);
     if (radio) radio.checked = true;
   }
   document.querySelectorAll('input[name="pooling-method"]').forEach(r => {
     r.onchange = (e) => {
-      localStorage.setItem("mosquito_pooling", e.target.value);
+      writePref("mosquito_pooling", e.target.value);
       updatePooling(EMB, previews, includedIndices);
     };
   });
 
   const corrSlider = document.getElementById("corr-slider");
-  const savedCorr = localStorage.getItem("mosquito_corr");
+  const savedCorr = readPref("mosquito_corr");
   if (savedCorr && corrSlider) {
     corrSlider.value = savedCorr;
     document.getElementById("corr-val").textContent = parseFloat(savedCorr).toFixed(2);
   }
   corrSlider.oninput = (e) => {
-    localStorage.setItem("mosquito_corr", e.target.value);
+    writePref("mosquito_corr", e.target.value);
     document.getElementById("corr-val").textContent = parseFloat(e.target.value).toFixed(2);
     updatePooling(EMB, previews, includedIndices);
   };
@@ -2795,7 +2857,12 @@ window.addEventListener("DOMContentLoaded", () => {
   // ends up pressing Enter on a different photo than the one the highlight is
   // on, which is the same defect as a click landing on the wrong tile.
   window.addEventListener("keydown", (e) => {
-    if (e.target instanceof HTMLInputElement) return;
+    // The handler owns the arrow/Home/End keys only when the user is not
+    // operating some other control. The old guard was `instanceof
+    // HTMLInputElement`, and a `<select>` is not one - so with the engine
+    // dropdown focused, ArrowDown changed the ENGINE and Home/End jumped the
+    // dropdown to its last option. See keyNav.ts.
+    if (keyEventBelongsElsewhere(describeKeyTarget(e.target), e)) return;
     if (e.key === "ArrowRight") {
       e.preventDefault();
       selectPhoto(selectedIndex + 1);
