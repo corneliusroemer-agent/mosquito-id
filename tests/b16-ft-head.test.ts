@@ -31,7 +31,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { softmaxJoint, informativeRows } from "../src/confidence/softmax";
 import { localViewScale, DEFAULT_FLOORS, type Head } from "../src/confidence/types";
-import { cosineOffsetsFor, floorsFor, WEBGPU_MODELS } from "../src/app/modelConfig";
+import { CALIBRATED_ENGINES, cosineOffsetsFor, floorsFor, WEBGPU_MODELS } from "../src/app/modelConfig";
+import { PER_GENUS_COSINE_OFFSET } from "../src/confidence/calibration";
 import { capabilityOf } from "../src/app/granularity";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -101,8 +102,14 @@ describe("the b16-ft head's shape is what the app expects", () => {
   });
 
   it("has no per-genus cosine calibration, which was fitted on another encoder", () => {
-    expect([...cosineOffsetsFor("webgpu-b16-ft").keys()]).toEqual([]);
-    expect(CALIBRATED_SET.has("webgpu-b16-ft")).toBe(false);
+    // Read the real CALIBRATED_ENGINES rather than restating it: a local copy of the
+    // set is a thing that drifts, and this assertion is about the shipped map.
+    expect(Object.keys(cosineOffsetsFor("webgpu-b16-ft"))).toEqual([]);
+    expect(CALIBRATED_ENGINES.has("webgpu-b16-ft")).toBe(false);
+    // And it must be opting out explicitly - `softmaxJoint` defaults to
+    // PER_GENUS_COSINE_OFFSET when `opts.offsets` is undefined, so an engine that
+    // inherited the H/14 correction would look calibrated while being biased by it.
+    expect(cosineOffsetsFor("webgpu-b16-ft")).not.toBe(PER_GENUS_COSINE_OFFSET);
   });
 
   it("scores a photograph without producing NaN, and names one of its sixteen", () => {
@@ -112,15 +119,21 @@ describe("the b16-ft head's shape is what the app expects", () => {
     const j = softmaxJoint(HEAD, e, { offsets: cosineOffsetsFor("webgpu-b16-ft") });
     expect(j.spP).toHaveLength(16);
     expect(j.spP.every((p) => Number.isFinite(p) && p >= 0)).toBe(true);
-    expect(j.spP.reduce((a, b) => a + b, 0)).toBeCloseTo(
-      1, 6,
-    );
+    // The species block shares ONE softmax with the nine nuisance rows, so the
+    // species posteriors sum to the probability that the photograph is a mosquito at
+    // all - not to 1. Requiring 1 would be requiring the head to have no nuisance
+    // block; docs/HEADS.md records the whole species block summing to 1 as the thing
+    // that is NOT true of a fitted head. What must hold is that species and nuisance
+    // together exhaust the mass.
+    const spMass = j.spP.reduce((a, b) => a + b, 0);
+    const nuMass = j.nuP.reduce((a, b) => a + b, 0);
+    expect(spMass).toBeGreaterThan(0);
+    expect(spMass).toBeLessThan(1);
+    expect(spMass + nuMass).toBeCloseTo(1, 6);
     const top = j.spP.indexOf(Math.max(...j.spP));
     expect(HEAD.species).toContain(HEAD.species[top]);
   });
 });
-
-const CALIBRATED_SET = new Set(["webgpu-fp16"]);
 
 describe("the b16-ft engine ships without becoming the default", () => {
   it("is in the engine map, with the weights and head it needs", () => {
@@ -151,6 +164,6 @@ describe("the b16-ft engine ships without becoming the default", () => {
     const html = readFileSync(join(here, "..", "index.html"), "utf8");
     expect(html).toContain('<option value="webgpu-b16-ft"');
     // And it must not be the option the browser starts on.
-    expect(/<option value="webgpu-b16-ft"[^>]*\bselected\b/).toBeNull();
+    expect(/<option value="webgpu-b16-ft"[^>]*\bselected\b/.test(html)).toBe(false);
   });
 });
