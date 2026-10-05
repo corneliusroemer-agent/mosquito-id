@@ -161,7 +161,17 @@ export function renderReprocessButton(el: ReprocessButtonView, state: ReprocessB
 export interface PhotoSource {
   /** The photo as it arrived. Kept for a re-run; absent for a photo built another way. */
   file?: File | null;
-  fullCanvas?: { toBlob: (cb: (b: Blob | null) => void, type?: string, q?: number) => void } | null;
+  /**
+   * The photo's retained pixels, for a photo with no File to re-decode from.
+   *
+   * `sourceCanvas` is the full-resolution frame, and is set only where `file` is
+   * null. `displayCanvas` is what every photo the app's own intake produces
+   * holds, and is the fallback when there is no frame - a re-run then works from
+   * a display-sized copy of the photograph rather than the photograph, which is
+   * a worse re-run and is said out loud in the status rather than hidden.
+   */
+  sourceCanvas?: { toBlob: (cb: (b: Blob | null) => void, type?: string, q?: number) => void } | null;
+  displayCanvas?: { toBlob: (cb: (b: Blob | null) => void, type?: string, q?: number) => void } | null;
   name?: string;
 }
 
@@ -169,10 +179,9 @@ export interface PhotoSource {
  * The File this photo can be re-dropped as, or null when it has neither one.
  *
  * Normally this is the photo's own File, which the batch keeps for exactly this.
- * The canvas is the fallback for a photo that has none: one built from a zip
- * entry or a clipboard paste under a name the batch did not mint, or one a test
- * installed directly. Encoding that back gives the batch the same photograph
- * rather than a second approximation of one.
+ * The pixels are the fallback for a photo that has none: one installed from
+ * outside the intake, or a test. Encoding those back gives the batch the same
+ * photograph rather than a second approximation of one.
  *
  * JPEG at 0.95 rather than PNG: the re-encoded photo is decoded straight back
  * into a canvas and then downsampled to 224px for the classifier and 640px for
@@ -181,7 +190,7 @@ export interface PhotoSource {
  */
 export async function sourceFileFor(p: PhotoSource): Promise<File | null> {
   if (p.file) return p.file;
-  const cv = p.fullCanvas;
+  const cv = p.sourceCanvas ?? p.displayCanvas;
   if (!cv) return null;
   const blob = await new Promise<Blob | null>((resolve) => cv.toBlob(resolve, "image/jpeg", 0.95));
   if (!blob) return null;

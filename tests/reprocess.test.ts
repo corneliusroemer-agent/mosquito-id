@@ -287,12 +287,12 @@ describe("re-dropping a photo", () => {
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
       "base64",
     );
-    const fullCanvas = {
+    const displayCanvas = {
       toBlob(cb: (b: Blob | null) => void) {
         cb(new Blob([png], { type: "image/jpeg" }));
       },
     };
-    const out = await sourceFileFor({ fullCanvas, name: "photo.jpg" });
+    const out = await sourceFileFor({ displayCanvas, name: "photo.jpg" });
     expect(out).not.toBeNull();
     expect(out!.name).toBe("photo.jpg");
     expect(out!.size).toBe(png.length);
@@ -301,14 +301,14 @@ describe("re-dropping a photo", () => {
   it("gives the name an extension the batch will accept", async () => {
     // `processFiles` filters on the extension and drops a file without one in
     // silence, so a photo named from a clipboard paste would vanish on a re-run.
-    const fullCanvas = { toBlob: (cb: (b: Blob | null) => void) => cb(new Blob(["x"])) };
+    const displayCanvas = { toBlob: (cb: (b: Blob | null) => void) => cb(new Blob(["x"])) };
     for (const [name, expected] of [
       ["clipboard-1234-1", "clipboard-1234-1.jpg"],
       ["IMG_0042", "IMG_0042.jpg"],
       ["a.png", "a.png"],
       ["a.JPEG", "a.JPEG"],
     ] as const) {
-      const out = await sourceFileFor({ fullCanvas, name });
+      const out = await sourceFileFor({ displayCanvas, name });
       expect(out!.name, `a photo named ${name}`).toBe(expected);
     }
   });
@@ -318,7 +318,7 @@ describe("re-dropping a photo", () => {
     // reads as a broken photo rather than a photo that cannot be re-run.
     expect(await sourceFileFor({ name: "a.jpg" })).toBeNull();
     expect(
-      await sourceFileFor({ name: "a.jpg", fullCanvas: { toBlob: (cb) => cb(null) } }),
+      await sourceFileFor({ name: "a.jpg", displayCanvas: { toBlob: (cb: (b: Blob | null) => void) => cb(null) } }),
     ).toBeNull();
   });
 });

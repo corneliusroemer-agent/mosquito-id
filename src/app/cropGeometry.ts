@@ -11,7 +11,8 @@
  * map and neither can be reused for the other.
  */
 
-import type { Box, BoxPercent, CanvasLike, ContextCrop, Mapping, Preview } from "./types";
+import type { Box, BoxPercent, CanvasLike, ContextCrop, Mapping, PhotoFrame, Preview } from "./types";
+import { DISPLAY_MAX_EDGE, displayCanvasFrom } from "./fullResSource";
 
 // Whether there is a crop to draw, and where it sits in each panel, answered in
 // one place. Both panels used to gate the outline on their own independent
@@ -31,6 +32,20 @@ export function hasCropBox(p?: Preview): boolean {
   return Boolean(p && p.cropBox && !p.manual_full_photo);
 }
 
+/**
+ * The photograph's own dimensions, or null when they are not known.
+ *
+ * Every box on a photo is in these pixels, so every placement of a box divides
+ * by them - never by a canvas the photo happens to be holding. A record that
+ * only has the display canvas cannot place its own crop, and says so rather
+ * than placing it against the wrong picture.
+ */
+export function photoFrame(p?: Pick<Preview, "fullW" | "fullH">): PhotoFrame | null {
+  const w = p?.fullW ?? 0;
+  const h = p?.fullH ?? 0;
+  return w > 0 && h > 0 ? { width: w, height: h } : null;
+}
+
 // The same p.cropBox expressed as fractions of each panel's surface. Both take
 // p.cropBox in full-image pixels; each panel shows a different image through a
 // different object-fit, so each needs its own map. The full panel fits with
@@ -39,17 +54,18 @@ export function hasCropBox(p?: Preview): boolean {
 // ask for its own. Returns null when the panel cannot place the box (no image,
 // or no context region).
 export function cropBoxInFullSurface(p: Preview): BoxPercent | null {
-  if (!hasCropBox(p) || !p.fullCanvas) return null;
+  const frame = photoFrame(p);
+  if (!hasCropBox(p) || !frame) return null;
   const surfaceFull = document.getElementById("crop-surface-full");
-  const { kx, ox, ky, oy } = fitMapping(surfaceFull, p.fullCanvas, "contain");
+  const { kx, ox, ky, oy } = fitMapping(surfaceFull, frame, "contain");
   const [bx1, by1, bx2, by2] = p.cropBox!;
-  const l = (bx1 / p.fullCanvas.width - ox) / kx;
-  const t = (by1 / p.fullCanvas.height - oy) / ky;
+  const l = (bx1 / frame.width - ox) / kx;
+  const t = (by1 / frame.height - oy) / ky;
   return {
     left: l * 100,
     top: t * 100,
-    width: ((bx2 / p.fullCanvas.width - ox) / kx - l) * 100,
-    height: ((by2 / p.fullCanvas.height - oy) / ky - t) * 100,
+    width: ((bx2 / frame.width - ox) / kx - l) * 100,
+    height: ((by2 / frame.height - oy) / ky - t) * 100,
   };
 }
 
@@ -59,17 +75,21 @@ export function cropBoxInFullSurface(p: Preview): BoxPercent | null {
 // falls back the same way), so the whole photo is the coordinate frame here too
 // - which keeps a real crop drawable on both panels in every state.
 export function cropBoxInZoomSurface(p: Preview): BoxPercent | null {
-  if (!hasCropBox(p)) return null;
+  const frame = photoFrame(p);
+  if (!hasCropBox(p) || !frame) return null;
   const surfaceZoomed = document.getElementById("crop-surface-zoomed");
   const [cx1, cy1, cx2, cy2] = p.cropBox!;
   const ctx_x1 = p.contextBox ? p.contextBox[0] : 0;
   const ctx_y1 = p.contextBox ? p.contextBox[1] : 0;
-  const ctx_x2 = p.contextBox ? p.contextBox[2] : p.fullCanvas!.width;
-  const ctx_y2 = p.contextBox ? p.contextBox[3] : p.fullCanvas!.height;
+  const ctx_x2 = p.contextBox ? p.contextBox[2] : frame.width;
+  const ctx_y2 = p.contextBox ? p.contextBox[3] : frame.height;
   const ctx_w = ctx_x2 - ctx_x1;
   const ctx_h = ctx_y2 - ctx_y1;
   if (!(ctx_w > 0) || !(ctx_h > 0)) return null;
-  const { kx, ox, ky, oy } = fitMapping(surfaceZoomed, p.contextCanvas || p.fullCanvas, "cover");
+  // The context region is measured by the canvas that holds it, because that is
+  // the region's shape; with no context canvas the whole photograph is.
+  const region = p.contextCanvas ?? frame;
+  const { kx, ox, ky, oy } = fitMapping(surfaceZoomed, region, "cover");
   const l = ((cx1 - ctx_x1) / ctx_w - ox) / kx;
   const t = ((cy1 - ctx_y1) / ctx_h - oy) / ky;
   return {
@@ -144,7 +164,7 @@ export function zoomedSurfaceMapping(p?: Preview): Mapping {
 }
 
 export function fullSurfaceMapping(p?: Preview): Mapping {
-  return fitMapping(document.getElementById("crop-surface-full"), p?.fullCanvas, "contain");
+  return fitMapping(document.getElementById("crop-surface-full"), photoFrame(p), "contain");
 }
 
 // Aspect ratio (w/h) of the zoomed panel's container, i.e. the box the context
@@ -203,9 +223,28 @@ export function measureViewerAspect(): number | null {
 }
 
 // Compute context crop matching viewer container aspect ratio with 75% border fit along narrower dimension
-export function extractContextCrop(fullCv: HTMLCanvasElement, cropBox: Box | null, targetAspect: number | null = null): ContextCrop {
+//
+// `source` is the pixels to cut from and `frame` is the photograph's own size,
+// which are not the same thing: the record keeps a display-sized canvas and this
+// runs over that when there is no full-resolution frame to hand. The box is
+// solved in the photograph's pixels and then scaled into `source`, so
+// `contextBox` means the same thing whether the cut was made from a 12 MP frame
+// or from its 2048 px stand-in.
+export function extractContextCrop(
+  source: HTMLCanvasElement,
+  frame: PhotoFrame,
+  cropBox: Box | null,
+  targetAspect: number | null = null,
+): ContextCrop {
   if (!cropBox) {
-    return { contextCanvas: fullCv, contextBox: [0, 0, fullCv.width, fullCv.height] };
+    // The whole photograph is the context region. Capped like any other, and
+    // deliberately not `source` itself: `source` here is the full-resolution
+    // frame the caller holds for the cut, and handing it back would put 45 MiB
+    // of photo on the record for every photo the detector found nothing in.
+    return {
+      contextCanvas: displayCanvasFrom(source as HTMLCanvasElement),
+      contextBox: [0, 0, frame.width, frame.height],
+    };
   }
   const [bx1, by1, bx2, by2] = cropBox;
   const cw = Math.max(1, bx2 - bx1);
@@ -228,12 +267,12 @@ export function extractContextCrop(fullCv: HTMLCanvasElement, cropBox: Box | nul
     ctx_w = ctx_h * targetAspect;
   }
 
-  if (ctx_w > fullCv.width) {
-    ctx_w = fullCv.width;
+  if (ctx_w > frame.width) {
+    ctx_w = frame.width;
     ctx_h = ctx_w / targetAspect;
   }
-  if (ctx_h > fullCv.height) {
-    ctx_h = fullCv.height;
+  if (ctx_h > frame.height) {
+    ctx_h = frame.height;
     ctx_w = ctx_h * targetAspect;
   }
 
@@ -250,29 +289,74 @@ export function extractContextCrop(fullCv: HTMLCanvasElement, cropBox: Box | nul
     y2 -= y1;
     y1 = 0;
   }
-  if (x2 > fullCv.width) {
-    x1 -= (x2 - fullCv.width);
-    x2 = fullCv.width;
+  if (x2 > frame.width) {
+    x1 -= (x2 - frame.width);
+    x2 = frame.width;
   }
-  if (y2 > fullCv.height) {
-    y1 -= (y2 - fullCv.height);
-    y2 = fullCv.height;
+  if (y2 > frame.height) {
+    y1 -= (y2 - frame.height);
+    y2 = frame.height;
   }
 
   x1 = Math.max(0, Math.round(x1));
   y1 = Math.max(0, Math.round(y1));
-  x2 = Math.min(fullCv.width, Math.round(x2));
-  y2 = Math.min(fullCv.height, Math.round(y2));
+  x2 = Math.min(frame.width, Math.round(x2));
+  y2 = Math.min(frame.height, Math.round(y2));
 
   const finalW = Math.max(1, x2 - x1);
   const finalH = Math.max(1, y2 - y1);
 
+  // The region is painted into a canvas no larger than the display cap. Nothing
+  // reads its pixels but the zoom panel, which scales it to fit with
+  // object-fit, and the mappings that place a box over it read its aspect - so
+  // capping it costs the panel no resolution it had anywhere to show.
+  const long = Math.max(finalW, finalH);
+  const cap = long > DISPLAY_MAX_EDGE ? DISPLAY_MAX_EDGE / long : 1;
+  const outW = Math.max(1, Math.round(finalW * cap));
+  const outH = Math.max(1, Math.round(finalH * cap));
+
   const ctxCv = document.createElement("canvas");
-  ctxCv.width = finalW;
-  ctxCv.height = finalH;
+  ctxCv.width = outW;
+  ctxCv.height = outH;
   const ctx2d = ctxCv.getContext("2d");
   if (!ctx2d) throw new Error("Could not get a 2d context for the context crop");
-  ctx2d.drawImage(fullCv, x1, y1, finalW, finalH, 0, 0, finalW, finalH);
+  // `source` may be a fraction of the photograph, so the region is addressed in
+  // its pixels and the destination in the output's.
+  const sx = source.width / frame.width;
+  const sy = source.height / frame.height;
+  ctx2d.drawImage(source, x1 * sx, y1 * sy, finalW * sx, finalH * sy, 0, 0, outW, outH);
 
   return { contextCanvas: ctxCv, contextBox: [x1, y1, x2, y2] };
+}
+
+/**
+ * The pixels a crop box covers, as a canvas.
+ *
+ * `box` is in the photograph's pixels and `source` may be smaller than the
+ * photograph, so the region is addressed in `source`'s coordinates. The result
+ * is capped at the display cap for the same reason the context region is: it is
+ * read by the thumbnail and the classifier, both of which scale it far below
+ * that, and never by anything that needs the crop at full resolution.
+ */
+export function cutCrop(
+  source: HTMLCanvasElement,
+  frame: PhotoFrame,
+  box: Box,
+): HTMLCanvasElement {
+  const [bx1, by1, bx2, by2] = box;
+  const sx = source.width / frame.width;
+  const sy = source.height / frame.height;
+  const rx = bx1 * sx;
+  const ry = by1 * sy;
+  const rw = Math.max(1, (bx2 - bx1) * sx);
+  const rh = Math.max(1, (by2 - by1) * sy);
+  const long = Math.max(rw, rh);
+  const cap = long > DISPLAY_MAX_EDGE ? DISPLAY_MAX_EDGE / long : 1;
+  const outW = Math.max(1, Math.round(rw * cap));
+  const outH = Math.max(1, Math.round(rh * cap));
+  const out = document.createElement("canvas");
+  out.width = outW;
+  out.height = outH;
+  out.getContext("2d")?.drawImage(source, rx, ry, rw, rh, 0, 0, outW, outH);
+  return out;
 }

@@ -45,17 +45,23 @@ export interface ViewRequest {
  * user reverted to whole. Each view carries its crop box because the server path
  * takes a box where the local path takes the already-cut pixels.
  *
+ * The whole frame is passed in rather than read off the photo because the photo
+ * no longer holds one: it holds a display-sized copy, and the classifier's input
+ * is the pixels the photograph had, not a 2048 px reduction of them. A caller
+ * that has no full-resolution frame to offer passes what it has and accepts that
+ * this is a differently-sourced view, which is its decision to make, not this
+ * function's to make silently.
+ *
  * The decision of which views those are lives in `viewKinds`, shared with the
  * batch paths, so the three places a photo gets classified cannot disagree about
  * what a photo offers.
  */
 export function viewsFor(
-  p: Pick<PhotoState, "fullCanvas">,
+  full: HTMLCanvasElement | null,
   cropCv: HTMLCanvasElement | null,
   cropBox: Box | null,
   includeWholeFrame: boolean,
 ): ViewRequest[] {
-  const full = p.fullCanvas;
   if (!full) return [];
   const whole: ViewRequest = { canvas: full, box: [0, 0, full.width, full.height] };
   return viewKinds(Boolean(cropCv) && cropCv !== full, includeWholeFrame).map((kind) =>
@@ -151,21 +157,28 @@ export interface ScoredCrop {
  * Server path: the server owns no geometry decision we need for display, only
  * the scores for a crop box we send it.
  *
+ * The canvas and the box must agree on a scale. `cropBox` is in the
+ * photograph's pixels, and the server applies it to whatever image it is sent,
+ * so a downscaled frame sent with a full-resolution box asks the server for a
+ * region of the picture that does not contain the crop - and it answers
+ * confidently about it. So this takes the full-resolution frame explicitly
+ * rather than whatever the photo is holding, and refuses rather than guessing.
+ *
  * If it answers with a different box than the one it was given, its labels
  * describe a crop the user is not looking at, so the box is logged and ignored
  * rather than silently re-displayed.
  */
 export async function classifyCanvasServer(
-  photo: Pick<PhotoState, "fullCanvas" | "name">,
+  canvas: HTMLCanvasElement | null,
+  name: string,
   cropBox: Box,
   log: (event: string, fields: Record<string, unknown>) => void,
 ): Promise<ScoredCrop> {
-  const canvas = photo.fullCanvas;
-  if (!canvas) throw new Error(`No frame to send for ${photo.name}`);
+  if (!canvas) throw new Error(`No frame to send for ${name}`);
   const blob = await new Promise<Blob>((r) => canvas.toBlob(r as (b: Blob | null) => void, "image/jpeg", 0.85));
-  if (!blob) throw new Error(`Could not encode ${photo.name} for the server`);
+  if (!blob) throw new Error(`Could not encode ${name} for the server`);
   const formData = new FormData();
-  formData.append("file", blob, photo.name);
+  formData.append("file", blob, name);
   formData.append("crop_box", JSON.stringify(cropBox));
   const res = await fetch("/api/predict", { method: "POST", body: formData });
   if (!res.ok) throw new Error(`Server inference error ${res.status}`);
@@ -178,13 +191,14 @@ export async function classifyCanvasServer(
 
 /** The server's answer for one crop box, in the shape a fusion takes. */
 export async function classifyViewServer(
-  photo: Pick<PhotoState, "fullCanvas" | "name">,
+  canvas: HTMLCanvasElement | null,
+  name: string,
   cropBox: Box,
   head: Head,
   scale: number,
   log: (event: string, fields: Record<string, unknown>) => void,
 ): Promise<ViewResult> {
-  return serverView(await classifyCanvasServer(photo, cropBox, log), head, scale);
+  return serverView(await classifyCanvasServer(canvas, name, cropBox, log), head, scale);
 }
 
 /** Round to 4 dp, or null for anything that is not a finite number. */

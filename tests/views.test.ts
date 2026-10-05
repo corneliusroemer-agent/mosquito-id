@@ -34,14 +34,11 @@ function ramp(): Record<string, number> {
 const canvas = (w: number, h: number): HTMLCanvasElement =>
   ({ width: w, height: h }) as HTMLCanvasElement;
 
-const photo = (full: HTMLCanvasElement | null): Pick<PhotoState, "fullCanvas"> =>
-  ({ fullCanvas: full }) as Pick<PhotoState, "fullCanvas">;
-
 describe("viewsFor", () => {
   it("offers the crop and the whole frame for a cropped photo", () => {
     const full = canvas(1000, 800);
     const crop = canvas(200, 200);
-    const views = viewsFor(photo(full), crop, [10, 10, 210, 210], true);
+    const views = viewsFor(full, crop, [10, 10, 210, 210], true);
     expect(views).toHaveLength(2);
     expect(views[0]).toEqual({ canvas: crop, box: [10, 10, 210, 210] });
     expect(views[1]).toEqual({ canvas: full, box: [0, 0, 1000, 800] });
@@ -49,7 +46,7 @@ describe("viewsFor", () => {
 
   it("offers only the crop when the whole frame is turned off", () => {
     const full = canvas(1000, 800);
-    const views = viewsFor(photo(full), canvas(200, 200), [0, 0, 200, 200], false);
+    const views = viewsFor(full, canvas(200, 200), [0, 0, 200, 200], false);
     expect(views).toHaveLength(1);
     expect(views[0]!.canvas).not.toBe(full);
   });
@@ -59,19 +56,19 @@ describe("viewsFor", () => {
     // nothing in. Treating that as a crop would run the same pixels twice and
     // fuse a view with itself, which is not a second opinion.
     const full = canvas(640, 480);
-    const views = viewsFor(photo(full), full, null, true);
+    const views = viewsFor(full, full, null, true);
     expect(views).toHaveLength(1);
     expect(views[0]).toEqual({ canvas: full, box: [0, 0, 640, 480] });
   });
 
   it("offers the whole frame alone for a photo with no crop", () => {
-    const views = viewsFor(photo(canvas(640, 480)), null, null, true);
+    const views = viewsFor(canvas(640, 480), null, null, true);
     expect(views).toHaveLength(1);
     expect(views[0]!.box).toEqual([0, 0, 640, 480]);
   });
 
   it("offers nothing when there is no frame", () => {
-    expect(viewsFor(photo(null), null, null, true)).toEqual([]);
+    expect(viewsFor(null, null, null, true)).toEqual([]);
   });
 });
 
@@ -157,8 +154,8 @@ describe("classifyCanvasServer", () => {
       ok: true,
       json: async () => ({ labels: {}, detail: {}, logits: {}, cropBox: [0, 0, 1, 1] }),
     })));
-    const p = { fullCanvas: { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement, name: "a.jpg" };
-    await classifyCanvasServer(p, wanted as Box, log);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement;
+    await classifyCanvasServer(p, "a.jpg", wanted as Box, log);
     expect(log).toHaveBeenCalledWith("server_crop_box_diverged", { requested: wanted, returned: [0, 0, 1, 1] });
     vi.unstubAllGlobals();
   });
@@ -169,22 +166,22 @@ describe("classifyCanvasServer", () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, json: async () => ({ labels: {}, detail: {}, logits: {}, cropBox: box }),
     })));
-    const p = { fullCanvas: { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement, name: "a.jpg" };
-    await classifyCanvasServer(p, box, log);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement;
+    await classifyCanvasServer(p, "a.jpg", box, log);
     expect(log).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 
   it("throws on a server error rather than scoring nothing", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503 })));
-    const p = { fullCanvas: { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement, name: "a.jpg" };
-    await expect(classifyCanvasServer(p, [0, 0, 1, 1], vi.fn())).rejects.toThrow(/503/);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(new Blob()) } as unknown as HTMLCanvasElement;
+    await expect(classifyCanvasServer(p, "a.jpg", [0, 0, 1, 1], vi.fn())).rejects.toThrow(/503/);
     vi.unstubAllGlobals();
   });
 
   it("throws rather than posting a null body", async () => {
-    const p = { fullCanvas: { toBlob: (r: (b: Blob | null) => void) => r(null) } as unknown as HTMLCanvasElement, name: "a.jpg" };
-    await expect(classifyCanvasServer(p, [0, 0, 1, 1], vi.fn())).rejects.toThrow(/Could not encode/);
+    const p = { toBlob: (r: (b: Blob | null) => void) => r(null) } as unknown as HTMLCanvasElement;
+    await expect(classifyCanvasServer(p, "a.jpg", [0, 0, 1, 1], vi.fn())).rejects.toThrow(/Could not encode/);
   });
 });
 

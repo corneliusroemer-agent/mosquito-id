@@ -32,6 +32,12 @@ export interface MosqAsync {
   selectPhoto: (i: number) => void;
   processFiles: (files: FileList | File[]) => Promise<void>;
   deletePhoto: (i: number) => void;
+  /** The crop release, as a drag reaches it. */
+  applyCropFromFullSurface: (idx: number, rect: number[], t0: number) => Promise<unknown>;
+  /** A photo's full-resolution pixels, decoded from its File on demand. */
+  fullCanvasFor: (p: unknown) => Promise<HTMLCanvasElement | null>;
+  /** How many full-resolution frames are held. The bound is one. */
+  retainedFullCanvasCount: () => number;
   /** The engine re-run's photo-set narrowing, or null. See `main.js` ASYNC. */
   rerunPhotos: Set<any> | null;
   renderThumbnails: () => void;
@@ -295,7 +301,15 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
 
       const p = {
         name: spec.name,
-        fullCanvas: full,
+        // Fixtures install records directly, so they carry the photo's own
+        // dimensions and its retained pixels the way the app's own intake does.
+        // sourceCanvas rather than fullCanvas: these have no File, so there
+        // is nothing to re-decode from and the frame is what they hold.
+        displayCanvas: full,
+        // The dimensions makeCanvas was called with above.
+        fullW: 2400,
+        fullH: 1800,
+        sourceCanvas: full,
         cropCanvas: crop,
         contextCanvas: full,
         detail,
