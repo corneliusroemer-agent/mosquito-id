@@ -20,6 +20,7 @@ import { adjacentNames as _adjacentNames, softmaxJoint } from "../confidence/sof
 import { genusScores as _genusScores } from "../confidence/genusScores";
 import { fuseViews as _fuseViews } from "../confidence/fuseViews";
 import { genusOf, speciesGenusIndex } from "../confidence/genus";
+import { assertPartition } from "../confidence/taxonomy";
 import { verdictFrom as _verdictFrom, verdictSentence, nonMosquitoLabel } from "../confidence/verdict";
 import { pooledPosterior as _pooledPosterior,
          splitPoolable, poolingWeights, aggregateLogits, aggregateAdjacent,
@@ -31,7 +32,7 @@ import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTO
          cosineOffsetsFor, floorsFor, resolveModelUrl } from "./modelConfig";
 import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
-import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
+import { canvasUrl, dataUrlToCanvas, prepareThumbnail, setImgSrc, thumbnailUrl } from "./canvasCache";
 import { photoObjectUrl, releasePhotoUrl } from "./photoUrl";
 import { displayCanvasFrom, fullCanvasFor, releaseFullCanvas, resetFullCanvasCache,
          retainedFullCanvasCount } from "./fullResSource";
@@ -62,7 +63,9 @@ import { halvingEnabled } from "./resizeMode";
 import { isUsableIntermediate } from "./downscale";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
          Superseded } from "./photoRecord";
-import { classifyViewLocal as _classifyViewLocal,
+import { releaseGpuResources } from "./gpuRelease";
+import { classifyCanvasServer as _classifyCanvasServer,
+         classifyViewLocal as _classifyViewLocal,
          classifyViewServer as _classifyViewServer, genusTotals as _genusTotals,
          posteriorSummary as _posteriorSummary, round4, serverView as _serverView,
          verdictSummary as _verdictSummary, viewsFor as _viewsFor,
@@ -233,6 +236,11 @@ function invalidateScrollGuard() {
 }
 let isProcessingBatch = false;
 let idleRestoreAttempts = 0;
+// The `GPUDevice` `loadWebGPUModels` obtained for itself. onnxruntime-web takes
+// over `ort.env.webgpu.device` on first use, so this is only reachable from here
+// - which is what makes it the one device an idle release can safely destroy.
+// See `gpuRelease.ts` for why the backend's own device must be left alone.
+let appOwnedDevice = null;
 // A re-run in progress: the window between emptying the gallery and the batch
 // that refills it starting. See reprocessLoadedPhotos.
 let reprocessRunning = false;
@@ -294,6 +302,27 @@ const ASYNC = (window.__mosqAsync = {
   // cache and that the next `processFiles` refills it.
   get idleRelease() { return idleRelease; },
   get idleRestoreAttempts() { return idleRestoreAttempts; },
+  /**
+   * The `GPUDevice` the app obtained for itself in `loadWebGPUModels`, which
+   * tier 1 never reaches - it aborts every model fetch, so the load that would
+   * install one never completes. A tier-1 spec that wants to watch the release
+   * destroy a device installs one here, the same way `sessClip` is a replaceable
+   * seam rather than a reimplementation of the load path.
+   *
+   * Write it to BOTH this and `ort.env.webgpu.device`: the first is what the
+   * release destroys (it is the app's to destroy - see `gpuRelease.ts`), the
+   * second is the slot the release has to clear.
+   */
+  set appOwnedDevice(v) {
+    appOwnedDevice = v;
+    if (v && ort?.env?.webgpu) {
+      // `delete` first, for the reason `loadWebGPUModels` does it: once a
+      // webgpu session exists the property is `writable: false`.
+      delete ort.env.webgpu.device;
+      ort.env.webgpu.device = v;
+    }
+  },
+  get appOwnedDevice() { return appOwnedDevice; },
   // Reachable so a spec can put a fake session in and watch the release take it
   // out. `release` is counted rather than asserted on identity, because
   // onnxruntime's own sessions are what a real run releases.
@@ -379,6 +408,11 @@ if (typeof PerformanceObserver === "function") {
 
 
 const embedsCache = {};
+// Taxonomies, keyed by the head they belong to. Kept apart from `embedsCache`
+// because they are a different artefact with a different lifetime: the head is
+// 271 KB of fitted weights, this is 3 KB of labels, and an engine switch should
+// not re-fetch either when the other is already loaded.
+const taxonomyCache = {};
 
 async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   window.modelsReady = false;
@@ -397,6 +431,19 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
         }
         const device = await adapter.requestDevice({ requiredFeatures });
         if (!ort.env.webgpu) ort.env.webgpu = {};
+        // Tracked so an idle release can destroy it. onnxruntime-web replaces
+        // this reference with a device of its own on the first
+        // `InferenceSession.create` (its `WebGpuBackend.initialize` calls
+        // `adapter.requestDevice` again), so this one is orphaned from that
+        // moment - but it is still a live `GPUDevice`, and the release path is
+        // the only thing that can hand it back.
+        appOwnedDevice = device;
+        // `delete` first: once a webgpu session exists, onnxruntime-web has
+        // redefined `env.webgpu.device` as `writable: false`, so assigning to
+        // it throws and the catch below would swallow a spurious warning on
+        // every load after the first. The property is `configurable: true`, so
+        // this is the supported way to replace it.
+        delete ort.env.webgpu.device;
         ort.env.webgpu.device = device;
       }
     } catch (e) {
@@ -424,6 +471,12 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   // not worth a byte slice of its own - what the bar reports for them is that
   // they parsed and the head is now usable.
   if (needsEmbeds) steps.push({ key: "embeds" });
+  // The taxonomy is a few KB beside a 172 MB classifier, so it gets its own slice
+  // of the bar rather than riding on the head's - a missing or malformed
+  // taxonomy has to be visible on the progress bar, not inferred from the head
+  // arriving.
+  const needsTaxonomy = Boolean(clipCfg.taxonomyPath) && !taxonomyCache[targetEmbedsPath];
+  if (needsTaxonomy) steps.push({ key: "taxonomy" });
   beginModelLoad(steps);
 
   // 1. Load detector if not loaded
@@ -497,7 +550,46 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     embedsCache[targetEmbedsPath] = data;
     completeLoadStep("embeds");
   }
-  EMB = embedsCache[targetEmbedsPath];
+  // Attached to the head, so every consumer that reads `head.taxonomy` - the
+  // rank roll-up, the genus index - sees it without threading a second argument
+  // through. A taxonomy that does not match the head is caught here rather than
+  // surfacing as a species filed under the wrong genus.
+  // Read through the cache, not through `data`: that binding lives inside the
+  // `needsEmbeds` block above, and an engine whose head is already loaded has no
+  // `data` at all - which is exactly the path an engine switch takes.
+  const head = embedsCache[targetEmbedsPath];
+  if (needsTaxonomy) {
+    // A taxonomy is an enhancement, and a head without one is fully supported -
+    // genus falls back to the first word of the label. So a taxonomy that is
+    // missing, malformed, or not the array it claims to be degrades to that
+    // fallback and says so in the log rather than leaving a head that silently
+    // has no tree.
+    //
+    // `fetchWithCache` already absorbs a failed fetch, so the catch is not
+    // covering that (measured: tier 1 aborts every model request and the engine
+    // switch still completes). What it IS covering is everything downstream of
+    // the fetch - a truncated body makes `JSON.parse` throw, and that is outside
+    // fetchWithCache's reach. Failing a 172 MB classifier download over 3 KB of
+    // labels would be the wrong trade by a wide margin.
+    try {
+      const taxBuf = await fetchWithCache(resolveModelUrl(clipCfg.taxonomyPath), loadStepProgress("taxonomy", "Taxonomy"), sendLog);
+      const taxDoc = JSON.parse(new TextDecoder().decode(taxBuf));
+      if (Array.isArray(taxDoc?.taxonomy)) {
+        taxonomyCache[targetEmbedsPath] = taxDoc.taxonomy;
+        sendLog("taxonomy_loaded", { head: targetEmbedsPath, entries: taxDoc.taxonomy.length });
+      } else {
+        sendLog("taxonomy_unusable", { head: targetEmbedsPath, reason: "not_an_array" });
+        console.warn("[taxonomy] ignoring", clipCfg.taxonomyPath, "- no `taxonomy` array; using the first-word genus rule");
+      }
+    } catch (err) {
+      sendLog("taxonomy_unusable", { head: targetEmbedsPath, reason: "fetch_failed" });
+      console.warn("[taxonomy]", clipCfg.taxonomyPath, "could not be loaded; using the first-word genus rule:", err);
+    }
+    completeLoadStep("taxonomy");
+  }
+  if (taxonomyCache[targetEmbedsPath]) head.taxonomy = taxonomyCache[targetEmbedsPath];
+  assertPartition(head);
+  EMB = head;
   // Bind the species this head cannot separate to the label helpers. Done where
   // the head is assigned, so an engine switch rebinds them with it.
   setActiveHead(EMB);
@@ -1341,6 +1433,7 @@ async function processFiles(fileList) {
           // that is the retention this file exists to remove.
           slot.displayCanvas = displayCanvasFrom(slot.bitmap);
           slot.status = "decoding… detecting…";
+          await prepareThumbnail(slot.displayCanvas, 0.8, slot.file);
         } catch (err) {
           slot.pending = false;
           slot.error = `Could not read image: ${err.message || err}`;
@@ -1390,6 +1483,28 @@ async function processFiles(fileList) {
         const aliased = aliasesWholeFrame(data);
         const displayCv = displayCanvasFrom(fullCv);
 
+        // The photo's bytes become the server's frame, because from here on that
+        // frame is what the app holds: `commitBatchSlot` puts its dimensions in
+        // `fullW`/`fullH` and its bytes in `file`,
+        // the crop box is in its coordinates, and `cropGeometry` divides by its
+        // width and height. Leaving `file` as the upload would leave the viewer
+        // showing bytes that were never classified, beside a box positioned for
+        // pixels it does not have - and nothing downstream can detect that,
+        // because the server's decode is as correct a decode as the browser's
+        // own. What it is not guaranteed to be is the SAME decode: a re-encode, a
+        // downscale or a different EXIF reading on the server all produce a
+        // frame the browser's copy of the upload does not match.
+        //
+        // So the record is made self-consistent here rather than trusted to be:
+        // the object URL the viewer serves is minted from these bytes, and
+        // `photoObjectUrl` revokes the upload's URL when `file` changes, so the
+        // old one cannot outlive the frame it stood for.
+        //
+        // Encoding here rather than at selection is what keeps this cheap -
+        // `toBlob` is off the click, and it is paid once per photo against a
+        // network round trip that cost far more.
+        const serverFile = await sourceFileFor({ sourceCanvas: fullCv, name: data.filename });
+
         // Second view over the same contract, no server change needed: the
         // endpoint already classifies whatever box it is given, so the whole
         // frame is one more request with crop_box spanning it. Skipped when the
@@ -1409,8 +1524,19 @@ async function processFiles(fileList) {
 
         commitBatchSlot(slots[i], {
           name: data.filename, scoredBy: engine,
+          // Null when the encode failed, and null is the safe answer here rather
+          // than the old upload: with no file the viewer falls back to encoding
+          // `displayCanvas` itself, which is this frame by definition. Keeping the
+          // upload instead would put back the mismatch this exists to remove.
+          //
+          // A re-run therefore re-classifies these bytes rather than the original
+          // upload, which is what makes it a re-run of the same photograph: the
+          // frame on screen is the frame that was classified.
+          file: serverFile,
           displayCanvas: displayCv, fullW: fullCv.width, fullH: fullCv.height,
-          sourceCanvas: slots[i].file ? null : fullCv,
+          // Every photo minted here has a File, so the frame is not retained on
+          // the record; `fullCanvasFor` decodes it back on demand.
+          sourceCanvas: null,
           // The server sends full-resolution data URLs, so all three are capped
           // here, and the no-detection case shares one canvas rather than three
           // copies of the same photograph.
@@ -1446,6 +1572,10 @@ async function processFiles(fileList) {
       if (slots[i].pending) markComputeFailed(slots[i], err, sendLog);
       else slots[i].error = `Analysis failed: ${err.message || err}`;
       console.error("Error processing", slot.name, err);
+    }
+    // The crop is a new canvas; give its tile the native resize too.
+    if (slots[i].cropCanvas && slots[i].cropCanvas !== slots[i].displayCanvas) {
+      await prepareThumbnail(slots[i].cropCanvas, 0.8);
     }
     processed++;
     setProgress("batch", `Analyzed ${processed} of ${imageFiles.length} photos…`, (100 * processed) / imageFiles.length);
@@ -2716,34 +2846,26 @@ async function revertToFullPhoto(idx) {
 // that keeps a release out of a running batch - live in `idleRelease.ts` and are
 // tested there. This is the wiring.
 
-// A session that will not release is not a reason to keep the others: some
-// execution providers have no release at all.
-function releaseSession(entry) {
-  try {
-    entry?.sess?.release?.();
-  } catch (err) {
-    console.warn("Session release failed:", err);
-  }
-}
-
-function releaseIdleMemory() {
+async function releaseIdleMemory() {
   const sessions = Object.values(clipSessions);
   const hadDetector = Boolean(sessDet);
   // Every session, not just the current one: a user who switched engines twice
-  // has three sessions alive, and releasing only the selected engine's leaves
-  // the rest pinned for the rest of the tab's life.
-  for (const entry of sessions) releaseSession(entry);
-  if (sessDet) releaseSession({ sess: sessDet });
+  // has three sessions alive, and onnxruntime-web only empties its weight cache
+  // when the LAST session is released - so releasing a subset frees nothing.
+  const toRelease = [...sessions.map((entry) => entry?.sess)];
+  if (sessDet) toRelease.push(sessDet);
+
+  // The device is cleared and the app's own device destroyed by the same call,
+  // and only after every `release()` has resolved - see `gpuRelease.ts`, which
+  // documents why the backend's device is not destroyed here.
+  const freed = await releaseGpuResources({ sessions: toRelease, ort, ownedDevice: appOwnedDevice });
+  appOwnedDevice = null;
+
   for (const key of Object.keys(clipSessions)) delete clipSessions[key];
   sessClip = null;
   sessDet = null;
   loadedClipEngine = null;
   window.modelsReady = false;
-
-  // The device and everything the provider allocated on it. Dropping the
-  // reference is what lets the browser reclaim it; onnxruntime-web keeps no
-  // registry of its own beyond `ort.env.webgpu.device`.
-  if (ort.env.webgpu) ort.env.webgpu.device = undefined;
 
   // Bitmaps still held by a photo mid-decode. `commitBatchSlot` already
   // releases the ones a finished photo owned, so this is the decode pool's
@@ -2762,7 +2884,15 @@ function releaseIdleMemory() {
   }
 
   updateReprocessButton();
-  sendLog("idle_released", { sessions: sessions.length + (hadDetector ? 1 : 0) });
+  sendLog("idle_released", {
+    sessions: sessions.length + (hadDetector ? 1 : 0),
+    // What actually came back: `releasedSessions` is the count whose
+    // `release()` resolved, which is what destroys the weight `GPUBuffer`s.
+    // A lower number than `sessions` means some weights are still on the device.
+    freed: freed.releasedSessions,
+    unreleased: freed.failedSessions,
+    deviceDestroyed: freed.deviceDestroyed,
+  });
 }
 
 async function restoreIdleMemory() {

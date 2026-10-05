@@ -379,7 +379,31 @@ test.describe("full-resolution retention", () => {
       { name: "cropped.jpg", state: "species", is_cropped: true },
     ]);
     await installCountingClassifier(page);
-    await settle(page);
+    // A cropped photo's second view is conditional on `#chk-whole-frame`, which
+    // the crop-only default leaves off, so the run count this test reads is the
+    // one-view count unless the control is put where a user would put it.
+    //
+    // Checking it re-classifies the whole gallery, and that pass runs the same
+    // counting classifier this test measures, so it has to finish before
+    // `__countedRuns` is read as the baseline - a `settle` two frames deep does
+    // not wait for an inference. Polled until the count stops moving.
+    await page.locator("#chk-whole-frame").setChecked(true);
+    // The re-classification the toggle kicks off runs the same counting
+    // classifier, and `reprocessLoadedPhotos` refuses to start while that pass is
+    // in flight - so a re-run issued before it lands is silently dropped and the
+    // count reads one view short. Wait for the pass: quiet counter, no photo
+    // pending, and the two-view outcome actually recorded.
+    for (let i = 0; i < 200; i++) {
+      const idle = await page.evaluate(async () => {
+        const w = window as any;
+        const n = w.__countedRuns ?? 0;
+        await new Promise((r) => setTimeout(r, 60));
+        return (w.__countedRuns ?? 0) === n
+          && !window.__mosqAsync!.previews.some((p: any) => p.pending)
+          && window.__mosqAsync!.previews.map((p: any) => p.viewsTotal).join() === "1,2";
+      });
+      if (idle) break;
+    }
 
     const r = await page.evaluate(async () => {
       const A = window.__mosqAsync!;
