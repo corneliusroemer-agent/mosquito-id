@@ -48,7 +48,9 @@ function photo(over: Partial<PhotoState> = {}): PhotoState {
   return {
     name: "photo.jpg",
     fingerprint: null,
-    fullCanvas: canvas(1000, 800),
+    displayCanvas: canvas(1000, 800),
+    fullW: 1000,
+    fullH: 800,
     cropCanvas: null,
     contextCanvas: null,
     cropBox: null,
@@ -115,7 +117,7 @@ function classifyViews(
   headRef: unknown,
 ): { landed: ViewResult[]; cached: number } {
   const stamp: ViewCacheStamp = { contentRev: p.contentRev || 0, engine, head: headRef };
-  const views = viewsFor(p, cropCv, cropBox, includeWholeFrame);
+  const views = viewsFor(p.displayCanvas, cropCv, cropBox, includeWholeFrame);
   const landed: ViewResult[] = [];
   let cached = 0;
   for (const view of views) {
@@ -142,7 +144,7 @@ describe("a whole-frame toggle re-fuses cached views", () => {
   it("runs zero classifier calls, and produces what a full re-classification produces", () => {
     const full = canvas(1000, 800);
     const crop = canvas(200, 200);
-    const p = photo({ fullCanvas: full, cropCanvas: crop, cropBox: CROP_BOX });
+    const p = photo({ displayCanvas: full, fullW: 1000, fullH: 800, cropCanvas: crop, cropBox: CROP_BOX });
     const previews = [p];
 
     // First pass, under the shipped default (both views). Every view is a miss,
@@ -434,20 +436,21 @@ describe("viewsFor names the kind of each view", () => {
   const crop = canvas(200, 200);
 
   it("tags the crop and the whole frame", () => {
-    const views = viewsFor(photo({ fullCanvas: full }), crop, [10, 10, 210, 210], true);
+    const views = viewsFor(full, crop, [10, 10, 210, 210], true);
     expect(views.map((v) => v.kind)).toEqual(["crop", "whole"]);
   });
 
   it("tags the single view a photo with no crop offers", () => {
-    const views = viewsFor(photo({ fullCanvas: full }), null, null, true);
+    const views = viewsFor(full, null, null, true);
     expect(views.map((v) => v.kind)).toEqual(["whole"]);
   });
 
   it("does not fuse the whole frame with itself", () => {
-    // The batch path passes cropCv === fullCanvas. Tagging both as what they are
-    // keeps that photo to one entry under one kind, so a later toggle cannot
-    // find two views where there is one.
-    const views = viewsFor(photo({ fullCanvas: full }), full, null, true);
+    // The batch path passes the frame's own canvas as the crop canvas for a
+    // photo the detector found nothing in. With no crop box there is no crop
+    // view to tag, so that photo keeps one entry under one kind and a later
+    // toggle cannot find two views where there is one.
+    const views = viewsFor(full, full, null, true);
     expect(views.map((v) => v.kind)).toEqual(["whole"]);
   });
 
@@ -456,7 +459,7 @@ describe("viewsFor names the kind of each view", () => {
       for (const include of [true, false]) {
         const kinds = viewKinds(hasCrop, include);
         const views = viewsFor(
-          photo({ fullCanvas: full }),
+          full,
           hasCrop ? crop : null,
           hasCrop ? [0, 0, 200, 200] : null,
           include,

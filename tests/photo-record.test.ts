@@ -35,7 +35,8 @@ const fused = () => ({
 
 const photo = (over: Partial<PhotoState> = {}): PhotoState => ({
   name: "a.jpg", fingerprint: null,
-  fullCanvas: null, cropCanvas: null, contextCanvas: null,
+  displayCanvas: null, fullW: null, fullH: null,
+  cropCanvas: null, contextCanvas: null,
   cropBox: null, contextBox: null,
   crop_rejected: false, is_cropped: false, manual_full_photo: false,
   scores: {}, detail: {}, logits: null, adP: null, verdict: null,

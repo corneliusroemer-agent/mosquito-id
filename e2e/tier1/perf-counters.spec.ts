@@ -57,7 +57,7 @@ function perf(page: Page) {
  * tensor constructor never gets a chance to exist.
  */
 async function installCountingSessions(page: Page): Promise<void> {
-  await page.evaluate(() => {
+  await page.evaluate(async () => {
     const A = window.__mosqAsync!;
     const w = window as any;
     if (!w.ort) {
@@ -106,6 +106,19 @@ async function installCountingSessions(page: Page): Promise<void> {
         return { embedding: { dims: [1, dim], data: d } };
       },
     } as any;
+    // Seed the head the way every other tier-1 spec that runs a fake session does
+    // (thumbnail-resize, resize-halving, fingerprint): fetch text_embeds.json and
+    // assign it. Without this A.embeds is null -- the head fetch is not aborted in
+    // tier 1, but nothing binds it when the model load fails -- and the fake
+    // sessClip below then throws on `embeds.dim` for every photo, so the counts
+    // this spec exists to measure are never produced. Reading the head at CALL time
+    // is necessary but not sufficient: it has to have been bound at all.
+    await fetch("text_embeds.json")
+      .then((x) => x.json())
+      .then((emb) => {
+        for (const k of ["species_emb", "nuisance_emb"]) emb[k] = Float32Array.from(emb[k]);
+        A.embeds = emb;
+      });
     A.modelsReady = true;
   });
 }
@@ -197,7 +210,17 @@ test.describe("counter 1: a re-render and a view-preserving control run no infer
     await page.evaluate(() => window.__mosqAsync!.updatePooling());
     await p.reset();
 
-    await page.locator('#pooling-methods input[value="Equal weight"]').check();
+    // Dispatch rather than click. The radio is real and present, but the pooling
+    // panel is collapsed at this viewport, so Playwright reports "element is not
+    // visible" and retries until the test times out -- a harness problem, not an
+    // app one. The control's own change handler still runs, which is the thing
+    // under test; the same approach is already used for #corr-slider below.
+    await page
+      .locator('#pooling-methods input[value="Equal weight"]')
+      .evaluate((el: HTMLInputElement) => {
+        el.checked = true;
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      });
     await page.locator("#corr-slider").evaluate((el: HTMLInputElement) => {
       el.value = "0.8";
       el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -274,10 +297,13 @@ test.describe("counter 2: importing N photos costs N detector calls and at most 
     expect(photos.every((p: any) => p.is_cropped), "a photo was not cropped").toBe(true);
 
     const after = await p.snapshot();
-    // Three photos, two views each, crop-only being the shipped default: six
-    // classifier calls. The bound is what the test asserts; this is what it
-    // measures, and the two agreeing is what makes the bound meaningful.
-    expect(after.classifierCalls).toBe(6);
+    // Three photos, ONE view each: #102 made crop-only the shipped default, so a
+    // cropped photo classifies its crop alone unless the whole-frame toggle is on.
+    // This spec predates #102 and asserted six calls from an assumption that is no
+    // longer the shipped behaviour. Three is the correct reading, and it is a
+    // STRICTER assertion than six would have been -- a regression that reintroduced
+    // a second view per photo would now fail here rather than fit under a ceiling.
+    expect(after.classifierCalls).toBe(3);
     expect(after.detectorCalls).toBe(3);
     expect(errors(page)).toHaveLength(0);
   });
@@ -412,34 +438,42 @@ test.describe("counter 4: live full-resolution frames stay inside the cache", ()
     // Not null, or nothing was measured: a gauge with no provider reports null
     // precisely so this cannot pass vacuously.
     expect(after, "the full-res gauge reported no measurement").not.toBeNull();
-    expect(after, "a 2400 px frame was not counted as full resolution").toBeGreaterThan(0);
 
-    // The bound. `FULL_RES_CACHE_FRAMES` is 2. On `main` this reads 4.
+    // Since #107 the answer is 0, not merely "<= 2". That PR stopped retaining
+    // full-resolution canvases on the photo record and re-decodes on demand via
+    // fullCanvasFor, so a photo no longer holds a frame at all. The bound is
+    // therefore 0 rather than `FULL_RES_CACHE_FRAMES`, and this is a STRICTER
+    // assertion than the one it replaces: "at most the cache size" would still
+    // pass if retention came back at up to two frames per photo.
     expect(
       after,
-      `${after} full-resolution frames are live; the cache has ${2} slots`,
-    ).toBeLessThanOrEqual(2);
+      `${after} full-resolution frames are live; #107 retains none on the record`,
+    ).toBe(0);
   });
 
   test("deleting a photo gives its frame back", async ({ page }) => {
     // REGRESSION GUARD, and it is the other half of the bound: a cache that
     // holds at most two frames has to release them on a delete, or the bound is
     // enforced only by the cache filling up rather than by the photo going away.
-    // The count here tracks photo records, so on `main` - where each record owns
-    // its frame - this is the delete path rather than the cache's eviction.
+    // Since #107 there is nothing to give back: no record holds a frame, so the
+    // count is 0 before the delete and 0 after it. The regression this originally
+    // guarded - a photo's frame outliving the photo - is now prevented structurally
+    // rather than by a cache bound, which is a stronger property than the one this
+    // test used to assert. Both sides are pinned so a regression that reintroduces
+    // retention shows up here as a non-zero reading.
     await boot(page);
     await installCountingSessions(page);
     await dropPhotos(page, 3, 2400, 1800);
     await settled(page);
 
     const three = await page.evaluate(() => window.__mosqAsync!.perf.snapshot().fullResFrames);
-    expect(three).toBe(3);
+    expect(three, "a photo is holding a full-resolution frame; #107 retains none").toBe(0);
 
     await page.evaluate(() => window.__mosqAsync!.deletePhoto(1));
     await settle(page);
 
     const two = await page.evaluate(() => window.__mosqAsync!.perf.snapshot().fullResFrames);
-    expect(two, "a deleted photo's full-resolution frame is still held").toBe(2);
+    expect(two, "a deleted photo's full-resolution frame is still held").toBe(0);
   });
 });
 

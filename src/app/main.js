@@ -34,10 +34,18 @@ import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setP
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, prepareThumbnail, setImgSrc, thumbnailUrl } from "./canvasCache";
 import { photoObjectUrl, releasePhotoUrl } from "./photoUrl";
+import { displayCanvasFrom, fullCanvasFor, releaseFullCanvas, resetFullCanvasCache,
+         retainedFullCanvasCount } from "./fullResSource";
 import { contentFingerprint } from "./contentHash";
 import { decodeDets, letterbox, selectDetection } from "./detector";
-import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
-         fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
+// Union of the counter branch and main: main added the #106 square-crop helpers
+// (boxInSurface, cutCrop, squareBox, squareDragBox, photoFrame, fullSurfaceMapping,
+// isCropTooSmall); this branch aliased renderResultsTable behind an underscore. Neither
+// side's symbols were dropped -- a binding that loses its symbol here is a build error,
+// not a silent behaviour change.
+import { applyBox, boxInSurface, cropBoxInFullSurface, cropBoxInZoomSurface, cutCrop, extractContextCrop,
+         fitMapping, fullSurfaceMapping, invalidateViewerAspectCache, isCropTooSmall, photoFrame,
+         squareBox, squareDragBox, zoomedSurfaceMapping } from "./cropGeometry";
 import { downloadCSV, renderResultsTable as _renderResultsTable } from "./resultsTable";
 import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
@@ -66,7 +74,8 @@ import { classifyCanvasServer as _classifyCanvasServer,
          classifyViewLocal as _classifyViewLocal,
          classifyViewServer as _classifyViewServer, genusTotals as _genusTotals,
          posteriorSummary as _posteriorSummary, round4, serverView as _serverView,
-         verdictSummary as _verdictSummary, viewsFor as _viewsFor } from "./views";
+         verdictSummary as _verdictSummary, viewsFor as _viewsFor,
+         aliasesWholeFrame } from "./views";
 import { FULL_RES_MIN_EDGE, armLayoutCounters, disarmLayoutCounters,
          noteClassifierCall, noteDetectorCall, noteServerViewCall,
          registerFullResSource, registerOrtSessionSource, resetCounters,
@@ -113,7 +122,7 @@ const verdictFrom = (spP, agreement, adP, nuP) => _verdictFrom(EMB, spP, agreeme
 // way the confidence adapters above are: read at CALL time, so a reloaded
 // embeddings file is picked up. `includeWholeFrame` and `sendLog` are passed at
 // each call site rather than bound, because both are read at event time.
-const viewsFor = (p, cropCv, cropBox) => _viewsFor(p, cropCv, cropBox, includeWholeFrame);
+const viewsFor = (full, cropCv, cropBox) => _viewsFor(full, cropCv, cropBox, includeWholeFrame);
 const serverView = (data) => _serverView(data, EMB, serverViewScale());
 const classifyViewLocal = (canvas, engine) =>
   _classifyViewLocal(canvas, engine, EMB, clipEmbed, localViewScale());
@@ -121,13 +130,18 @@ const classifyViewLocal = (canvas, engine) =>
 // does locally, so they are counted as classifier calls in their own right: a
 // spec that asserts "N photos cost at most 2N classifier calls" means the same
 // thing whichever engine ran them.
-const classifyViewServer = (p, cropBox) => {
+//
+// The parameter list is MAIN's (canvas, name, cropBox) -- main widened it and its
+// call sites pass three arguments, so restoring this branch's two-argument form
+// would silently pass a photo record where views.ts expects a canvas. Only the
+// counter is carried across.
+const classifyViewServer = (full, name, cropBox) => {
   noteServerViewCall();
-  return _classifyViewServer(p, cropBox, EMB, serverViewScale(), sendLog);
+  return _classifyViewServer(full, name, cropBox, EMB, serverViewScale(), sendLog);
 };
-const classifyCanvasServer = (p, cropBox) => {
+const classifyCanvasServer = (canvas, name, cropBox) => {
   noteServerViewCall();
-  return _classifyCanvasServer(p, cropBox, sendLog);
+  return _classifyCanvasServer(canvas, name, cropBox, sendLog);
 };
 const posteriorSummary = (fused) => _posteriorSummary(fused, EMB);
 const verdictSummary = (p) => _verdictSummary(p);
@@ -415,6 +429,22 @@ const ASYNC = (window.__mosqAsync = {
   selectPhoto,
   processFiles,
   deletePhoto,
+  // Empties the gallery, which is the other way the cache can be left holding
+  // frames for photographs that are no longer on screen.
+  deleteAllPhotos,
+  // The crop release, so a test can cut a crop the way a drag does rather than
+  // reaching past the pointer handlers into the canvas. It is the path that
+  // fetches the full-resolution frame back, so it is also the path a test has to
+  // drive to observe that the frame is not left on the record.
+  applyCropFromFullSurface,
+  // The photo's full-resolution pixels, decoded from its File on demand. A test
+  // that installs a crop by hand has to cut it from the same pixels the app
+  // would, or it is asserting about a different photograph than the re-run will
+  // score.
+  fullCanvasFor,
+  // How many full-resolution frames are held right now. The bound is a fixed
+  // number, and a test asserting the gallery is empty has to be able to see it.
+  retainedFullCanvasCount,
   // The engine re-run, so a test can press the button's action without reaching
   // into the gallery's internals first.
   reprocess: () => reprocessLoadedPhotos(),
@@ -910,7 +940,7 @@ async function reprocessLoadedPhotos() {
   // refusing the re-run. The button is disabled for the duration either way,
   // and the weights come from the Cache API, so the cost is a load the reader
   // was going to pay on their next photo drop anyway.
-  if (idleRelease.released()) await idleRelease.ensure();
+  if (idleRelease.needsEnsure()) await idleRelease.ensure();
   if (isProcessingBatch || !window.modelsReady || reprocessRunning) return;
   // A whole-frame or crop re-classification holds the single inference slot
   // without ever setting `isProcessingBatch`, and this app runs onnxruntime on
@@ -1177,7 +1207,7 @@ async function clipEmbed(sourceCanvas, preScaled) {
 // whole frame. Both inferences are done before this returns, so the batch commits
 // one result per photo; the crop-release path, where the views run one at a time,
 // paints each as it lands.
-async function classifyImage(imgBitmap, filename) {
+async function classifyImage(imgBitmap, filename, file) {
   const t0 = performance.now();
   // Read once, so this photo's `scoredBy` names one engine rather than whichever
   // was selected when the commit landed. It does NOT pin the arithmetic: `sessClip`
@@ -1212,10 +1242,17 @@ async function classifyImage(imgBitmap, filename) {
     const by1 = Math.max(0, y1 - ph);
     const bx2 = Math.min(fullCv.width, x2 + pw);
     const by2 = Math.min(fullCv.height, y2 + ph);
-    cropCv.width = Math.max(1, bx2 - bx1);
-    cropCv.height = Math.max(1, by2 - by1);
-    cropCv.getContext("2d").drawImage(fullCv, bx1, by1, cropCv.width, cropCv.height, 0, 0, cropCv.width, cropCv.height);
-    cropBox = [bx1, by1, bx2, by2];
+    // Pad first, then square - the same order as clamp-then-square in
+    // applySquareCrop. Squaring the raw detection and padding afterwards would
+    // re-widen the box along whichever axis the pad grew, so the pad would undo
+    // the constraint; and squaring a box that overhangs the photo would trim it
+    // back to a rectangle. Squaring the padded, already-inside box is a no-op
+    // when it happens to be square and otherwise trims the longer axis about the
+    // detection's centre, so the detection's middle is still what is classified.
+    cropBox = squareBox([bx1, by1, bx2, by2]);
+    cropCv.width = Math.max(1, cropBox[2] - cropBox[0]);
+    cropCv.height = Math.max(1, cropBox[3] - cropBox[1]);
+    cropCv.getContext("2d").drawImage(fullCv, cropBox[0], cropBox[1], cropCv.width, cropCv.height, 0, 0, cropCv.width, cropCv.height);
   } else {
     cropCv = fullCv;
   }
@@ -1287,16 +1324,29 @@ async function classifyImage(imgBitmap, filename) {
       : "whole photo analysed (the detector found no box)";
 
   const is_cropped = Boolean(best);
-  const { contextCanvas, contextBox } = extractContextCrop(fullCv, cropBox);
+  const { contextCanvas, contextBox } = extractContextCrop(fullCv, fullCv, cropBox);
+  const displayCanvas = displayCanvasFrom(fullCv);
 
   const base = {
     name: filename,
     // The engine whose arithmetic produced this, so a later engine switch can be
     // told apart from a photo that is still current. See `engine` above.
     scoredBy: engine,
-    fullCanvas: fullCv,
-    cropCanvas: cropCv,
-    contextCanvas,
+    // What the record keeps. The full-resolution frame goes with this function:
+    // it has been classified, and the two paths that need it again re-decode it
+    // from the File rather than holding it for every photo in the gallery.
+    displayCanvas: displayCanvas,
+    fullW: fullCv.width,
+    fullH: fullCv.height,
+    // Retained only for a photo with no File: with no bytes there is nothing to
+    // decode it again from, so this is the whole of what such a photo can offer.
+    sourceCanvas: file ? null : fullCv,
+    // One canvas under three names when there is no detection, not three copies
+    // of the same picture. A photo the detector found nothing in has one set of
+    // pixels and one display size, and splitting them across three canvases
+    // would cost exactly what this change reclaimed.
+    cropCanvas: cropCv === fullCv ? displayCanvas : displayCanvasFrom(cropCv),
+    contextCanvas: cropBox ? contextCanvas : displayCanvas,
     cropBox,
     contextBox,
     status,
@@ -1381,7 +1431,7 @@ async function processFiles(fileList) {
   // than queueing the photos and waiting for something else to notice. This is
   // a no-op unless a release actually happened, so it costs nothing on the
   // normal path.
-  if (idleRelease.released()) await idleRelease.ensure();
+  if (idleRelease.needsEnsure()) await idleRelease.ensure();
   if (isProcessingBatch) {
     // A drop during a batch is not nothing: the photos have to run, so they
     // queue behind the batch rather than being dropped on the floor. Silently
@@ -1456,7 +1506,8 @@ async function processFiles(fileList) {
   // mid-flight is never painted as finished.
   const slots = imageFiles.map((file) => ({
     name: file.name, file,
-    fullCanvas: null, cropCanvas: null, contextCanvas: null,
+    displayCanvas: null, fullW: null, fullH: null, sourceCanvas: null,
+    cropCanvas: null, contextCanvas: null,
     cropBox: null, contextBox: null,
     scores: {}, detail: {}, logits: null, adP: null,
     status: "queued…", crop_rejected: false, is_cropped: false, verdict: null,
@@ -1498,12 +1549,19 @@ async function processFiles(fileList) {
           slot.bitmap = await createImageBitmap(slot.file, { imageOrientation: "from-image" });
           // Paint the photo as soon as it is decoded, so the tile is the real
           // image (greyed) while its own inference is still to come.
-          slot.fullCanvas = document.createElement("canvas");
-          slot.fullCanvas.width = slot.bitmap.width;
-          slot.fullCanvas.height = slot.bitmap.height;
-          slot.fullCanvas.getContext("2d").drawImage(slot.bitmap, 0, 0);
+          // The photograph's own dimensions, recorded once here, in the
+          // orientation every box on this photo will be expressed in. Every
+          // crop and context box is cut and placed against these, never
+          // against the display canvas below, whose dimensions differ.
+          slot.fullW = slot.bitmap.width;
+          slot.fullH = slot.bitmap.height;
+          // Display-sized from the start: this canvas exists so the tile shows
+          // the real image while the photo's own inference is still to come,
+          // and holding a full-resolution copy of every queued photo to do
+          // that is the retention this file exists to remove.
+          slot.displayCanvas = displayCanvasFrom(slot.bitmap);
           slot.status = "decoding… detecting…";
-          await prepareThumbnail(slot.fullCanvas, 0.8, slot.file);
+          await prepareThumbnail(slot.displayCanvas, 0.8, slot.file);
         } catch (err) {
           slot.pending = false;
           slot.error = `Could not read image: ${err.message || err}`;
@@ -1519,6 +1577,12 @@ async function processFiles(fileList) {
   const engineLabel = currentEngine === "server-gpu" ? `Server (${serverEngineLabel})` : "WebGPU";
   let processed = 0;
   async function inferSlot(slot, i) {
+    // The photo's revision as it stood when this inference started, read before
+    // the first await below. Everything between here and `commitBatchSlot` is a
+    // suspension point a crop release can come through, and the release bumps
+    // `rev`, so this is the only reading of it that can tell afterwards whether
+    // the photo moved under this run.
+    const startRev = slot.rev;
     // Read once, so the photos a batch scores all carry one engine in
     // `scoredBy` rather than one each, and the footer naming the last of them
     // cannot leave a reader unable to tell which scores are whose. The batch
@@ -1546,9 +1610,17 @@ async function processFiles(fileList) {
         const fullCv = await dataUrlToCanvas(data.fullDataUrl);
         const cropCv = await dataUrlToCanvas(data.cropDataUrl);
         const contextCv = await dataUrlToCanvas(data.contextDataUrl);
+        // Aliasing is decided from the data URLs, which is what the server sent:
+        // `dataUrlToCanvas` allocates a fresh canvas per URL, so the decoded
+        // canvases are never the same object and comparing them would never
+        // alias - which held three capped copies of one photograph in exactly the
+        // case the comment below claims to collapse to one.
+        const aliased = aliasesWholeFrame(data);
+        const displayCv = displayCanvasFrom(fullCv);
 
         // The photo's bytes become the server's frame, because from here on that
-        // frame is what the app holds: `commitBatchSlot` puts it in `fullCanvas`,
+        // frame is what the app holds: `commitBatchSlot` puts its dimensions in
+        // `fullW`/`fullH` and its bytes in `file`,
         // the crop box is in its coordinates, and `cropGeometry` divides by its
         // width and height. Leaving `file` as the upload would leave the viewer
         // showing bytes that were never classified, beside a box positioned for
@@ -1566,7 +1638,7 @@ async function processFiles(fileList) {
         // Encoding here rather than at selection is what keeps this cheap -
         // `toBlob` is off the click, and it is paid once per photo against a
         // network round trip that cost far more.
-        const serverFile = await sourceFileFor({ fullCanvas: fullCv, name: data.filename });
+        const serverFile = await sourceFileFor({ sourceCanvas: fullCv, name: data.filename });
 
         // Second view over the same contract, no server change needed: the
         // endpoint already classifies whatever box it is given, so the whole
@@ -1593,18 +1665,26 @@ async function processFiles(fileList) {
         }
         const fused = fuseViews(views);
 
-        commitBatchSlot(slots[i], {
+        commitBatchSlot(slots[i], startRev, {
           name: data.filename, scoredBy: engine,
           // Null when the encode failed, and null is the safe answer here rather
           // than the old upload: with no file the viewer falls back to encoding
-          // `fullCanvas` itself, which is this frame by definition. Keeping the
+          // `displayCanvas` itself, which is this frame by definition. Keeping the
           // upload instead would put back the mismatch this exists to remove.
           //
           // A re-run therefore re-classifies these bytes rather than the original
           // upload, which is what makes it a re-run of the same photograph: the
           // frame on screen is the frame that was classified.
           file: serverFile,
-          fullCanvas: fullCv, cropCanvas: cropCv, contextCanvas: contextCv,
+          displayCanvas: displayCv, fullW: fullCv.width, fullH: fullCv.height,
+          // Every photo minted here has a File, so the frame is not retained on
+          // the record; `fullCanvasFor` decodes it back on demand.
+          sourceCanvas: null,
+          // The server sends full-resolution data URLs, so all three are capped
+          // here, and the no-detection case shares one canvas rather than three
+          // copies of the same photograph.
+          cropCanvas: aliased.crop ? displayCv : displayCanvasFrom(cropCv),
+          contextCanvas: aliased.context ? displayCv : displayCanvasFrom(contextCv),
           cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
           detail: fused.detail, logits: fused.logits, status: data.status,
           // The server reports one `fallback` bit for both ways of ending up
@@ -1636,8 +1716,8 @@ async function processFiles(fileList) {
           analyzeMs: data.clipTime,
         });
       } else {
-        const res = await classifyImage(slot.bitmap, slot.name);
-        commitBatchSlot(slots[i], res);
+        const res = await classifyImage(slot.bitmap, slot.name, slot.file);
+        commitBatchSlot(slots[i], startRev, res);
       }
     } catch (err) {
       // One unreadable photo must not take the batch down with it.
@@ -1646,7 +1726,7 @@ async function processFiles(fileList) {
       console.error("Error processing", slot.name, err);
     }
     // The crop is a new canvas; give its tile the native resize too.
-    if (slots[i].cropCanvas && slots[i].cropCanvas !== slots[i].fullCanvas) {
+    if (slots[i].cropCanvas && slots[i].cropCanvas !== slots[i].displayCanvas) {
       await prepareThumbnail(slots[i].cropCanvas, 0.8);
     }
     processed++;
@@ -1662,7 +1742,7 @@ async function processFiles(fileList) {
   for (let i = 0; i < slots.length; i++) {
     // Let the decode pool make progress before each inference claims the thread.
     await decodeDone.catch(() => {});
-    if (!slots[i].fullCanvas && !slots[i].error) {
+    if (!slots[i].bitmap && !slots[i].error) {
       // Still decoding: wait for this slot specifically.
       while (!slots[i].bitmap && !slots[i].error) await new Promise((r) => setTimeout(r, 8));
     }
@@ -1688,14 +1768,35 @@ async function processFiles(fileList) {
 // A batch result lands on its own slot, under the same guard a crop release
 // uses: if the photo was deleted, or a crop release overtook it while its
 // inference was in flight, the result is dropped rather than painted.
-function commitBatchSlot(slot, res) {
-  const rev = slot.rev;
-  if (slot.removed || previews.indexOf(slot) < 0 || slot.rev !== rev) {
-    sendLog("batch_slot_superseded", { name: slot.name, rev, currentRev: slot.rev });
+//
+// `startRev` is the photo's revision as it stood when this inference began, read
+// before its first await. Reading it here instead would compare the photo against
+// itself: nothing runs between the read and the comparison, so the guard could
+// never fire and `Object.assign` would put the detector's crop box, its canvases
+// and its scores back over the crop the user had just released, and write `rev`
+// backwards from the release's to the batch result's own seed of 0. The crop's
+// own classification then failed its `ownsRecompute` and was discarded, so the
+// crop silently reverted to the detector's box.
+//
+// Dropping is not a second way to leave the photo unfinished: the release that
+// took the revision is itself a recompute in flight, and it settles the pending
+// badge itself, through `commitScores` or `markComputeFailed`. Re-running the
+// photo here would only race the release that already owns it.
+function commitBatchSlot(slot, startRev, res) {
+  if (slot.removed || previews.indexOf(slot) < 0 || slot.rev !== startRev) {
+    sendLog("batch_slot_superseded", { name: slot.name, rev: startRev, currentRev: slot.rev });
     return;
   }
   Object.assign(slot, res);
-  // The ImageBitmap goes: it is the same pixels as `fullCanvas`, which stays,
+  // A photo with no File cannot be re-decoded, so for that one the
+  // full-resolution frame stays on the record as `sourceCanvas`. Every photo the
+  // app's own intake produces has a File - a drop, a paste, a zip entry and the
+  // sample fetch all mint one - so this is a photo installed from outside it,
+  // and holding the frame is that photo's whole of what it can offer rather
+  // than a fallback. The batch path never sets one, so the memory is not spent
+  // on photos that did not need it.
+  slot.sourceCanvas = res.sourceCanvas ?? null;
+  // The ImageBitmap goes: it is the same pixels as the frame just classified,
   // and a decoded copy of a 12-megapixel photograph is the largest thing a photo
   // holds.
   //
@@ -1708,9 +1809,9 @@ function commitBatchSlot(slot, res) {
   // a dropped or picked file is a reference to bytes the browser holds outside
   // its heap, but a zip entry, a clipboard paste and a sample fetch all build the
   // File from an in-memory Blob. For those, a session that keeps the photos on
-  // screen now also keeps their encoded bytes - against a `fullCanvas` that is
-  // an order of magnitude larger and was never released either, but larger is
-  // not the same as bounded.
+  // screen now also keeps their encoded bytes - against a `displayCanvas` that is
+  // a fraction of the size, and bounded per photo rather than linear in the
+  // gallery, but not nothing.
   slot.bitmap = undefined;
   slot.pending = false;
   slot.error = null;
@@ -1724,6 +1825,7 @@ function deletePhoto(idx) {
   // Any computation still running for this photo now has nothing to write to.
   deleted.removed = true;
   releasePhotoUrl(deleted);
+  releaseFullCanvas(deleted);
   previews.splice(idx, 1);
   includedIndices = shiftIncluded(includedIndices, idx);
   // Follow the photo, not the index. Deleting anything before the selected photo
@@ -1913,7 +2015,7 @@ function _renderThumbnails() {
     // A queued photo has no canvas yet: it gets a greyed placeholder tile that
     // resolves to the real image as soon as its own decode finishes. The alt is
     // empty in that state, so the filename does not render over the tile.
-    const src = p.cropCanvas || p.fullCanvas;
+    const src = p.cropCanvas || p.displayCanvas;
     if (src) {
       setImgSrc(node.img, thumbnailUrl(src, 0.8));
       node.img.className = "";
@@ -2015,6 +2117,11 @@ function deleteAllPhotos() {
   // photo drops its result rather than writing into a slot that no longer exists.
   previews.forEach((p) => { p.removed = true; releasePhotoUrl(p); });
   previews.length = 0;
+  // The whole cache, not the frames of the photos that are going: a photo that
+  // is merely evicted from a two-slot cache leaves its frame behind here, and an
+  // emptied gallery holding two photographs' pixels is the leak this path
+  // exists to stop.
+  resetFullCanvasCache();
   includedIndices = new Set();
   selectedIndex = 0;
   sendLog("delete_all_photos", { count: n });
@@ -2081,7 +2188,7 @@ function wireWholeFrameToggle() {
     })(),
   );
   box.checked = includeWholeFrame;
-  box.addEventListener("change", () => {
+  box.addEventListener("change", async () => {
     const on = box.checked;
     if (on === includeWholeFrame) return;
     includeWholeFrame = on;
@@ -2092,6 +2199,10 @@ function wireWholeFrameToggle() {
     const stored = writePref(WHOLE_FRAME_KEY, on ? "true" : "false");
     if (!stored) sendLog("pref_not_stored", { key: WHOLE_FRAME_KEY });
     sendLog("whole_frame_toggled", { includeWholeFrame: on, photos: previews.length });
+    // Turning the toggle on adds the `whole` view to a cropped photo, which is not
+    // in `viewCache`, so the pass below is a real inference - against a session a
+    // tab that released its memory no longer has.
+    if (idleRelease.needsEnsure()) await idleRelease.ensure();
     // A toggle is about every photo on screen, so it withdraws a re-run's scope
     // rather than inheriting it. `request()` during a re-run's pass sets the
     // runner's follow-up flag, and that follow-up is what re-fuses under the new
@@ -2126,7 +2237,7 @@ const reclassifyRunner = createReclassifyRunner({
   // A whole-frame toggle sets it to null, and so re-classifies the whole gallery.
   due: () => previews
     .filter((p) => {
-      if (!p || p.removed || !p.fullCanvas) return false;
+      if (!p || p.removed || !p.displayCanvas) return false;
       if (rerunPhotos) return rerunPhotos.has(p);
       return !p.pending && !p.error;
     }),
@@ -2185,7 +2296,7 @@ function selectPhoto(idx) {
   isDragging = false;
   currentDragTarget = null;
   dragStartPt = null;
-  dragCurrentRect = null;
+  dragCurrentBox = null;
   const rectFull = document.getElementById("full-drag-rect");
   if (rectFull) rectFull.style.display = "none";
   const rectZoomed = document.getElementById("zoomed-drag-rect");
@@ -2239,15 +2350,15 @@ function _renderActivePhoto() {
 
   // 1. Render Left Panel (Full Photo)
   const surfaceFull = document.getElementById("crop-surface-full");
-  fitSurface(surfaceFull, p.fullCanvas);
+  fitSurface(surfaceFull, p.displayCanvas);
   const fullImg = document.getElementById("full-img");
   // A photo whose decode has not finished has no canvas to show yet. Hide the
   // image rather than leaving a broken-icon with alt text over an empty panel;
   // the pending notice beside it says what is happening.
-  if (p.fullCanvas) {
+  if (p.displayCanvas) {
     // The original bytes by object URL; a photo with no File falls back to an
-    // encode of its canvas.
-    setImgSrc(fullImg, photoObjectUrl(p) ?? canvasUrl(p.fullCanvas, 0.9));
+    // encode of its display canvas.
+    setImgSrc(fullImg, photoObjectUrl(p) ?? canvasUrl(p.displayCanvas, 0.9));
     fullImg.style.visibility = "visible";
   } else {
     fullImg.removeAttribute("src");
@@ -2274,11 +2385,11 @@ function _renderActivePhoto() {
   // Gating on `!p.pending && !p.error` is what caused the blank-then-flicker:
   // the panel emptied the instant a re-crop was released and refilled when the
   // numbers landed.
-  const zoomSource = p.contextCanvas || p.fullCanvas;
+  const zoomSource = p.contextCanvas || p.displayCanvas;
   if (zoomSource) {
     surfaceZoomed.style.width = "100%";
     surfaceZoomed.style.height = "100%";
-    setImgSrc(contextImg, (zoomSource === p.fullCanvas && photoObjectUrl(p)) || canvasUrl(zoomSource, 0.9));
+    setImgSrc(contextImg, (zoomSource === p.displayCanvas && photoObjectUrl(p)) || canvasUrl(zoomSource, 0.9));
     contextImg.style.display = "block";
     contextImg.style.width = "100%";
     contextImg.style.height = "100%";
@@ -2438,7 +2549,7 @@ function _renderActivePhoto() {
 let isDragging = false;
 let currentDragTarget = null; // 'full' or 'zoomed'
 let dragStartPt = null;
-let dragCurrentRect = null;
+let dragCurrentBox = null;
 
 function setupCropSurfaces() {
   const surfaceFull = document.getElementById("crop-surface-full");
@@ -2455,6 +2566,45 @@ function setupCropSurfaces() {
     ];
   }
 
+  /**
+   * The frame the panel is showing, in that frame's own pixels, plus the surface
+   * map for it - the same map `cropBoxInFullSurface`/`cropBoxInZoomSurface` draw
+   * the committed outline through.
+   *
+   * Read once at pointerdown rather than per move: the surface's box does not
+   * change mid-drag, and re-reading it per move would let the square resize
+   * under the cursor if a scrollbar appeared.
+   *
+   * The full panel shows the whole photo; the zoom panel shows the context
+   * region. Both canvases are drawn from the photo at 1:1 - `extractContextCrop`
+   * blits 1:1 - so the frame carries no scale factor of its own; the only thing
+   * separating one from the other is where the region starts in the photo, which
+   * `applySquareCrop` adds at commit time.
+   *
+   * The SCALE comes from the panel, not the frame: each panel maps its own
+   * surface onto its frame through its own fit, `contain` on both. That is why
+   * this returns a mapping alongside the frame rather than a bare canvas - the
+   * two panels' k values differ by construction, and sharing one would misplace
+   * the crop on whichever panel does not match.
+   *
+   * The full panel's frame is the photograph's own dimensions
+   * (`photoFrame`), not a canvas: the record no longer retains a
+   * full-resolution frame (#107), so there is no full-size canvas to read here
+   * and the box's unit is the photo's own pixels either way.
+   */
+  function dragFrameFor(target) {
+    const p = previews[selectedIndex];
+    if (!p) return null;
+    if (target === "zoomed" && p.contextCanvas) {
+      return { img: p.contextCanvas, mapping: zoomedSurfaceMapping(p) };
+    }
+    if (target === "full") {
+      const frame = photoFrame(p);
+      if (frame) return { img: frame, mapping: fullSurfaceMapping(p) };
+    }
+    return null;
+  }
+
   function startDrag(target, surface, rectEl, e) {
     if (e.button !== 0 || !previews.length || !previews[selectedIndex]) return;
     e.preventDefault();
@@ -2468,25 +2618,31 @@ function setupCropSurfaces() {
     isDragging = true;
     currentDragTarget = target;
     dragStartPt = getSurfacePoint(surface, e.clientX, e.clientY);
-    dragCurrentRect = null;
+    dragCurrentBox = null;
     rectEl.style.display = "none";
 
     sendLog("drag_start", { target, startPt: dragStartPt });
 
+    // The frame the drag is expressed in, read once here so the square cannot
+    // resize under the cursor mid-gesture.
+    const frame = dragFrameFor(target);
+
     function onPointerMove(ev) {
-      if (!isDragging || currentDragTarget !== target || !dragStartPt) return;
+      if (!isDragging || currentDragTarget !== target || !dragStartPt || !frame) return;
       const pt = getSurfacePoint(surface, ev.clientX, ev.clientY);
-      dragCurrentRect = [
-        Math.min(dragStartPt[0], pt[0]),
-        Math.min(dragStartPt[1], pt[1]),
-        Math.max(dragStartPt[0], pt[0]),
-        Math.max(dragStartPt[1], pt[1])
-      ];
+      dragCurrentBox = squareDragBox(dragStartPt, pt, frame.img, frame.mapping);
+      // The preview is the committed box mapped back through the same mapping,
+      // not a second square computed on the surface. Squaring in surface
+      // fractions would give a different rect on the two panels - the letterbox
+      // on the full panel and the cover crop on the zoom panel do not have the
+      // same aspect - and would not be square in pixels anyway, which is the
+      // unit the crop is stored and cut in.
+      const pct = boxInSurface(dragCurrentBox, frame.img, frame.mapping);
       rectEl.style.display = "block";
-      rectEl.style.left = `${dragCurrentRect[0] * 100}%`;
-      rectEl.style.top = `${dragCurrentRect[1] * 100}%`;
-      rectEl.style.width = `${(dragCurrentRect[2] - dragCurrentRect[0]) * 100}%`;
-      rectEl.style.height = `${(dragCurrentRect[3] - dragCurrentRect[1]) * 100}%`;
+      rectEl.style.left = `${pct.left}%`;
+      rectEl.style.top = `${pct.top}%`;
+      rectEl.style.width = `${pct.width}%`;
+      rectEl.style.height = `${pct.height}%`;
     }
 
     async function onPointerUp(ev) {
@@ -2502,29 +2658,24 @@ function setupCropSurfaces() {
       currentDragTarget = null;
       rectEl.style.display = "none";
 
-      const rect = dragCurrentRect;
-      dragCurrentRect = null;
+      const box = dragCurrentBox;
+      dragCurrentBox = null;
       dragStartPt = null;
 
-      if (!rect) {
-        sendLog("drag_cancel", { target, reason: "no_rect" });
-        return;
-      }
-      const w = rect[2] - rect[0];
-      const h = rect[3] - rect[1];
-      if (w < 0.015 || h < 0.015) {
-        sendLog("drag_cancel", { target, reason: "too_small", w, h });
+      // A click that never moved leaves no box, and a box with no area is not a
+      // crop however it is shaped - squaring must not turn a stray click into a
+      // 1x1 crop that re-runs inference over the whole batch.
+      if (!box || isCropTooSmall(box, frame.img)) {
+        sendLog("drag_cancel", { target, reason: box ? "too_small" : "no_rect" });
         return;
       }
 
-      sendLog("drag_end", { target, rect, w, h });
+      sendLog("drag_end", { target, box });
 
-      const idx = selectedIndex;
-      if (target === "full") {
-        applyCropFromFullSurface(idx, rect, releasedAt);
-      } else if (target === "zoomed") {
-        applyCropFromZoomedSurface(idx, rect, releasedAt);
-      }
+      // Commits the very box the preview showed, already square in photo
+      // pixels. The commit path takes a pixel box rather than a surface rect, so
+      // nothing downstream can undo the constraint by re-deriving one.
+      applySquareCrop(selectedIndex, box, target, releasedAt);
     }
 
     window.addEventListener("pointermove", onPointerMove);
@@ -2536,60 +2687,97 @@ function setupCropSurfaces() {
   surfaceZoomed.addEventListener("pointerdown", (e) => startDrag("zoomed", surfaceZoomed, rectZoomed, e));
 }
 
-// Execute Crop from Full Photo surface
-async function applyCropFromFullSurface(idx, rect, t0) {
+/**
+ * Commit a manual crop.
+ *
+ * `box` is in the PANEL's own frame - the full photo for `target: "full"`, the
+ * context region for `target: "zoomed"` - in pixels of that frame, and it is
+ * already square: the drag handler squares it in these units via `squareDragBox`
+ * and this function never converts back to surface fractions, so there is no step
+ * at which the committed box could stop being square.
+ *
+ * One function rather than the two panel-specific ones this replaces. Both did
+ * the same three things - map to photo pixels, clamp, run - and the two maps
+ * differed only by the offset the context region sits at inside the photo, which
+ * is a subtraction at the end.
+ */
+async function applySquareCrop(idx, box, target, t0) {
   // Drawing a crop re-runs inference, so a released tab has to come back first.
   // A drag that started before the tab was hidden and ended after it was
   // released lands here with no sessions, and used to compute against null.
-  if (idleRelease.released()) await idleRelease.ensure();
+  if (idleRelease.needsEnsure()) await idleRelease.ensure();
   const p = previews[idx];
-  const fullCv = p.fullCanvas;
-// Surface fractions -> image fractions through the same contain window
-  // cropBoxInFullSurface() draws through, so a drag lands on the pixels the
-  // user pointed at rather than on the same fraction of a wider photo.
+  // The photograph's own dimensions, which is what the box is in. Not the
+  // canvas the photo holds: that one is display-sized, and a box scaled by it
+  // is a fraction of a different picture. The record no longer retains a
+  // full-resolution frame (#107), so this is also the only record of the box's
+  // unit - there is nothing else to clamp against.
+  const frame = photoFrame(p);
+  if (!frame) return;
+
+  // The context region is cut in photo pixels and the drag was expressed in the
+  // context canvas's pixels, which are the same pixels at the same scale -
+  // extractContextCrop draws it 1:1. So the only difference is where the region
+  // starts. With no context region the zoom panel shows the whole photo, and so
+  // does the frame the drag was taken in, hence a zero offset.
+  const ox = target === "zoomed" && p.contextBox ? p.contextBox[0] : 0;
+  const oy = target === "zoomed" && p.contextBox ? p.contextBox[1] : 0;
+
+  // Clamp BEFORE squaring, not after. Clamping a square that overhangs the
+  // photo's edge would trim one side and leave a rectangle again, so the order
+  // is what keeps the invariant; squaring a box already inside the photo is then
+  // a no-op, which is what makes this safe to run on every caller.
+  const W = frame.width;
+  const H = frame.height;
+  const clamped = squareBox([
+    Math.max(0, Math.min(W, box[0] + ox)),
+    Math.max(0, Math.min(H, box[1] + oy)),
+    Math.max(0, Math.min(W, box[2] + ox)),
+    Math.max(0, Math.min(H, box[3] + oy)),
+  ]);
+
+  if (isCropTooSmall(clamped, frame)) return;
+
+  sendLog("manual_crop", { target, box: clamped });
+  return executeCrop(p, idx, clamped, t0);
+}
+
+/**
+ * Commit a crop given as SURFACE FRACTIONS on the full panel - the shape a drag
+ * has before it is converted, and the seam the e2e suite drives.
+ *
+ * Deliberately still taking fractions rather than the pixel box the drag handler
+ * hands `applySquareCrop`: callers of this seam assert on the surface-to-photo
+ * MAP, and handing them a box the drag handler had already mapped would make
+ * those assertions agree with that map by construction. The squaring still
+ * happens - it goes through the same commit a real drag does.
+ */
+async function applyCropFromFullSurface(idx, rect, t0) {
+  if (idleRelease.needsEnsure()) await idleRelease.ensure();
+  const p = previews[idx];
+  // The photograph's own dimensions, which is what the box is in. Not the
+  // canvas the photo holds: that one is display-sized, and a box scaled by it
+  // is a fraction of a different picture.
+  const frame = photoFrame(p);
+  if (!frame) return;
+  // Surface fractions -> image fractions through the same per-axis contain
+  // window cropBoxInFullSurface() draws through, so a drag lands on the pixels
+  // the user pointed at rather than on the same fraction of a wider photo.
   //
   // The window is per-axis, not a single k: contain fits one axis to the photo
   // and letterboxes the other, so scaling both by one factor would stretch
   // whichever axis was not letterboxed.
   const { kx, ox, ky, oy } = fitMapping(
-    document.getElementById("crop-surface-full"), fullCv, "contain"
+    document.getElementById("crop-surface-full"), frame, "contain"
   );
   const r = [kx * rect[0] + ox, ky * rect[1] + oy, kx * rect[2] + ox, ky * rect[3] + oy];
-  const x1 = Math.max(0, Math.min(fullCv.width, Math.round(r[0] * fullCv.width)));
-  const y1 = Math.max(0, Math.min(fullCv.height, Math.round(r[1] * fullCv.height)));
-  const x2 = Math.max(0, Math.min(fullCv.width, Math.round(r[2] * fullCv.width)));
-  const y2 = Math.max(0, Math.min(fullCv.height, Math.round(r[3] * fullCv.height)));
-
-  if (x2 - x1 < 10 || y2 - y1 < 10) return;
-
-  sendLog("manual_crop", { target: "full", rect: [x1, y1, x2, y2] });
-  return executeCrop(p, idx, [x1, y1, x2, y2], t0);
-}
-
-// Execute Crop from Zoomed 50% Context surface (fine-tuning)
-async function applyCropFromZoomedSurface(idx, rect, t0) {
-  if (idleRelease.released()) await idleRelease.ensure();
-  const p = previews[idx];
-  if (!p.contextBox) return;
-  const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
-  const ctx_w = ctx_x2 - ctx_x1;
-  const ctx_h = ctx_y2 - ctx_y1;
-
-  // Surface fractions -> image fractions, through the object-fit:cover window,
-  // so a fine-tune drag lands where the user pointed even if the context canvas
-  // and the surface no longer share an aspect (e.g. after a window resize).
-  const { kx, ox, ky, oy } = zoomedSurfaceMapping(p);
-  const r = [kx * rect[0] + ox, ky * rect[1] + oy, kx * rect[2] + ox, ky * rect[3] + oy];
-
-  const x1 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + r[0] * ctx_w)));
-  const y1 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + r[1] * ctx_h)));
-  const x2 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + r[2] * ctx_w)));
-  const y2 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + r[3] * ctx_h)));
-
-  if (x2 - x1 < 10 || y2 - y1 < 10) return;
-
-  sendLog("manual_crop", { target: "zoomed", rect: [x1, y1, x2, y2] });
-  return executeCrop(p, idx, [x1, y1, x2, y2], t0);
+  const box = [
+    Math.round(r[0] * frame.width),
+    Math.round(r[1] * frame.height),
+    Math.round(r[2] * frame.width),
+    Math.round(r[3] * frame.height),
+  ];
+  return applySquareCrop(idx, box, "full", t0);
 }
 
 // One view of one photo, scored. Returns the pieces fusion needs (the species
@@ -2606,13 +2794,25 @@ async function applyCropFromZoomedSurface(idx, rect, t0) {
 // two views per photo that check runs twice as often, which is the point - the
 // second view has strictly more opportunity to arrive late and stale.
 async function classifyViews(p, idx, rev, cropCv, cropBox) {
+  // The whole-frame view is the photograph's own pixels, so it needs the frame;
+  // the crop is re-cut from that same frame rather than from the record's
+  // display-sized copy, so a re-run scores what the original release scored. One
+  // decode covers both, and the cache holds it for the caller above as well.
+  const frame = photoFrame(p);
+  const fullCv = (frame ? await fullCanvasFor(p) : null) ?? null;
+  const wholeCv = fullCv ?? p.displayCanvas;
   // Read once, so a switch between the crop's view and the whole frame's cannot
   // fuse two engines and stamp the result with whichever the pass ended on. The
   // calibration each softmax applies follows this key; the session and head they
   // read are the module's, and the whole-frame runner - which is what drives this
   // path - only runs while the engine is usable.
   const engine = currentEngine;
-  const views = viewsFor(p, cropCv, cropBox);
+  // Re-cut from the frame when there is one, so the crop view is full
+  // resolution however the record is holding the crop. With no frame the record's
+  // own crop is what there is, and this is the degraded case the photo's status
+  // says nothing about - which is why every photo the app creates has a File.
+  const cutCropCv = fullCv && cropBox ? cutCrop(fullCv, frame, cropBox) : cropCv;
+  const views = viewsFor(wholeCv, cutCropCv, cropBox);
   const landed = [];
   let dropped = false;
   // The stamp every view lookup in this pass is made against, read once. It
@@ -2641,7 +2841,7 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
       v = hit;
     } else {
       v = engine === "server-gpu"
-        ? await classifyViewServer(p, view.box)
+        ? await classifyViewServer(fullCv, p.name, view.box)
         : await classifyViewLocal(view.canvas, engine);
       // Filed only here, and only after the guard above has passed: a
       // classification overtaken mid-flight writes neither the record nor the
@@ -2715,18 +2915,34 @@ function afterNextPaint() {
 // re-cut the context around it, and repaint. That is what the user asked for
 // by releasing. Phase two asks the model what the new crop is and commits the
 // answer only if this is still the newest release for this photo.
-async function executeCrop(p, idx, cropBox, t0) {
+async function executeCrop(p, idx, cropBoxIn, t0) {
+  // The invariant is enforced HERE, at the one funnel every crop passes through,
+  // not only in the drag handler. A programmatic caller - the detector box, a
+  // future keyboard nudge, a reprocess - that hands over a non-square box gets it
+  // squared rather than committing a rectangle, which is the case most likely to
+  // be missed because it has no drag behind it and so no preview to disagree
+  // with. The box is already square on the manual path, where squareBox is
+  // idempotent, so this costs nothing there.
+  const cropBox = squareBox(cropBoxIn);
   const [bx1, by1, bx2, by2] = cropBox;
-  const fullCv = p.fullCanvas;
   const started = t0 ?? performance.now();
+
+  const frame = photoFrame(p);
+  const fullCv = frame ? await fullCanvasFor(p) : null;
+  if (!frame || !fullCv) {
+    // No bytes and no retained pixels: this photo cannot be cut. Said on the
+    // photo rather than thrown, because the crop the user drew is still a real
+    // rectangle over a real photograph and only its analysis is unavailable.
+    sendLog("crop_no_source", { name: p.name, reason: p.file ? "decode_failed" : "no_file" });
+    markComputeFailed(p, "This photo has no source image left to crop", sendLog);
+    renderThumbnails();
+    return;
+  }
 
   const cw = Math.max(1, bx2 - bx1);
   const ch = Math.max(1, by2 - by1);
-  const cropCv = document.createElement("canvas");
-  cropCv.width = cw;
-  cropCv.height = ch;
-  cropCv.getContext("2d").drawImage(fullCv, bx1, by1, cw, ch, 0, 0, cw, ch);
-  const { contextCanvas, contextBox } = extractContextCrop(fullCv, cropBox);
+  const cropCv = cutCrop(fullCv, frame, cropBox);
+  const { contextCanvas, contextBox } = extractContextCrop(fullCv, frame, cropBox);
 
   // Phase one: geometry and pixels, now. The scores on screen no longer belong
   // to what is on screen, so they are marked pending rather than left looking
@@ -2812,17 +3028,24 @@ async function executeCrop(p, idx, cropBox, t0) {
 }
 
 async function revertToFullPhoto(idx) {
+  // Reverting re-runs inference on the full frame, and `beginRecompute` bumps
+  // the content revision, so the view cache cannot answer it: a released tab
+  // would classify against the sessions it gave back.
+  if (idleRelease.needsEnsure()) await idleRelease.ensure();
   const p = previews[idx];
-  const fullCv = p.fullCanvas;
+  const frame = photoFrame(p);
   const started = performance.now();
   sendLog("revert_to_full", { name: p.name });
 
-  // Phase one, as in executeCrop: the full photo is displayed immediately.
+  // Phase one, as in executeCrop: the full photo is displayed immediately. What
+  // is displayed is the display canvas; what is classified is the frame, which
+  // `classifyViews` fetches. Showing the frame here would put 45 MiB back on
+  // every reverted photo, which is the retention this change exists to remove.
   const rev = beginRecompute(p);
-  p.cropCanvas = fullCv;
-  p.contextCanvas = fullCv;
+  p.cropCanvas = p.displayCanvas;
+  p.contextCanvas = p.displayCanvas;
   p.cropBox = null;
-  p.contextBox = [0, 0, fullCv.width, fullCv.height];
+  p.contextBox = [0, 0, frame?.width ?? 0, frame?.height ?? 0];
   p.status = "manual full photo";
   p.is_cropped = false;
   p.manual_full_photo = true;
@@ -2857,7 +3080,7 @@ async function revertToFullPhoto(idx) {
     // Reverting shows the whole frame, which is the one view there is: the crop
     // the user just gave up is not a second opinion on this photo any more, it is
     // a different picture of it.
-    const r = await classifyViews(p, idx, rev, fullCv, null);
+    const r = await classifyViews(p, idx, rev, null, null);
     if (r.dropped) {
       rec.dropped = true;
       sendLog("revert_superseded", { name: p.name, rev, currentRev: p.rev });

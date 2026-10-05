@@ -260,9 +260,12 @@ describe("every classify path asks the same question", () => {
     // the check above while the shipped path asked no one.
     // The adapter is a `const` arrow, not a declaration, so it is read as the
     // statement rather than as a function body.
-    const adapter = around("const viewsFor = (p, cropCv, cropBox) =>");
-    expect(adapter).toMatch(/_viewsFor\(p, cropCv, cropBox, includeWholeFrame\)/);
-    expect(around("async function classifyViews")).toMatch(/viewsFor\(p, cropCv, cropBox\)/);
+    // The whole frame is passed in rather than read off the photo: the record
+    // holds a display-sized copy, and the classifier's whole-frame view is the
+    // photograph's own pixels.
+    const adapter = around("const viewsFor = (full, cropCv, cropBox) =>");
+    expect(adapter).toMatch(/_viewsFor\(full, cropCv, cropBox, includeWholeFrame\)/);
+    expect(around("async function classifyViews")).toMatch(/viewsFor\(wholeCv, cutCropCv, cropBox\)/);
   });
 
   it("routes the local batch path through viewKinds", () => {

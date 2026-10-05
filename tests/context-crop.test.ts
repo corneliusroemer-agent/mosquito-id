@@ -87,6 +87,7 @@ describe("extractContextCrop: the context region contains the crop box", () => {
           const cropBox = boxInPixels(frac, W, H);
           const { contextBox, contextCanvas } = extractContextCrop(
             fullCv,
+            { width: W, height: H },
             cropBox,
             targetAspect,
           );
@@ -117,7 +118,7 @@ describe("extractContextCrop: the context region contains the crop box", () => {
 describe("extractContextCrop: no crop box", () => {
   it("returns the whole photo as the region", () => {
     const fullCv = fakeCanvas(1920, 1080);
-    const { contextBox, contextCanvas } = extractContextCrop(fullCv, null, 1.05);
+    const { contextBox, contextCanvas } = extractContextCrop(fullCv, { width: 1920, height: 1080 }, null, 1.05);
     expect(contextBox).toEqual([0, 0, 1920, 1080]);
     expect(contextCanvas).toBe(fullCv);
   });

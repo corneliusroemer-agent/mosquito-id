@@ -38,7 +38,7 @@ async function attachFiles(page: Page): Promise<void> {
     const rev = URL.revokeObjectURL;
     URL.revokeObjectURL = (u: string) => { w.__revoked.push(u); rev.call(URL, u); };
     for (const p of A.previews) {
-      const blob: Blob = await new Promise((r) => p.fullCanvas.toBlob((b: Blob | null) => r(b!), "image/jpeg", 0.9));
+      const blob: Blob = await new Promise((r) => p.displayCanvas.toBlob((b: Blob | null) => r(b!), "image/jpeg", 0.9));
       p.file = new File([blob], p.name, { type: "image/jpeg" });
     }
   });
@@ -127,7 +127,9 @@ test.describe("active photo viewer", () => {
 
       const A = window.__mosqAsync!;
       A.previews.length = 0;
-      A.previews.push({ name: "rot.jpg", file, fullCanvas: ref, cropCanvas: ref, contextCanvas: ref,
+      A.previews.push({ name: "rot.jpg", file, displayCanvas: ref,
+        fullW: ref.width, fullH: ref.height,
+        cropCanvas: ref, contextCanvas: ref,
         scores: {}, detail: {}, logits: null, adP: null, verdict: null, pending: false, error: null,
         is_cropped: false, rev: 0, fingerprint: null });
       A.selectedIndex = 0;

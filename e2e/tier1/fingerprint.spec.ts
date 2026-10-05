@@ -39,7 +39,7 @@ test("same-sized distinct photos get distinct fingerprints; identical bytes get 
     const a2 = new File([a], "a-copy.jpg", { type: "image/jpeg" });
     await A.processFiles([a, b, a2]);
     const byName = Object.fromEntries(A.previews.map((p: any) => [p.name, p.fingerprint]));
-    return { byName, dims: A.previews.map((p: any) => `${p.fullCanvas.width}x${p.fullCanvas.height}`) };
+    return { byName, dims: A.previews.map((p: any) => `${p.fullW}x${p.fullH}`) };
   });
   expect(new Set(r.dims).size).toBe(1); // same dimensions: the old fingerprint could not tell them apart
   expect(r.byName["a.jpg"]).toMatch(/^[0-9a-f]{64}$/);
