@@ -129,6 +129,9 @@ function batchSlot(name = "m.jpg"): PhotoState {
     manual_full_photo: false,
     fingerprint: null,
     rev: 0,
+    // What `processFiles` stamps on a placeholder: the revision this batch
+    // claims the photo at, fixed before any recompute can overtake it.
+    batchRev: 0,
     contentRev: 0,
     pending: true,
     error: null,
