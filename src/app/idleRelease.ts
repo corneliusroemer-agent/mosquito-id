@@ -14,11 +14,11 @@
  * - **The timer runs only while hidden.** Becoming visible cancels a pending
  *   release outright; a tab that flickers between windows must not pay a reload
  *   it did not need.
- * - **A release in flight cancels any restore, and a restore in flight cancels
- *   any release.** Both are async (session teardown is not synchronous), so
- *   without a generation counter a slow release could land after a restore and
- *   free the sessions the restore had just rebuilt. Every state transition bumps
- *   the generation, and work whose generation is stale does nothing.
+ * - **A release never interleaves with a restore, or the reverse.** Both are
+ *   async (session teardown is not synchronous), so without ordering a slow
+ *   release could land after a restore and free the sessions the restore had
+ *   just rebuilt. Every release and restore runs on one serialised chain, so
+ *   whichever was asked for second runs second.
  * - **Busy means no release.** A batch mid-inference is holding canvases and
  *   tensors that a release would pull out from under it. The timer still runs;
  *   if the tab goes visible again first, nothing happens, and if it goes hidden
@@ -95,7 +95,6 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
   }
 
   async function doRelease(waitedMs: number): Promise<void> {
-    const gen = generationOf();
     // Read AFTER the await boundary below would be too late; this read is what
     // keeps a release from starting while a batch is running.
     if (isBusy()) return;
@@ -106,7 +105,15 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
       // rest. The state still says released, because the next inference will
       // rebuild through `restore` either way.
     }
-    if (gen !== generation) return;
+    // The sessions are gone whatever the tab did while this was awaiting, so
+    // this has to be recorded unconditionally. A visibility change bumps the
+    // generation, and bailing out here on a stale one used to discard the
+    // completion of a release that had already destroyed everything: the tab
+    // was left holding no sessions and believing it had never released, so
+    // every later `ensure` returned early and nothing rebuilt it. Only a
+    // reload recovered. Ordering against a concurrent restore is the serialised
+    // chain's job, not this flag's - a restore asked for while this release is
+    // in flight is already queued behind it and will see the flag set.
     isReleased = true;
     opts.onRelease?.({ waitedMs });
   }

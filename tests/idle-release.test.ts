@@ -63,23 +63,6 @@ describe("a release never lands on top of a restore, or the reverse", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("a restore that finishes after a release was requested does not mark the tab released", async () => {
-    let releaseIt: () => void = () => {};
-    const release = vi.fn(() => new Promise<void>((r) => (releaseIt = r)));
-    const restore = vi.fn();
-    const idle = createIdleRelease({ delayMs: 10, release, restore });
-
-    idle.hidden();
-    await vi.advanceTimersByTimeAsync(10);
-    expect(release).toHaveBeenCalledTimes(1);
-
-    // The tab comes back while the release is still in flight.
-    idle.visible();
-    releaseIt();
-
-    expect(idle.released()).toBe(false);
-  });
-
   it("a release requested during a restore still lands", async () => {
     const restore = vi.fn();
     const release = vi.fn();
@@ -264,6 +247,27 @@ describe("a release that is still in flight when the tab comes back", () => {
     };
     return { app, idle, release, restore, releaseIt: () => releaseIt(), inferenceEntryPoint };
   }
+
+  it("counts as released even though the tab came back mid-flight", async () => {
+    let releaseIt: () => void = () => {};
+    const release = vi.fn(() => new Promise<void>((r) => (releaseIt = r)));
+    const restore = vi.fn();
+    const idle = createIdleRelease({ delayMs: 10, release, restore });
+
+    idle.hidden();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(release).toHaveBeenCalledTimes(1);
+
+    // The tab comes back while the release is still in flight. The sessions are
+    // already being taken away, so this has to be recorded: a tab that holds
+    // nothing and thinks it was never released never rebuilds.
+    idle.visible();
+    releaseIt();
+    // The release records itself on the far side of its own await.
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(idle.released()).toBe(true);
+  });
 
   it("still counts as released, so the next inference rebuilds the sessions", async () => {
     const { idle, releaseIt, app, inferenceEntryPoint } = harness();
