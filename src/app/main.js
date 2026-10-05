@@ -266,6 +266,36 @@ let detEP = "wasm";
 let clipEP = "wasm";
 window.modelsReady = false;
 
+// Which model load is current. Bumped by every `loadWebGPUModels` entry, and a
+// load that finds its own generation stale publishes nothing and returns.
+//
+// The idiom is `idleRelease.ts`'s, and for the same reason: a load publishes by
+// assignment (`sessClip`, `EMB`, `window.modelsReady`) after several awaits, and
+// an engine switch re-enters `loadWebGPUModels` without cancelling the call in
+// flight. Two loads then race to the same assignments and the slower one wins,
+// which leaves the app holding a session and a head from the engine the user
+// switched away from while the dropdown and the footer name the new one.
+//
+// A counter rather than an `AbortController` because the work that matters
+// cannot be aborted: onnxruntime-web 1.30.0 exposes no signal on
+// `InferenceSession.create` and none on `run`, so `create` runs to completion
+// whatever we do. What can be stopped is the download, and that is worth doing
+// on its own account (below) - but stopping the fetch does not stop the
+// session, and a cancelled fetch alone would still leave the losing load free
+// to publish. The counter is what closes that.
+let modelLoadGeneration = 0;
+
+/**
+ * The controller for the load in flight, so a switch can stop its download.
+ *
+ * Only the transfer. Nothing downstream observes this: `InferenceSession.create`
+ * takes no signal in this version of the runtime, so the session setup runs to
+ * the end regardless and the generation is what decides whether its result is
+ * allowed to land. A 1.2 GB transfer for an engine the user left is the part
+ * worth not paying for.
+ */
+let modelLoadAbort = null;
+
 // ---- Live gauges for the structural counters ----
 //
 // Registered here rather than read inside `perfCounters.ts`, because both are
@@ -513,6 +543,17 @@ const embedsCache = {};
 const taxonomyCache = {};
 
 async function loadWebGPUModels(engineKey = "webgpu-fp16") {
+  // Claim this load, and cancel the transfer of any load already running. The
+  // switch that got us here did not cancel it, because onnxruntime-web takes no
+  // signal on `InferenceSession.create` and so there is nothing to interrupt
+  // between the bytes and the session; what the abort buys is that the engine
+  // being left stops downloading, and what the generation buys is that its
+  // session cannot publish.
+  const generation = ++modelLoadGeneration;
+  const superseded = () => generation !== modelLoadGeneration;
+  modelLoadAbort?.abort();
+  const abort = new AbortController();
+  modelLoadAbort = abort;
   window.modelsReady = false;
   setProgress("model", "Initializing engine…", null);
 
@@ -580,15 +621,30 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   // 1. Load detector if not loaded
   if (needsDetector) {
     const detPath = resolveModelUrl("yolo11n-mosquito-det-640.onnx");
-    const detBuf = await fetchWithCache(detPath, loadStepProgress("detector", "Detector (YOLO11n)"), sendLog);
+    const detBuf = await fetchWithCache(detPath, loadStepProgress("detector", "Detector (YOLO11n)"), sendLog, undefined, abort.signal);
+    // Built into locals, not straight into `sessDet`: the detector is not
+    // per-engine, so a load that is superseded while this one runs would
+    // otherwise leave the app with a session no load claims to have set up.
+    let detSess = null;
+    let detProvider = "wasm";
     try {
-      sessDet = await ort.InferenceSession.create(detBuf, { executionProviders: ["webgpu"] });
-      detEP = "webgpu";
+      detSess = await ort.InferenceSession.create(detBuf, { executionProviders: ["webgpu"] });
+      detProvider = "webgpu";
     } catch (err) {
       console.warn("WebGPU unavailable for detector, falling back to WASM");
-      sessDet = await ort.InferenceSession.create(detBuf, { executionProviders: ["wasm"] });
-      detEP = "wasm";
+      detSess = await ort.InferenceSession.create(detBuf, { executionProviders: ["wasm"] });
+      detProvider = "wasm";
     }
+    if (superseded()) {
+      // This load has been switched away from. The session it built is not the
+      // one in use, and keeping it would pin a detector for a tab nobody asked
+      // for - which is the wasted memory the issue is about.
+      releaseSession({ sess: detSess });
+      sendLog("model_load_superseded", { engine: engineKey, step: "detector" });
+      return;
+    }
+    sessDet = detSess;
+    detEP = detProvider;
     // Past this the detector can run, which is the only thing that advances the
     // bar's session slice - the download reaching 100% did not earn it.
     completeLoadStep("detector-session");
@@ -596,7 +652,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
 
   // 2. Load BioCLIP model with cache
   if (needsClassifier) {
-    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), loadStepProgress("classifier", clipCfg.name), sendLog);
+    const buf = await fetchWithCache(resolveModelUrl(clipCfg.path), loadStepProgress("classifier", clipCfg.name), sendLog, undefined, abort.signal);
 
     let sess = null;
     let ep = "wasm";
@@ -608,13 +664,27 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
       sess = await ort.InferenceSession.create(buf, { executionProviders: ["wasm"] });
       ep = "wasm";
     }
+    // The check that this issue is about. `InferenceSession.create` above cannot
+    // be interrupted, so this session exists whether or not anyone still wants
+    // it; publishing it is what would leave the app running an engine the user
+    // switched away from. Cached per engine rather than dropped, because a
+    // switch back to this engine is exactly what a user who changed their mind
+    // does next, and re-running `create` on 1.2 GB to rediscover it is not.
     clipSessions[engineKey] = { sess, ep };
+    if (superseded()) {
+      sendLog("model_load_superseded", { engine: engineKey, step: "classifier" });
+      return;
+    }
     sessClip = sess;
     clipEP = ep;
     completeLoadStep("classifier-session");
   } else {
     sessClip = clipSessions[engineKey].sess;
     clipEP = clipSessions[engineKey].ep;
+  }
+  if (superseded()) {
+    sendLog("model_load_superseded", { engine: engineKey, step: "bind" });
+    return;
   }
   loadedClipEngine = engineKey;
 
@@ -636,7 +706,7 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   if (needsEmbeds) {
     // No SHA argument: the default is `COMMIT_SHA`, the SHA this bundle was
     // built from, and that is what makes the head's URL change per deploy.
-    const headBuf = await fetchWithCache(targetEmbedsPath, undefined, sendLog);
+    const headBuf = await fetchWithCache(targetEmbedsPath, undefined, sendLog, undefined, abort.signal);
     const data = JSON.parse(new TextDecoder().decode(headBuf));
     for (const k of ["species_emb", "nuisance_emb"]) {
       data[k] = Float32Array.from(data[k]);
@@ -645,7 +715,15 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     // rest of it. Which embedding coordinate is the probe's intercept is a fact
     // about the artefact and the gate needs it - see Head.biasIndex.
     data.biasIndex = data.bias_index ?? -1;
+    // Cached before the staleness check, and for the same reason the classifier
+    // session is: a head parsed from bytes already paid for is worth keeping for
+    // a switch back, and `embedsCache` is keyed by path so it cannot be mistaken
+    // for another engine's head.
     embedsCache[targetEmbedsPath] = data;
+    if (superseded()) {
+      sendLog("model_load_superseded", { engine: engineKey, step: "embeds" });
+      return;
+    }
     completeLoadStep("embeds");
   }
   // Attached to the head, so every consumer that reads `head.taxonomy` - the
@@ -686,6 +764,14 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     completeLoadStep("taxonomy");
   }
   if (taxonomyCache[targetEmbedsPath]) head.taxonomy = taxonomyCache[targetEmbedsPath];
+  // The last await is behind us - the taxonomy fetch above is it. One check
+  // covers everything below: a supersede that lands from here on cannot, because
+  // there is nothing left to await and this block is synchronous to the end of
+  // the function.
+  if (superseded()) {
+    sendLog("model_load_superseded", { engine: engineKey, step: "head" });
+    return;
+  }
   assertPartition(head);
   EMB = head;
   // Bind the species this head cannot separate to the label helpers. Done where
@@ -706,6 +792,10 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
 
   const deviceLabel = `inference: ${clipCfg.name} (${clipEP.toUpperCase()}) · YOLO11n (${detEP.toUpperCase()})`;
   document.getElementById("footer-device").textContent = deviceLabel;
+  // This load is the current one, so its controller is nobody else's to abort.
+  // Left in place, the next switch would abort a signal that has already done
+  // its work, which is harmless but reads as if it meant something.
+  if (modelLoadAbort === abort) modelLoadAbort = null;
   clearProgress("model");
   window.modelsReady = true;
   // The button was blocked for the whole download; it becomes pressable here.
@@ -775,6 +865,17 @@ async function initEngine() {
       sendLog("engine_switched", { from: currentEngine, to: chosen });
       applyEngineNotices(chosen);
       currentEngine = chosen;
+      // Retire whatever load this switch is abandoning, here rather than inside
+      // `loadWebGPUModels`. Bumping the generation is what stops the abandoned
+      // load publishing its session and head over the engine just selected; the
+      // abort is what stops it downloading an engine nobody is waiting for.
+      //
+      // It has to happen for the `server-gpu` branch too, which starts no load
+      // of its own and so would otherwise leave a webgpu load running to
+      // completion underneath a tab that is now using the server.
+      modelLoadGeneration++;
+      modelLoadAbort?.abort();
+      modelLoadAbort = null;
       // The engine is not usable from this instant: `sessClip` still holds the
       // PREVIOUS engine's session and `EMB` its head until the weights land, so a
       // re-run started now would run the old classifier and commit the result
@@ -807,17 +908,30 @@ async function initEngine() {
         // engine named in the dropdown with the failure on screen, and the
         // re-run button blocked rather than offering to re-run the PREVIOUS
         // engine's classifier under the new one's name.
+        let abandoned = false;
         try {
           await loadWebGPUModels(chosen);
         } catch (err) {
-          console.error("Engine switch failed:", err);
-          engineLoadError = `Could not load ${WEBGPU_MODELS[chosen]?.name || chosen}`;
-          setProgress("model", null, null);
-          setProgressError(`${engineLoadError}: ${err.message}`);
+          // An abort is this switch being overtaken by the next one, not a
+          // failure: reporting it would paint an error for an engine the reader
+          // has already navigated away from, and block the re-run button for the
+          // engine that IS loading.
+          if (isAbortError(err)) {
+            abandoned = true;
+            sendLog("model_load_aborted", { engine: chosen });
+          } else {
+            console.error("Engine switch failed:", err);
+            engineLoadError = `Could not load ${WEBGPU_MODELS[chosen]?.name || chosen}`;
+            setProgress("model", null, null);
+            setProgressError(`${engineLoadError}: ${err.message}`);
+          }
         }
         // The button was disabled for the download either way; what it says now
         // differs, and a failed load leaves it unusable rather than merely slow.
-        updateReprocessButton();
+        // Skipped when this load was overtaken: the load now in flight owns the
+        // button, and drawing it here would read the current engine's readiness
+        // on behalf of a load that has already given up.
+        if (!abandoned) updateReprocessButton();
       }
     });
   }
@@ -3133,6 +3247,29 @@ async function revertToFullPhoto(idx) {
 // counter that stops a slow release landing after a restore, and the busy check
 // that keeps a release out of a running batch - live in `idleRelease.ts` and are
 // tested there. This is the wiring.
+
+/**
+ * Was this rejection the load being abandoned rather than the load failing?
+ *
+ * `fetch` rejects an aborted request with a `DOMException` named `AbortError`,
+ * which is what makes an engine switch distinguishable from an engine whose
+ * weights could not be fetched. Named rather than `instanceof DOMException`,
+ * because a page can be reached in a context where the constructor is not the
+ * one the request threw.
+ */
+function isAbortError(err) {
+  return !!err && typeof err === "object" && err.name === "AbortError";
+}
+
+// A session that will not release is not a reason to keep the others: some
+// execution providers have no release at all.
+function releaseSession(entry) {
+  try {
+    entry?.sess?.release?.();
+  } catch (err) {
+    console.warn("Session release failed:", err);
+  }
+}
 
 async function releaseIdleMemory() {
   const sessions = Object.values(clipSessions);
