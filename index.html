@@ -890,6 +890,10 @@
        without this it drags the whole page 160px sideways. */
     .engine-control-box { width: 100%; max-width: 100%; }
     #engine-select { flex: 1 1 auto; min-width: 0; width: 100%; max-width: 100%; }
+    /* A pass blocks the selector, and the pointer cursor is set inline, so the
+       override needs the weight: a disabled control that still offers a pointer
+       invites a click it will not take. Same rule as R4.7's checkbox. */
+    #engine-select:disabled { cursor: not-allowed !important; }
     /* The re-run button's space is reserved on a phone as it is on a desktop,
        and the full-width <select> is what gives: at `.btn-sm`'s mobile padding
        the button takes 90px off a 390px row, so it drops to the icon alone and
@@ -1179,6 +1183,7 @@
             <label>Method</label>
             <div class="radio-group" id="pooling-methods">
               <label><input type="radio" name="pooling-method" value="Dependent evidence" checked> Dependent evidence</label>
+              <label><input type="radio" name="pooling-method" value="Fitted correlation"> Fitted correlation (ρ from the engine)</label>
               <label><input type="radio" name="pooling-method" value="Accumulate evidence"> Accumulate evidence</label>
               <label><input type="radio" name="pooling-method" value="Weight by lead"> Weight by lead</label>
               <label><input type="radio" name="pooling-method" value="Equal weight"> Equal weight</label>
@@ -1189,6 +1194,7 @@
             <input type="range" id="corr-slider" min="0" max="1" step="0.05" value="0.5" style="width:100%;">
           </div>
           <p class="option-hint">Dependent evidence sums species logits, counts identical crops once, then divides by 1 + (n − 1) × assumed correlation. Scores are relative model affinities.</p>
+          <p class="option-hint" id="pooling-note" hidden></p>
           <div class="contribution-table-wrap">
             <table class="data-table" id="contribution-table">
               <thead><tr><th>Photo</th><th style="text-align:right">Share (%)</th></tr></thead>

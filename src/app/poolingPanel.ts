@@ -16,8 +16,9 @@
 // pooledVerdict is imported under a distinct name: updatePooling has a local
 // variable of the same name holding its RESULT.
 import { aggregateAdjacent, aggregateLogits, pooledCandidates, pooledVerdict as pooledVerdictOf,
-         poolingWeights, splitPoolable } from "../confidence/pooling";
+         poolingWeights, splitPoolable, FITTED_RHO_METHOD } from "../confidence/pooling";
 import type { PoolablePhoto, PooledCandidate, PoolingMethod } from "../confidence/pooling";
+import { poolRhoFor } from "./modelConfig";
 import type { Head } from "../confidence/types";
 import { genusOf } from "../confidence/genus";
 import { escapeHtml, speciesLabelHtml } from "./speciesLabels";
@@ -60,12 +61,17 @@ export function pooledRows(head: Head, aggLogits: Record<string, number>): Poole
 }
 
 // ---- Pooling / Evidence Aggregation ----
-export function updatePooling(head: Head, previews: PoolablePhoto[], includedIndices: Iterable<number>): void {
+export function updatePooling(head: Head, previews: PoolablePhoto[], includedIndices: Iterable<number>, engineKey: string | null = null): void {
   const poolScores = document.getElementById("combined-scores");
   if (!poolScores) throw new Error("#combined-scores is missing from the page");
   const contribTable = document.getElementById("contribution-table")?.querySelector("tbody");
   if (!contribTable) throw new Error("#contribution-table has no tbody");
   const summary = document.getElementById("inclusion-summary");
+  // Says which correlation the pool actually used, when the fitted method was
+  // selected but no value is fitted for this engine. Absent from the DOM in a
+  // page that predates it, hence the optional chain: a missing note is a missing
+  // sentence, not a broken pooled card.
+  const noteMethod = document.getElementById("pooling-note") as HTMLElement | null;
 
   // An index the strip wrote that no longer names a photo is dropped here, and the
   // drop is counted rather than swallowed. The strip re-validates the set on every
@@ -115,15 +121,38 @@ export function updatePooling(head: Head, previews: PoolablePhoto[], includedInd
 
   // Both are the pooling controls in index.html: a radio and a range input.
   const rawMethod = (document.querySelector('input[name="pooling-method"]:checked') as HTMLInputElement | null)?.value;
-  // The radios in index.html offer exactly these four; anything else (a stale
-  // saved preference, a hand-edited DOM) falls back rather than pooling by a
-  // method the arithmetic has no case for.
-  const METHODS: readonly PoolingMethod[] = ["Equal weight", "Weight by lead", "Accumulate evidence", "Dependent evidence"];
+  // The radios in index.html offer exactly these; anything else (a stale saved
+  // preference, a hand-edited DOM) falls back rather than pooling by a method the
+  // arithmetic has no case for.
+  const METHODS: readonly PoolingMethod[] = ["Equal weight", "Weight by lead", "Accumulate evidence", "Dependent evidence", FITTED_RHO_METHOD];
   const selectedMethod: PoolingMethod = (METHODS as readonly string[]).includes(rawMethod ?? "")
     ? (rawMethod as PoolingMethod)
     : "Dependent evidence";
+
+  // The correlation factor. The slider is the fallback and the only source for
+  // every method that takes a user-chosen `r`; the fitted method ignores it and
+  // reads the engine's own value instead, which is the point of that method.
+  //
+  // An engine with no fitted rho falls back to the SLIDER rather than to H/14's
+  // 0.752: rho is how much one photograph of a specimen repeats another on that
+  // engine, and borrowing another engine's number would be a claim nobody
+  // measured. The card says which value it used, because "Fitted correlation"
+  // silently pooling at the slider's number would be indistinguishable from it
+  // working.
   const slider = document.getElementById("corr-slider") as HTMLInputElement | null;
-  const r = parseFloat(slider?.value ?? "") || 0.5;
+  const sliderRho = parseFloat(slider?.value ?? "") || 0.5;
+  const fittedRho = engineKey ? poolRhoFor(engineKey) : null;
+  const usingFitted = selectedMethod === FITTED_RHO_METHOD && fittedRho !== null;
+  const r = usingFitted ? fittedRho : sliderRho;
+  if (noteMethod) {
+    if (selectedMethod === FITTED_RHO_METHOD && !usingFitted) {
+      noteMethod.textContent =
+        `No correlation is fitted for this engine, so this pool uses the slider's ${sliderRho.toFixed(2)}.`;
+      noteMethod.hidden = false;
+    } else {
+      noteMethod.hidden = true;
+    }
+  }
 
   const weights = poolingWeights(included, selectedMethod, r);
 
