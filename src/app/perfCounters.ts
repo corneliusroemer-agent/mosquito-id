@@ -147,12 +147,17 @@ export function withRenderScope<T>(name: string, fn: () => T): T {
  * A provider rather than a read of app state, because this module holds no
  * reference to the gallery and the counting rule (what counts as full
  * resolution) belongs to whoever owns the frames.
+ *
+ * `null` unregisters. The gauges are module-level state, so a test that
+ * registers one leaks it to every later test in the process - and a leaked
+ * provider makes "reports null before anything registered" pass or fail
+ * depending on which file ran first.
  */
-export function registerFullResSource(fn: () => number): void {
+export function registerFullResSource(fn: (() => number) | null): void {
   fullResSource = fn;
 }
 
-export function registerOrtSessionSource(fn: () => number): void {
+export function registerOrtSessionSource(fn: (() => number) | null): void {
   ortSessionSource = fn;
 }
 
@@ -220,19 +225,24 @@ export function resetCounters(): void {
 // ---- The layout probe ----
 
 /**
- * The layout-reading properties the probe wraps.
+ * The layout-reading properties the probe wraps, by name.
+ *
+ * Names rather than the properties themselves, because `Element.prototype` at
+ * module scope throws in the unit-test environment: vitest runs `environment:
+ * "node"` and there is no `Element` there. Resolved inside `armLayoutCounters`,
+ * which only ever runs in a browser.
  *
  * The whole family, not `getBoundingClientRect` alone: they all force a
  * synchronous layout of the document, so a regression that swapped one for
  * another would be invisible to a rect-only counter.
  */
-const LAYOUT_PROPS = [
-  [Element.prototype, "clientWidth"],
-  [Element.prototype, "clientHeight"],
-  [Element.prototype, "scrollWidth"],
-  [Element.prototype, "scrollHeight"],
-  [Element.prototype, "offsetWidth"],
-  [Element.prototype, "offsetHeight"],
+const LAYOUT_PROP_NAMES = [
+  "clientWidth",
+  "clientHeight",
+  "scrollWidth",
+  "scrollHeight",
+  "offsetWidth",
+  "offsetHeight",
 ] as const;
 
 type PatchedGetter = () => unknown;
@@ -260,6 +270,7 @@ let armed = false;
  */
 export function armLayoutCounters(): void {
   if (armed) return;
+  if (typeof Element === "undefined") return;
   armed = true;
 
   const rect = Element.prototype.getBoundingClientRect;
@@ -273,18 +284,18 @@ export function armLayoutCounters(): void {
     descriptor: Object.getOwnPropertyDescriptor(Element.prototype, "getBoundingClientRect")!,
   });
 
-  for (const [target, prop] of LAYOUT_PROPS) {
-    const descriptor = Object.getOwnPropertyDescriptor(target, prop);
+  for (const prop of LAYOUT_PROP_NAMES) {
+    const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, prop);
     const original = descriptor?.get;
     if (!original) continue;
-    Object.defineProperty(target, prop, {
+    Object.defineProperty(Element.prototype, prop, {
       configurable: true,
       get(this: unknown) {
         noteForcedLayout();
         return (original as PatchedGetter).call(this);
       },
     });
-    restores.push({ target, prop, descriptor });
+    restores.push({ target: Element.prototype, prop, descriptor });
   }
 }
 
