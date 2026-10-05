@@ -430,18 +430,63 @@ describe("main.js gates ensure() on needsEnsure(), not on released()", () => {
     expect(gated.map((m) => m[0])).toEqual([]);
   });
 
-  it("still guards each of the four entry points on needsEnsure()", () => {
+  it("still guards each of the six entry points on needsEnsure()", () => {
     // The guard stays, on the predicate that is true mid-release as well as
     // after one. Awaiting `ensure` unconditionally would cost a microtask on
     // every call, which is enough for another writer of the progress slot to
     // land first and replace the message the reader was waiting for.
     const guarded = [...source.matchAll(/if\s*\(\s*idleRelease\.needsEnsure\(\)\s*\)\s*await\s*idleRelease\.ensure\(\)/g)];
-    expect(guarded).toHaveLength(4);
+    expect(guarded).toHaveLength(6);
   });
 
   it("does not await ensure() at all", () => {
     const unguarded = [...source.matchAll(/^\s*await idleRelease\.ensure\(\);$/gm)];
     expect(unguarded.map((m) => m[0])).toEqual([]);
+  });
+});
+
+// The two paths the count above counts are the ones with no `processFiles`-
+// shaped entry point to inherit a guard from: each is a UI callback that
+// reaches inference on its own, and each was missed by #108. Scoped per
+// function so that removing either guard fails here, and not only in a total
+// nobody reads.
+describe("every main.js path that infers rebuilds a released session first", () => {
+  const source = readFileSync(join(root, "src", "app", "main.js"), "utf8");
+  const GUARD = "if (idleRelease.needsEnsure()) await idleRelease.ensure();";
+
+  // A top-level `function name() { ... }` (or `async function`) up to its
+  // closing brace in column 0.
+  const bodyOf = (name: string): string => {
+    const starts = [`\nasync function ${name}(`, `\nfunction ${name}(`].map((p) => source.indexOf(p));
+    const start = Math.max(...starts);
+    expect(start, `${name} not found in main.js`).toBeGreaterThan(-1);
+    const rest = source.slice(start + 1);
+    const end = rest.indexOf("\n}\n");
+    expect(end, `no closing brace for ${name}`).toBeGreaterThan(-1);
+    return rest.slice(0, end);
+  };
+
+  const guardIndex = (body: string): number => {
+    const i = body.indexOf(GUARD);
+    expect(i, `no idleRelease guard in:\n${body.slice(0, 400)}`).toBeGreaterThan(-1);
+    return i;
+  };
+
+  it("the whole-frame toggle rebuilds before it requests the re-classify pass", () => {
+    const body = bodyOf("wireWholeFrameToggle");
+    // `request()` is what runs the pass, so a guard after it would be too late.
+    expect(guardIndex(body)).toBeLessThan(body.indexOf("reclassifyRunner.request()"));
+  });
+
+  it("the whole-frame change handler is async, so its guard is actually awaited", () => {
+    expect(bodyOf("wireWholeFrameToggle")).toContain('box.addEventListener("change", async () => {');
+  });
+
+  it("revert-to-full-photo rebuilds before it classifies", () => {
+    const body = bodyOf("revertToFullPhoto");
+    // `classifyViews` is the inference, and `beginRecompute` above it bumps the
+    // content revision, so the view cache cannot answer this call either.
+    expect(guardIndex(body)).toBeLessThan(body.indexOf("classifyViews("));
   });
 });
 
