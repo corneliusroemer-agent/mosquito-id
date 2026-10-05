@@ -55,6 +55,19 @@ export interface IdleRelease {
   /** True once a release has completed and no restore has been asked for. */
   released(): boolean;
   /**
+   * True when there is something for `ensure` to wait for or do: a release is
+   * running, or one completed and no restore has been asked for.
+   *
+   * This, not `released()`, is what an inference entry point should read before
+   * awaiting. `released()` is false for the whole duration of a release, so
+   * gating on it skips `ensure` exactly when the wait matters. Gating on
+   * nothing costs a microtask on every call, because `ensure` is async and
+   * awaiting it suspends even when it returns without doing anything - which is
+   * enough to let another writer of the progress slot land first and replace the
+   * message the reader was waiting for.
+   */
+  needsEnsure(): boolean;
+  /**
    * Make the expensive state exist again if it was released. Safe to call on
    * every inference: it does nothing when nothing was released.
    */
@@ -171,6 +184,9 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
     },
     released(): boolean {
       return isReleased;
+    },
+    needsEnsure(): boolean {
+      return pending > 0 || isReleased;
     },
     async ensure(): Promise<void> {
       // Wait for a release that is already under way rather than reading

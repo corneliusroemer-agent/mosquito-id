@@ -420,18 +420,61 @@ describe("the app's call sites, not just ensure()", () => {
   });
 });
 
-describe("main.js calls ensure() without gating on the flag", () => {
+describe("main.js gates ensure() on needsEnsure(), not on released()", () => {
   const source = readFileSync(join(root, "src", "app", "main.js"), "utf8");
 
-  it("no call site reads released() on the way into ensure()", () => {
-    // Every inference entry point has to reach `ensure()` while a release is
-    // still running, which is exactly when `released()` is false.
+  it("no call site gates on the flag", () => {
+    // Gating on `released()` skips `ensure` exactly when the wait matters: the
+    // flag is false for the whole duration of a release.
     const gated = [...source.matchAll(/if\s*\(\s*idleRelease\.released\(\)\s*\)\s*await\s*idleRelease\.ensure\(\)/g)];
     expect(gated.map((m) => m[0])).toEqual([]);
   });
 
-  it("still calls ensure() at each of the four entry points", () => {
-    expect([...source.matchAll(/await idleRelease\.ensure\(\)/g)]).toHaveLength(4);
+  it("still guards each of the four entry points on needsEnsure()", () => {
+    // The guard stays, on the predicate that is true mid-release as well as
+    // after one. Awaiting `ensure` unconditionally would cost a microtask on
+    // every call, which is enough for another writer of the progress slot to
+    // land first and replace the message the reader was waiting for.
+    const guarded = [...source.matchAll(/if\s*\(\s*idleRelease\.needsEnsure\(\)\s*\)\s*await\s*idleRelease\.ensure\(\)/g)];
+    expect(guarded).toHaveLength(4);
+  });
+
+  it("does not await ensure() at all", () => {
+    const unguarded = [...source.matchAll(/^\s*await idleRelease\.ensure\(\);$/gm)];
+    expect(unguarded.map((m) => m[0])).toEqual([]);
+  });
+});
+
+describe("needsEnsure() is the guard that survives a release in flight", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("is true while a release is running, which released() is not", async () => {
+    let finishRelease: () => void = () => {};
+    const idle = createIdleRelease({
+      delayMs: 1,
+      release: () => new Promise<void>((r) => (finishRelease = r)),
+      restore: vi.fn(),
+    });
+
+    idle.hidden();
+    await vi.advanceTimersByTimeAsync(1);
+    // Mid-release: the flag is still false, so the old guard skipped the wait.
+    expect(idle.released()).toBe(false);
+    expect(idle.needsEnsure()).toBe(true);
+
+    finishRelease();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(idle.needsEnsure()).toBe(true);
+  });
+
+  it("is false on a tab that never released, so nothing is awaited", async () => {
+    const restore = vi.fn();
+    const idle = createIdleRelease({ delayMs: 1, release: vi.fn(), restore });
+    await idle.releaseNow();
+    // A restore cleared it, so the hot path is back to awaiting nothing.
+    await idle.ensure();
+    expect(idle.needsEnsure()).toBe(false);
   });
 });
 
