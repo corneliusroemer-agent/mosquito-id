@@ -32,6 +32,7 @@ import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTO
 import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
+import { photoObjectUrl, releasePhotoUrl } from "./photoUrl";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
@@ -748,7 +749,7 @@ async function reprocessLoadedPhotos() {
     // `processFiles` prepends to whatever is already there. Its own
     // `shiftIncludedForPrepend` then moves `kept`'s checks down by the batch's
     // length, which is the same arithmetic a drop over a populated gallery does.
-    previews.forEach((p) => { if (!kept.includes(p)) p.removed = true; });
+    previews.forEach((p) => { if (!kept.includes(p)) { p.removed = true; releasePhotoUrl(p); } });
     previews = [...kept];
 
     // The already-cropped photos are marked pending for the whole re-run, not
@@ -1420,6 +1421,7 @@ function deletePhoto(idx) {
   sendLog("delete_photo", { idx, name: deletedName });
   // Any computation still running for this photo now has nothing to write to.
   deleted.removed = true;
+  releasePhotoUrl(deleted);
   previews.splice(idx, 1);
   includedIndices = shiftIncluded(includedIndices, idx);
   // Follow the photo, not the index. Deleting anything before the selected photo
@@ -1683,7 +1685,7 @@ function deleteAllPhotos() {
   // cautious.
   // Mark first, exactly as deletePhoto does, so every in-flight inference for any
   // photo drops its result rather than writing into a slot that no longer exists.
-  previews.forEach((p) => { p.removed = true; });
+  previews.forEach((p) => { p.removed = true; releasePhotoUrl(p); });
   previews.length = 0;
   includedIndices = new Set();
   selectedIndex = 0;
@@ -1909,7 +1911,9 @@ function renderActivePhoto() {
   // image rather than leaving a broken-icon with alt text over an empty panel;
   // the pending notice beside it says what is happening.
   if (p.fullCanvas) {
-    setImgSrc(fullImg, canvasUrl(p.fullCanvas, 0.9));
+    // The original bytes by object URL; a photo with no File falls back to an
+    // encode of its canvas.
+    setImgSrc(fullImg, photoObjectUrl(p) ?? canvasUrl(p.fullCanvas, 0.9));
     fullImg.style.visibility = "visible";
   } else {
     fullImg.removeAttribute("src");
@@ -1940,7 +1944,7 @@ function renderActivePhoto() {
   if (zoomSource) {
     surfaceZoomed.style.width = "100%";
     surfaceZoomed.style.height = "100%";
-    setImgSrc(contextImg, canvasUrl(zoomSource, 0.9));
+    setImgSrc(contextImg, (zoomSource === p.fullCanvas && photoObjectUrl(p)) || canvasUrl(zoomSource, 0.9));
     contextImg.style.display = "block";
     contextImg.style.width = "100%";
     contextImg.style.height = "100%";
