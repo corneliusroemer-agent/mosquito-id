@@ -21,7 +21,7 @@ import { genusOf } from "../confidence/genus";
 import type { Head, VerdictState, ViewResult } from "../confidence/types";
 import type { FusedResult } from "../confidence/fuseViews";
 import { cosineOffsetsFor } from "./modelConfig";
-import { viewKinds } from "./viewSelection";
+import { viewKinds, type ViewKind } from "./viewSelection";
 import type { PhotoState } from "./photoRecord";
 
 /** A box in [x1, y1, x2, y2] pixel coordinates. */
@@ -31,6 +31,15 @@ export type Box = [number, number, number, number];
 export interface ViewRequest {
   canvas: HTMLCanvasElement | null;
   box: Box | null;
+  /**
+   * Which view this is.
+   *
+   * Carried on the request rather than inferred by the caller from the canvas
+   * identity, because the photo record's view cache is keyed by kind and a
+   * caller that had to work it out again would be a second implementation of the
+   * decision `viewKinds` just made.
+   */
+  kind: ViewKind;
 }
 
 /**
@@ -57,9 +66,9 @@ export function viewsFor(
 ): ViewRequest[] {
   const full = p.fullCanvas;
   if (!full) return [];
-  const whole: ViewRequest = { canvas: full, box: [0, 0, full.width, full.height] };
+  const whole: ViewRequest = { canvas: full, box: [0, 0, full.width, full.height], kind: "whole" };
   return viewKinds(Boolean(cropCv) && cropCv !== full, includeWholeFrame).map((kind) =>
-    kind === "crop" ? { canvas: cropCv, box: cropBox } : whole,
+    kind === "crop" ? { canvas: cropCv, box: cropBox, kind } : whole,
   );
 }
 
