@@ -73,6 +73,30 @@ function localCallExpr(): string {
 }
 
 /**
+ * `inferSlot`'s own capture of the revision it will guard on, read out of
+ * `main.js` and evaluated against a photo.
+ *
+ * Evaluated rather than reimplemented for the same reason `localCallExpr` is:
+ * the capture is half the guard, and a copy of it here would say nothing about
+ * what `main.js` reads. Evaluating the real expression at the point in the
+ * timeline the test needs it read is what distinguishes a crop released *before*
+ * the inference began from one released during it - the two differ only in when
+ * this line runs relative to `beginRecompute`.
+ *
+ * Searched in the comment-stripped source, so the prose above the capture (which
+ * discusses revisions at length) cannot be mistaken for the capture itself.
+ */
+function startRevOn(slot: PhotoState): number {
+  const infer = stripComments(main.slice(main.indexOf("async function inferSlot")));
+  const at = infer.indexOf("const startRev = ");
+  if (at < 0) throw new Error("inferSlot's startRev capture not found in main.js");
+  const semi = infer.indexOf(";", at);
+  const expr = infer.slice(at + "const startRev = ".length, semi);
+  // eslint-disable-next-line no-new-func
+  return new Function("slot", `return ${expr};`)(slot);
+}
+
+/**
  * `main.js` with comments blanked out, positions preserved.
  *
  * `inferSlot` documents its own suspension points, so a search for `await ` over
@@ -105,6 +129,7 @@ function batchSlot(name = "m.jpg"): PhotoState {
     manual_full_photo: false,
     fingerprint: null,
     rev: 0,
+    contentRev: 0,
     pending: true,
     error: null,
     agreement: null,
@@ -124,36 +149,24 @@ function canvas(id: string) {
 const CROP_BOX: [number, number, number, number] = [40, 30, 300, 260];
 const DETECTOR_BOX: [number, number, number, number] = [0, 0, 800, 600];
 
-/**
- * The whole race, driven through the real guard.
- *
- * Returns the photo after the batch result has landed and the crop's own
- * classification has had its chance to commit.
- */
-function runRace() {
-  const slot = batchSlot();
-  const previews = [slot];
-  const logs: { event: string; fields: unknown }[] = [];
-  const commitBatchSlot = loadCommitBatchSlot(previews, logs);
-
-  // The batch's inference starts here, and reads the photo's revision.
-  const startRev = slot.rev;
-
-  // ...which is where the user releases a crop on it. `beginRecompute` is the
-  // whole of the interference: it bumps `rev` and marks the photo pending.
-  const cropRev = beginRecompute(slot);
-  const cropCv = canvas("user-crop");
-  slot.cropCanvas = cropCv;
+/** The crop release, as `main.js` performs it: geometry now, model after. */
+function releaseCrop(slot: PhotoState): number {
+  const rev = beginRecompute(slot);
+  slot.cropCanvas = canvas("user-crop");
   slot.contextCanvas = canvas("user-context");
   slot.cropBox = CROP_BOX;
   slot.contextBox = CROP_BOX;
   slot.is_cropped = true;
   slot.status = "manual crop: 260x230px";
+  return rev;
+}
 
-  // The batch's inference lands, with the detector's own geometry and the base
-  // literal's `rev: 0`, and is handed to the guard exactly as `inferSlot`
-  // hands it over.
-  const res = {
+/**
+ * The batch's own result for this photo: the detector's geometry, the base
+ * literal's `rev: 0`, and the detector's scores.
+ */
+function detectorResult(slot: PhotoState) {
+  return {
     name: slot.name,
     cropBox: DETECTOR_BOX,
     contextBox: DETECTOR_BOX,
@@ -166,12 +179,13 @@ function runRace() {
     status: "auto",
     rev: 0,
   };
-  const slots = [slot];
-  // eslint-disable-next-line no-new-func
-  new Function("commitBatchSlot", "slots", "i", "startRev", "res", `return commitBatchSlot(${localCallExpr()});` )(commitBatchSlot, slots, 0, startRev, res);
+}
 
-  // The crop's own inference now checks whether it still owns the photo, which
-  // is the check the rewound revision used to fail.
+/**
+ * The crop's own classification landing, and the check that decides whether it
+ * is allowed to.
+ */
+function commitCrop(slot: PhotoState, previews: PhotoState[], cropRev: number) {
   const stillOwns = ownsRecompute(slot, previews, 0, cropRev);
   if (stillOwns) {
     commitScores(
@@ -194,7 +208,82 @@ function runRace() {
       "webgpu-fp16",
     );
   }
-  return { slot, logs, cropRev, stillOwns };
+  return stillOwns;
+}
+
+/** Hand a result to the real `commitBatchSlot`, as `inferSlot` does. */
+function commit(
+  commitBatchSlot: (slot: PhotoState, startRev: number, res: unknown) => void,
+  slot: PhotoState,
+  startRev: number,
+  res: unknown,
+) {
+  const slots = [slot];
+  // eslint-disable-next-line no-new-func
+  new Function("commitBatchSlot", "slots", "i", "startRev", "res", `return commitBatchSlot(${localCallExpr()});`)(commitBatchSlot, slots, 0, startRev, res);
+}
+
+/**
+ * The race as PR #111 modelled it: the crop is released while the batch's
+ * inference is in flight, so the capture has already happened.
+ *
+ * Returns the photo after the batch result has landed and the crop's own
+ * classification has had its chance to commit.
+ */
+function runRace() {
+  const slot = batchSlot();
+  const previews = [slot];
+  const logs: { event: string; fields: unknown }[] = [];
+  const commitBatchSlot = loadCommitBatchSlot(previews, logs);
+
+  // The batch's inference starts here, and reads the photo's revision.
+  const startRev = startRevOn(slot);
+
+  // ...which is where the user releases a crop on it. `beginRecompute` is the
+  // whole of the interference: it bumps `rev` and marks the photo pending.
+  const cropRev = releaseCrop(slot);
+
+  commit(commitBatchSlot, slot, startRev, detectorResult(slot));
+  const stillOwns = commitCrop(slot, previews, cropRev);
+  return { slot, logs, cropRev, stillOwns, startRev };
+}
+
+/**
+ * The same race one step earlier: the crop is released after the photo's decode
+ * finishes and before its own inference begins.
+ *
+ * This ordering needs nothing unusual. `decodeStage` runs concurrently with the
+ * serial inference loop and records each photo's dimensions and display canvas
+ * as it decodes, so a photo is fully draggable from the moment its decode lands
+ * - and nothing checks `isProcessingBatch` at any of the crop surface's sites.
+ * A photo late in the queue is therefore on screen and grabbable for as long as
+ * the whole batch takes to work through the ones before it.
+ *
+ * The distinction from `runRace` is only WHEN `inferSlot`'s capture runs, and
+ * that is the whole of the bug: a capture of `slot.rev` taken here reads the
+ * revision the crop already installed, so the guard compares the photo against
+ * itself, passes, and the detector's box goes back over the crop.
+ */
+function runEarlyCropRace() {
+  const slot = batchSlot();
+  const previews = [slot];
+  const logs: { event: string; fields: unknown }[] = [];
+  const commitBatchSlot = loadCommitBatchSlot(previews, logs);
+
+  // Decode has landed: the tile is the real photograph and is draggable, and
+  // the batch is nowhere near this photo's inference yet.
+  slot.displayCanvas = canvas("display");
+  slot.status = "decoding… detecting…";
+
+  // The user crops it now.
+  const cropRev = releaseCrop(slot);
+
+  // Only now does this photo's inference begin, and read the revision.
+  const startRev = startRevOn(slot);
+
+  commit(commitBatchSlot, slot, startRev, detectorResult(slot));
+  const stillOwns = commitCrop(slot, previews, cropRev);
+  return { slot, logs, cropRev, stillOwns, startRev };
 }
 
 describe("a batch result overtaken by a crop release", () => {
@@ -242,7 +331,7 @@ describe("a batch result overtaken by a crop release", () => {
     // The capture has to be ahead of the first suspension point, or it is the
     // same reading taken too late to mean anything.
     const infer = main.slice(main.indexOf("async function inferSlot"));
-    const capture = infer.indexOf("const startRev = slot.rev;");
+    const capture = infer.indexOf("const startRev = ");
     expect(capture).toBeGreaterThan(-1);
     // Comments talk about awaits, so the comparison is made on the code with
     // them stripped: what matters is the first suspension point, not the first
@@ -252,6 +341,97 @@ describe("a batch result overtaken by a crop release", () => {
     expect(capture, "the revision is read after an await, so it can already have moved").toBeLessThan(firstAwait);
     // Both call sites, or the server path keeps the unguarded commit.
     expect(main.match(/commitBatchSlot\(slots\[i\], startRev,/g)).toHaveLength(2);
+  });
+});
+
+describe("a batch result for a photo cropped before its inference began", () => {
+  // The capture `inferSlot` takes is the revision the batch CLAIMED the photo
+  // at, which is the one the slot was born with - not a live reading of `rev`
+  // taken when this photo's turn to be inferred arrives. Everything between
+  // those two moments is a suspension point `processFiles` does not own: the
+  // decode of every later photo, and the whole of every earlier photo's
+  // inference. A crop released in that gap is already on the record when the
+  // capture runs, so a capture of `slot.rev` reads the crop's own revision and
+  // the guard compares the photo against itself.
+  it("guards on the revision the batch claimed, not on a live reading of rev", () => {
+    // Stated on a photo carrying a revision, so the two cannot be confused: a
+    // capture of `slot.rev` returns 1 here, and the guard it feeds passes.
+    const claimed = { ...batchSlot(), rev: 7 } as PhotoState;
+    expect(startRevOn(claimed), "the capture reads the photo's current revision rather than the one the batch claimed").not.toBe(7);
+  });
+
+  it("leaves the crop the user drew in place", () => {
+    const { slot } = runEarlyCropRace();
+    expect(slot.cropBox, "the batch result repainted the detector's box over the crop").toEqual(CROP_BOX);
+    expect(slot.is_cropped).toBe(true);
+  });
+
+  it("leaves the crop's own pixels and its context in place", () => {
+    const { slot } = runEarlyCropRace();
+    expect((slot.cropCanvas as unknown as { id: string }).id).toBe("user-crop");
+    expect((slot.contextCanvas as unknown as { id: string }).id).toBe("user-context");
+  });
+
+  it("keeps the detector's scores off the photo", () => {
+    const { slot, stillOwns } = runEarlyCropRace();
+    expect(stillOwns, "the crop lost ownsRecompute, so its result was thrown away").toBe(true);
+    expect(slot.scores).toEqual({ anopheles: 0.62 });
+  });
+
+  it("says it dropped a result, with both revisions in the log", () => {
+    const { logs } = runEarlyCropRace();
+    const dropped = logs.find((l) => l.event === "batch_slot_superseded");
+    expect(dropped, "the dropped result was not reported").toBeDefined();
+    expect(dropped!.fields).toMatchObject({ name: "m.jpg", rev: 0, currentRev: 1 });
+  });
+});
+
+describe("the revision a batch result carries", () => {
+  it("does not rewind the counter, so a later release cannot be issued the same number", () => {
+    // The second consequence, and the reason it matters beyond this photo's
+    // crop reverting. `beginRecompute` allocates from the current value, so a
+    // write of the batch payload's own `rev: 0` moves the counter BACKWARDS:
+    //
+    //   crop A   beginRecompute -> 1   (A's inference is in flight)
+    //   batch    commits, writes rev: 0
+    //   crop B   beginRecompute -> 1   (the same number A already holds)
+    //   crop A   returns, ownsRecompute(p, ..., 1) is TRUE -> stale scores land
+    //
+    // Every consumer of `rev` assumes strict monotonicity and none of them
+    // defends against reuse, so a reissued number is indistinguishable from a
+    // current one. Asserted as monotonicity rather than as the symptom, because
+    // the symptom needs three cooperating bugs to show up on screen.
+    const slot = batchSlot();
+    const previews = [slot];
+    const logs: { event: string; fields: unknown }[] = [];
+    const commitBatchSlot = loadCommitBatchSlot(previews, logs);
+
+    const cropARev = releaseCrop(slot);
+    // The batch's result for the photo the user cropped before its turn came up.
+    // It is handed the revision it would have captured had it captured honestly,
+    // so the guard is not what stops this write.
+    commit(commitBatchSlot, slot, cropARev, detectorResult(slot));
+
+    const cropBRev = releaseCrop(slot);
+    expect(cropBRev, "the counter went backwards, so a release already in flight was issued this same revision").toBeGreaterThan(cropARev);
+    // And the consequence, stated directly: crop A must not still own the photo.
+    expect(ownsRecompute(slot, previews, 0, cropARev), "a superseded release still owns the photo").toBe(false);
+  });
+
+  it("leaves the photo's revision alone entirely", () => {
+    // The batch result is a set of fields to apply, not a claim on the
+    // counter. `classifyImage`'s base literal carries `rev: 0` because it
+    // builds a whole record, and `Object.assign` was copying that field onto a
+    // record that already had a revision - the only writer of `rev` that was
+    // not `beginRecompute`.
+    const slot = batchSlot();
+    const previews = [slot];
+    const logs: { event: string; fields: unknown }[] = [];
+    const commitBatchSlot = loadCommitBatchSlot(previews, logs);
+
+    const cropRev = releaseCrop(slot);
+    commit(commitBatchSlot, slot, cropRev, detectorResult(slot));
+    expect(slot.rev, "the batch result wrote a revision of its own").toBe(cropRev);
   });
 });
 
