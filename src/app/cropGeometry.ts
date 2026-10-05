@@ -169,8 +169,10 @@ export function squareDragBox(
   const [cx, cy] = surfacePointToFrame(cur, img, mapping);
   const mx = (sx + cx) / 2;
   const my = (sy + cy) / 2;
-  // Half the larger separation gives a full side of twice it, so the cursor ends
-  // up exactly on the edge of the square along whichever axis is leading.
+  // The side is the cursor's LARGER separation - not twice it. Half of it, taken
+  // about the midpoint, spans from halfway back towards the drag's start to
+  // halfway forward, so the cursor lands exactly on the leading edge. Doubling
+  // the separation here instead would overshoot the pointer by half a box.
   const half = Math.max(Math.abs(cx - sx), Math.abs(cy - sy)) / 2;
   const [x1, y1] = [mx - half, my - half];
   return squareBox([x1, y1, x1 + half * 2, y1 + half * 2]);
@@ -181,16 +183,41 @@ export function squareDragBox(
 // however it is shaped - squaring must not turn a stray click into a 1x1 crop
 // that re-runs the model over the whole batch.
 //
-// It was previously a fraction of the SURFACE (0.015), which cannot be kept:
-// a square built in photo pixels and mapped back onto a letterboxed panel can
-// extend past the surface edge, so its width in surface fractions goes negative
-// and a fraction test would compare the wrong quantity. Pixels are also the unit
-// the 10px guard below already used, so this is the same threshold expressed
-// once, in the unit the crop is actually stored in.
+// This is the ABSOLUTE floor, and it is not the only one. It used to be the only
+// one, which quietly weakened the guard: 0.015 of a 320px panel is under 5px, but
+// 0.015 of a 2400x1800 photo is 36, and 10 photo px is 0.4% of that photo. An
+// 18x18 crop on a large photo was committing where the old fraction test rejected
+// it - a crop of two dozen pixels of noise, resized to the classifier's input and
+// scored as confidently as a mosquito.
+//
+// The fraction is taken against the FRAME rather than the surface it is painted
+// in, which is what fixes the original problem rather than trading it away: a
+// square built in photo pixels and mapped back onto a letterboxed panel can
+// extend past the surface edge, so its extent in SURFACE fractions can go
+// negative and a surface-fraction test compares the wrong quantity. The frame is
+// the same unit the box is stored in, so it cannot disagree about sign or
+// direction, and the fraction still scales with the photo - which is the property
+// an absolute pixel floor has and cannot express.
 export const MIN_CROP_PX = 10;
 
-export function isCropTooSmall(box: Box, minPx = MIN_CROP_PX): boolean {
-  return box[2] - box[0] < minPx || box[3] - box[1] < minPx;
+// Of the frame's SHORT side, so one number covers a photo of any aspect.
+export const MIN_CROP_FRACTION = 0.015;
+
+/**
+ * Whether `box` is too small to be a crop.
+ *
+ * `frame` is the canvas the box was drawn against - the whole photo on the full
+ * panel, the context region on the zoom panel - and is what the fractional floor
+ * is measured against. Without it only the absolute pixel floor applies, which is
+ * the weaker guard: it is what makes this safe to call on a box whose frame the
+ * caller does not have, and it is not a substitute for the fraction on a photo
+ * large enough for 10px to be a rounding error.
+ */
+export function isCropTooSmall(box: Box, frame?: CanvasLike, minPx = MIN_CROP_PX): boolean {
+  const floor = frame
+    ? Math.max(minPx, Math.min(frame.width, frame.height) * MIN_CROP_FRACTION)
+    : minPx;
+  return box[2] - box[0] < floor || box[3] - box[1] < floor;
 }
 
 // The zoom panel shows the context region, not the whole photo, so the box has

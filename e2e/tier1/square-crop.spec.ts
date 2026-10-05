@@ -62,23 +62,39 @@ async function paintCoordinatePattern(page: import("@playwright/test").Page): Pr
 }
 
 /**
- * The mapping the app should be using, recomputed here.
+ * The centre-anchored square a drag commits, and the mapping it goes through.
+ *
+ * Both helpers below floor the side and round the near corner, mirroring the two
+ * lines in `squareBox` that make a stored box integral, so the expectation is
+ * whole and can be asserted at precision 0. That is a deliberate 1px echo of the
+ * function under test, and it is safe to echo because what these helpers are
+ * pinning is the SURFACE -> PIXEL map, not the rounding: the constraint's own
+ * arithmetic is pinned exactly, and exhaustively, in
+ * `tests/square-crop-constraint.test.ts`. The slack it introduces is one pixel,
+ * not the forty a shifted box needs.
  *
  * `contain` on the full panel: the photo is fitted whole and letterboxed, so the
  * axis with room to spare keeps k = 1 and the other is scaled up by the ratio of
  * the two aspects, centred. This is the same arithmetic `fitMapping` does,
  * written out because a test that imports the function under test agrees with
  * every bug it has.
+ *
+ * The drag's two CLIENT points are taken, not nominal surface fractions, and are
+ * pushed through `Math.fround` first. Chromium delivers `PointerEvent.clientX` as
+ * a float32, so a drag to `x = 328.175` is seen by the handler as 328.17498779296875
+ * - which makes the surface fraction a hair under 0.8, and `squareBox` then
+ * floors a side of 1439 where the exact arithmetic gives 1440. That pixel is a
+ * property of the float, not of the mapping, so the expectation consumes the same
+ * number the handler does; without the fround this assertion would be red on a
+ * correct implementation.
  */
 async function expectedSquareBox(
   page: import("@playwright/test").Page,
-  fromX: number,
-  fromY: number,
-  toX: number,
-  toY: number,
-) {
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): Promise<[number, number, number, number]> {
   return page.evaluate(
-    ({ fromX, fromY, toX, toY }) => {
+    ({ a, b }) => {
       const p = window.__mosqAsync!.previews[0];
       const surf = document.getElementById("crop-surface-full")!.getBoundingClientRect();
       const img = { w: p.fullCanvas.width, h: p.fullCanvas.height };
@@ -89,19 +105,100 @@ async function expectedSquareBox(
       const ox = (1 - kx) / 2;
       const oy = (1 - ky) / 2;
 
-      // Surface fractions -> photo pixels.
-      const pt = (fx: number, fy: number): [number, number] =>
-        [(kx * fx + ox) * img.w, (ky * fy + oy) * img.h];
-      const a = pt(fromX, fromY);
-      const b = pt(toX, toY);
-      const side = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
-      const midX = (a[0] + b[0]) / 2;
-      const midY = (a[1] + b[1]) / 2;
-      const box: [number, number, number, number] =
-        [midX - side / 2, midY - side / 2, midX + side / 2, midY + side / 2];
+      // Client coordinates -> surface fractions -> photo pixels, the two steps the
+      // drag handler's own `getSurfacePoint` and the panel's map make. fround is
+      // the float32 the browser delivers; see the note above.
+      const frac = (v: number, origin: number, size: number): number =>
+        Math.max(0, Math.min(1, (Math.fround(v) - origin) / size));
+      const pt = (cx: number, cy: number): [number, number] => [
+        (kx * frac(cx, surf.left, surf.width) + ox) * img.w,
+        (ky * frac(cy, surf.top, surf.height) + oy) * img.h,
+      ];
+      const pa = pt(a.x, a.y);
+      const pb = pt(b.x, b.y);
+      const side = Math.floor(Math.max(Math.abs(pb[0] - pa[0]), Math.abs(pb[1] - pa[1])));
+      const x1 = Math.round((pa[0] + pb[0]) / 2 - side / 2);
+      const y1 = Math.round((pa[1] + pb[1]) / 2 - side / 2);
+      const box: [number, number, number, number] = [x1, y1, x1 + side, y1 + side];
       return box;
     },
-    { fromX, fromY, toX, toY },
+    { a, b },
+  );
+}
+
+/**
+ * The box a drag on the ZOOM panel should commit, in the FULL photo's pixels.
+ *
+ * The zoom panel is the branch a full-panel test cannot reach, so its map is
+ * written out separately here rather than derived from the full-panel one:
+ *
+ *  - the frame is the CONTEXT region, so the surface map runs against the
+ *    context canvas's own dimensions;
+ *  - the fit is `cover`, the mirror image of `contain` - the frame fills the
+ *    surface, so it is the axis where the frame OVERFLOWS that is magnified and
+ *    the other that is pinned at 1, and the offset is negative;
+ *  - the result carries the region's own offset back into the photo, and is then
+ *    clamped to the photo and squared, which is the order `applySquareCrop`
+ *    commits in.
+ *
+ * None of that is read back out of the app. A helper that took the committed box
+ * as its reference would agree with every mapping bug there is, because the box
+ * the app commits IS the answer its own mapping produced - which is what made the
+ * zoom spec's pixel comparison unable to see a wrong mapping at all.
+ *
+ * As in `expectedSquareBox`, the drag's client points are consumed rather than
+ * nominal fractions, so a whole pixel of float noise is not read as a mapping
+ * error.
+ */
+async function expectedZoomBox(
+  page: import("@playwright/test").Page,
+  region: { x1: number; y1: number; w: number; h: number },
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): Promise<[number, number, number, number]> {
+  return page.evaluate(
+    ({ region, a, b }) => {
+      const p = window.__mosqAsync!.previews[0];
+      const surf = document.getElementById("crop-surface-zoomed")!.getBoundingClientRect();
+      const img = { w: region.w, h: region.h };
+      const boxAspect = surf.width / surf.height;
+      const imgAspect = img.w / img.h;
+      // cover: min, where contain is max.
+      const kx = Math.min(1, boxAspect / imgAspect);
+      const ky = Math.min(1, imgAspect / boxAspect);
+      const ox = (1 - kx) / 2;
+      const oy = (1 - ky) / 2;
+
+      const frac = (v: number, origin: number, size: number): number =>
+        Math.max(0, Math.min(1, (Math.fround(v) - origin) / size));
+      const pt = (cx: number, cy: number): [number, number] => [
+        (kx * frac(cx, surf.left, surf.width) + ox) * img.w,
+        (ky * frac(cy, surf.top, surf.height) + oy) * img.h,
+      ];
+      const pa = pt(a.x, a.y);
+      const pb = pt(b.x, b.y);
+      const side = Math.floor(Math.max(Math.abs(pb[0] - pa[0]), Math.abs(pb[1] - pa[1])));
+      const x1 = Math.round((pa[0] + pb[0]) / 2 - side / 2);
+      const y1 = Math.round((pa[1] + pb[1]) / 2 - side / 2);
+      // Context-canvas pixels -> photo pixels.
+      const W = p.fullCanvas.width;
+      const H = p.fullCanvas.height;
+      const box: [number, number, number, number] = [
+        x1 + region.x1, y1 + region.y1, x1 + side + region.x1, y1 + side + region.y1,
+      ];
+      // ...then what applySquareCrop does to it: clamp to the photo, THEN square.
+      const c: [number, number, number, number] = [
+        Math.max(0, Math.min(W, box[0])), Math.max(0, Math.min(H, box[1])),
+        Math.max(0, Math.min(W, box[2])), Math.max(0, Math.min(H, box[3])),
+      ];
+      const cw = c[2] - c[0];
+      const ch = c[3] - c[1];
+      const cside = Math.floor(Math.min(cw, ch));
+      const cx = Math.round(c[0] + (cw - cside) / 2);
+      const cy = Math.round(c[1] + (ch - cside) / 2);
+      return [cx, cy, cx + cside, cy + cside];
+    },
+    { region, a, b },
   );
 }
 
@@ -146,7 +243,7 @@ test.describe("a manual crop is square", () => {
     // something: an unconstrained implementation would commit a rectangle here.
     const from = { x: 0.2, y: 0.4 };
     const to = { x: 0.8, y: 0.5 };
-    await dragOnFullSurface(page, from.x, from.y, to.x, to.y);
+    const drag = await dragOnFullSurface(page, from.x, from.y, to.x, to.y);
 
     const result = await page.evaluate(() => {
       const p = window.__mosqAsync!.previews[0];
@@ -183,9 +280,19 @@ test.describe("a manual crop is square", () => {
     expect(result.got).toEqual(result.want);
 
     // And the box is the one the drag asked for, computed independently above.
-    const expected = await expectedSquareBox(page, from.x, from.y, to.x, to.y);
-    expect(result.box[2] - result.box[0]).toBeCloseTo(expected[2] - expected[0], -1);
-    expect(result.box[3] - result.box[1]).toBeCloseTo(expected[3] - expected[1], -1);
+    //
+    // All FOUR edges, not the side length. A box translated 40px along x is still
+    // square, still inside the photo and still cuts exactly the pixels it names,
+    // so a side-length assertion - at precision -1 it was satisfied by ±5 units of
+    // slack - passed for a crop that was nowhere near where the cursor was. The
+    // origin is the assertion that says WHERE, and it is the only one that does.
+    const expected = await expectedSquareBox(page, drag.a, drag.b);
+    expect(result.box[2] - result.box[0]).toBeCloseTo(expected[2] - expected[0], 0);
+    expect(result.box[3] - result.box[1]).toBeCloseTo(expected[3] - expected[1], 0);
+    expect(result.box[0]).toBeCloseTo(expected[0], 0);
+    expect(result.box[1]).toBeCloseTo(expected[1], 0);
+    expect(result.box[2]).toBeCloseTo(expected[2], 0);
+    expect(result.box[3]).toBeCloseTo(expected[3], 0);
 
     expect(errors(page)).toHaveLength(0);
   });
@@ -198,7 +305,7 @@ test.describe("a manual crop is square", () => {
 
     // The other direction: taller than wide, so a test that only ever dragged
     // horizontally would never notice the constraint being applied to one axis.
-    await dragOnFullSurface(page, 0.5, 0.1, 0.55, 0.9);
+    const tallDrag = await dragOnFullSurface(page, 0.5, 0.1, 0.55, 0.9);
 
     const r = await page.evaluate(() => {
       const p = window.__mosqAsync!.previews[0];
@@ -214,7 +321,7 @@ test.describe("a manual crop is square", () => {
     // box is still square and still cut from the pixels under the cursor, just
     // not as far out as the pointer asked.
     expect(r.box[2] - r.box[0]).toBe(r.box[3] - r.box[1]);
-    const expected = await expectedSquareBox(page, 0.5, 0.1, 0.55, 0.9);
+    const expected = await expectedSquareBox(page, tallDrag.a, tallDrag.b);
     const photo = await page.evaluate(() => {
       const p = window.__mosqAsync!.previews[0];
       return { w: p.fullCanvas.width, h: p.fullCanvas.height };
@@ -325,30 +432,51 @@ test.describe("a manual crop is square", () => {
 
     const from = { x: 0.25, y: 0.3 };
     const to = { x: 0.75, y: 0.55 };
-    await dragOnSurface(page, "#crop-surface-zoomed", from.x, from.y, to.x, to.y);
+    const drag = await dragOnSurface(page, "#crop-surface-zoomed", from.x, from.y, to.x, to.y);
 
-    const r = await page.evaluate(() => {
+    // The box the drag should have committed, worked out HERE from the surface's
+    // own rect, the context region's dimensions and the drag's two points - not
+    // read back out of the app.
+    const expected = await expectedZoomBox(page, region, drag.a, drag.b);
+
+    // The crop's pixels are read against THAT box. Reading them against the app's
+    // own committed box - which is what this did - is circular: the crop is cut
+    // with the box the app's mapping produced, so the comparison succeeds for any
+    // mapping at all, including one that is wrong. A mapping bug has to move the
+    // box somewhere else before the pixels can disagree.
+    const r = await page.evaluate((exp: [number, number, number, number]) => {
       const p = window.__mosqAsync!.previews[0];
       const box = p.cropBox!;
       const cv = p.cropCanvas;
       // Sample the crop against the FULL photo at box-offset coordinates: that is
       // where the pixels have to have come from once the context offset is added.
-      const pts = [[0, 0], [cv.width - 1, 0], [0, cv.height - 1], [cv.width - 1, cv.height - 1]];
+      const pts: [number, number][] =
+        [[0, 0], [cv.width - 1, 0], [0, cv.height - 1], [cv.width - 1, cv.height - 1]];
       const ctx = cv.getContext("2d")!;
       const got = pts.map(([x, y]) => Array.from(ctx.getImageData(x, y, 1, 1).data.slice(0, 3)));
       const full = p.fullCanvas.getContext("2d")!;
       const want = pts.map(([x, y]) => {
-        const d = full.getImageData(box[0] + x, box[1] + y, 1, 1).data;
+        const d = full.getImageData(exp[0] + x, exp[1] + y, 1, 1).data;
         return [d[0], d[1], d[2]];
       });
       return { box, cw: cv.width, ch: cv.height, got, want };
-    });
+    }, expected);
 
     // Square...
     expect(r.cw).toBe(r.ch);
     expect(r.box[2] - r.box[0]).toBe(r.box[3] - r.box[1]);
     // ...and the right pixels, which requires the offset to have been added.
     expect(r.got).toEqual(r.want);
+
+    // The box itself, all four edges, at precision 0. This is the assertion the
+    // round trip cannot make for itself: `zoomedSurfaceMapping` fixes `fit` to
+    // `cover` and multiplies k by 1.08, and the letterbox offset's sign in
+    // `fitMapping`, and before these four lines every one of those mutations
+    // passed this spec.
+    expect(r.box[0]).toBeCloseTo(expected[0], 0);
+    expect(r.box[1]).toBeCloseTo(expected[1], 0);
+    expect(r.box[2]).toBeCloseTo(expected[2], 0);
+    expect(r.box[3]).toBeCloseTo(expected[3], 0);
 
     // The box must land INSIDE the context region, which is offset from the
     // origin. A box that ignored the offset would sit around (0,0) rather than
@@ -363,6 +491,18 @@ test.describe("a manual crop is square", () => {
 
 });
 
+/**
+ * The two client points a drag was performed at.
+ *
+ * Returned rather than recomputed by the caller, because the expectation has to
+ * be built from the exact coordinates the pointer was driven to. See
+ * `expectedSquareBox` for why the nominal surface fractions do not invert back.
+ */
+interface DragPoints {
+  a: { x: number; y: number };
+  b: { x: number; y: number };
+}
+
 /** Press, move, release on the full-photo panel, in surface fractions. */
 async function dragOnFullSurface(
   page: import("@playwright/test").Page,
@@ -370,7 +510,7 @@ async function dragOnFullSurface(
   fromY: number,
   toX: number,
   toY: number,
-): Promise<void> {
+): Promise<DragPoints> {
   return dragOnSurface(page, "#crop-surface-full", fromX, fromY, toX, toY);
 }
 
@@ -382,7 +522,7 @@ async function dragOnSurface(
   fromY: number,
   toX: number,
   toY: number,
-): Promise<void> {
+): Promise<DragPoints> {
   const surf = (await page.locator(selector).boundingBox())!;
   const pt = (fx: number, fy: number) => ({
     x: surf.x + surf.width * fx,
@@ -398,4 +538,5 @@ async function dragOnSurface(
   }
   await page.mouse.up();
   await settle(page);
+  return { a, b };
 }

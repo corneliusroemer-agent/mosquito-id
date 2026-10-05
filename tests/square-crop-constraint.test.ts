@@ -114,6 +114,68 @@ describe("isCropTooSmall", () => {
     // compares a quantity that can go negative.
     expect(isCropTooSmall([-400, -200, 100, 100])).toBe(false);
   });
+
+  // The pixel floor is not the whole guard, and on a large photo it is far too
+  // small to be. 10px is 0.4% of a 2400x1800 photo's short side, so with the
+  // pixel floor alone an 18x18 crop of pure noise committed and was scored as
+  // confidently as a mosquito - the fraction test that used to catch it was
+  // dropped in the same change that introduced the pixel floor, leaving one guard
+  // where the code had had two.
+  describe("the fractional floor, which is the guard that scales with the photo", () => {
+    const BIG: CanvasLike = { width: 2400, height: 1800 };
+    const SMALL: CanvasLike = { width: 400, height: 300 };
+
+    it("rejects an 18x18 crop on a 2400x1800 photo, which 10px alone accepted", () => {
+      // The regression, stated as a number: 18 > 10, so the pixel floor passes it.
+      expect(isCropTooSmall([100, 100, 118, 118])).toBe(false);
+      // 0.015 of the 1800px short side is 27, so the fractional floor rejects it.
+      expect(isCropTooSmall([100, 100, 118, 118], BIG)).toBe(true);
+    });
+
+    it("measures against the frame's SHORT side, which is the more permissive of the two", () => {
+      // The guard asks "how big is this photo", and the short side is the reading
+      // that answers it: a wide photo is not a small photo. Measuring the long
+      // side instead would make the floor grow with the aspect ratio, so the same
+      // 40px crop would be rejected on a panorama and accepted on a square of the
+      // same height. Short side is therefore always the looser of the two, and
+      // deliberately so - this test pins the choice rather than the strictness.
+      const LANDSCAPE: CanvasLike = { width: 8000, height: 1000 }; // same height, 8x the width
+      const SQUAREISH: CanvasLike = { width: 1000, height: 1000 };
+      // 0.015 of 1000 is 15 on both, so both accept a 40px crop despite the
+      // landscape being eight times the area.
+      expect(isCropTooSmall([0, 0, 40, 40], LANDSCAPE)).toBe(false);
+      expect(isCropTooSmall([0, 0, 40, 40], SQUAREISH)).toBe(false);
+      // Scaling the SHORT side scales the floor: triple the height and the same
+      // 40px crop is rejected, where a long-side reading would already have
+      // rejected it at the original size.
+      expect(isCropTooSmall([0, 0, 40, 40], { width: 3000, height: 3000 })).toBe(true);
+      // And a small frame stays judged by the pixel floor alone.
+      expect(isCropTooSmall([0, 0, 40, 40], SMALL)).toBe(false);
+    });
+
+    it("is the stricter of the two guards, never the looser", () => {
+      // A frame so small that 0.015 of it is under 10px must still ACCEPT a crop
+      // at the absolute floor - the fraction must not tighten the guard past
+      // MIN_CROP_PX, or a small photo could become uncroppable.
+      expect(isCropTooSmall([0, 0, MIN_CROP_PX, MIN_CROP_PX], { width: 100, height: 100 })).toBe(false);
+      expect(isCropTooSmall([0, 0, 50, 50], { width: 100, height: 100 })).toBe(false);
+      // And on a big frame the fraction is the binding guard, not the floor.
+      expect(isCropTooSmall([0, 0, MIN_CROP_PX, MIN_CROP_PX], BIG)).toBe(true);
+    });
+
+    it("still rejects a zero-area box on a huge frame", () => {
+      expect(isCropTooSmall([5, 5, 5, 5], BIG)).toBe(true);
+    });
+
+    it("does not read the box's extent as a fraction of anything that can go negative", () => {
+      // The reason the original guard was a fraction of the SURFACE and had to be
+      // replaced: a square mapped onto a letterboxed panel can extend past the
+      // surface edge, so a surface-relative extent is negative and a threshold
+      // comparison on it means the wrong thing. Measuring against the frame - the
+      // unit the box is stored in - cannot produce a negative extent at all.
+      expect(isCropTooSmall([-400, -200, 100, 100], BIG)).toBe(false);
+    });
+  });
 });
 
 describe("squareDragBox - the anchor", () => {
@@ -290,5 +352,133 @@ describe("a programmatic caller passing a non-square box", () => {
     expect(w(squared)).toBe(200);
     expect((squared[0] + squared[2]) / 2).toBe((padded[0] + padded[2]) / 2);
     expect((squared[1] + squared[3]) / 2).toBe((padded[1] + padded[3]) / 2);
+  });
+});
+
+/**
+ * The invariant the square constraint is built on: it never CROPS the box.
+ *
+ * It is worth stating as its own property because the opposite is easy to assume
+ * and expensive to get wrong. `side = floor(min(w, h))` is less than or equal to
+ * BOTH axes by construction, so the square can only ever shrink a box, never
+ * escape it - there is no cap, no clamp and no special case that could push an
+ * edge outward. The only overshoot is the `Math.round` on the near corner, half
+ * a pixel, which is what makes the stored box integral in the first place.
+ *
+ * The cases below are the ones that LOOK like the square grows: a box wider than
+ * the photo is tall, a box whose drag overhung the photo, a padded detector box
+ * clamped to the photo's edge. In every one, what trims the box is the CLAMP or
+ * the square's own definition, and the committed box is inside what was asked
+ * for.
+ */
+describe("the square never crops the box it constrains", () => {
+  // A 16:9 photo, so the short side is far smaller than the long one and a
+  // box can genuinely be wider than the photo is tall.
+  const PHOTO: CanvasLike = { width: 1600, height: 900 };
+
+  /** clamp-to-photo then square, the order applySquareCrop commits in. */
+  function commit(box: Box): Box {
+    const c = squareBox([
+      Math.max(0, Math.min(PHOTO.width, box[0])),
+      Math.max(0, Math.min(PHOTO.height, box[1])),
+      Math.max(0, Math.min(PHOTO.width, box[2])),
+      Math.max(0, Math.min(PHOTO.height, box[3])),
+    ]);
+    return c;
+  }
+
+  it("is a property of the arithmetic, so it holds for any box at all", () => {
+    // Randomised rather than enumerated: the invariant is `side <= min(w, h)`,
+    // which is true by construction, and a property test is what says so without
+    // having to trust the reader to see it in one line.
+    let seed = 20261005;
+    const rand = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    for (let i = 0; i < 20000; i++) {
+      const x1 = rand() * PHOTO.width;
+      const y1 = rand() * PHOTO.height;
+      const box: Box = [x1, y1, x1 + rand() * PHOTO.width, y1 + rand() * PHOTO.height];
+      const s = squareBox(box);
+      // Inside the input on every edge, allowing the documented half-pixel round.
+      expect(s[0]).toBeGreaterThanOrEqual(box[0] - 0.5);
+      expect(s[1]).toBeGreaterThanOrEqual(box[1] - 0.5);
+      expect(s[2]).toBeLessThanOrEqual(box[2] + 0.5);
+      expect(s[3]).toBeLessThanOrEqual(box[3] + 0.5);
+    }
+  });
+
+  it("on a box wider than the photo is tall, the CLAMP trims it and squaring then trims the rest", () => {
+    // The case that looks like the square "discarding the subject's ends". What
+    // actually discards them is the clamp: a 1504px-wide box cannot be 1504px
+    // tall on a 900px-tall photo, so it is truncated to the photo's height
+    // BEFORE the square, and the square then takes min(1504, 900) = 900.
+    const overhung = commit([48, -302, 1552, 1202]);
+    expect(w(overhung)).toBe(h(overhung));
+    // Bounded by the photo's short side, which is the floor any square on this
+    // photo has to respect - not by any cap of its own.
+    expect(w(overhung)).toBeLessThanOrEqual(PHOTO.height);
+    // And inside the clamped box the clamp produced.
+    expect(overhung[0]).toBeGreaterThanOrEqual(48);
+    expect(overhung[2]).toBeLessThanOrEqual(1552);
+  });
+
+  it("loses nothing to squaring that the clamp did not already take", () => {
+    // The direct statement of the property: given a box that is ALREADY inside
+    // the photo, the square removes no part of it beyond the one axis it is
+    // defined to trim, and it always keeps the box's own centre.
+    const inside: Box = [48, 0, 1552, 900];
+    const squared = squareBox(inside);
+    expect((squared[0] + squared[2]) / 2).toBe((inside[0] + inside[2]) / 2);
+    expect((squared[1] + squared[3]) / 2).toBe((inside[1] + inside[3]) / 2);
+    // The untrimmed axis is untouched.
+    expect(squared[1]).toBe(inside[1]);
+    expect(squared[3]).toBe(inside[3]);
+  });
+
+  it("a padded detector box clamped at the photo's edge is squared, not re-widened", () => {
+    // The detector path on a 16:9 photo with a detection 94% of the width: the
+    // 10%-per-side pad overruns the photo, the clamp pulls it back to the full
+    // width, and the square takes the height. The result is a small square on
+    // the detection's own centre - the design the measurement report describes -
+    // and it is inside the clamped box.
+    const W = PHOTO.width, H = PHOTO.height;
+    const detW = 0.94 * W, detH = 0.2 * H;
+    const pad = 0.1;
+    const padded: Box = [
+      Math.max(0, W / 2 - detW / 2 - detW * pad), Math.max(0, H / 2 - detH / 2 - detH * pad),
+      Math.min(W, W / 2 + detW / 2 + detW * pad), Math.min(H, H / 2 + detH / 2 + detH * pad),
+    ];
+    const squared = squareBox(padded);
+    expect(w(squared)).toBe(h(squared));
+    expect(squared[2] - squared[0]).toBe(padded[3] - padded[1]);
+    expect((squared[0] + squared[2]) / 2).toBe((padded[0] + padded[2]) / 2);
+    expect(squared[0]).toBeGreaterThanOrEqual(padded[0]);
+    expect(squared[2]).toBeLessThanOrEqual(padded[2]);
+  });
+
+  it("the manual 1:1 constraint is square before the clamp, and bounded by the photo after it", () => {
+    // `squareDragBox` sizes the square from the cursor's larger separation, so on
+    // a 16:9 photo a wide drag ASKS for a square taller than the photo - which is
+    // correct, because the gesture was that big. It is the commit clamp that has
+    // to bring it inside, and both steps are where the earlier finding looked for
+    // a crop of the box: neither one grows it.
+    const asked = squareDragBox([0.03, 0.45], [0.97, 0.55], PHOTO, IDENTITY);
+    expect(w(asked)).toBe(h(asked));
+    // Its centre is the drag's midpoint, so the trim that follows is symmetric.
+    expect((asked[0] + asked[2]) / 2).toBeCloseTo(PHOTO.width / 2, 6);
+    // What the user actually asked for is larger than the photo's short side -
+    // this is the case that makes the clamp load-bearing rather than cosmetic.
+    expect(w(asked)).toBeGreaterThan(PHOTO.height);
+    // Committed, it is inside the photo on every edge and still square.
+    const committed = commit(asked);
+    expect(w(committed)).toBe(h(committed));
+    expect(committed[0]).toBeGreaterThanOrEqual(0);
+    expect(committed[1]).toBeGreaterThanOrEqual(0);
+    expect(committed[2]).toBeLessThanOrEqual(PHOTO.width);
+    expect(committed[3]).toBeLessThanOrEqual(PHOTO.height);
+    // And it keeps the centre the drag asked for, on the axis the photo bounds.
+    expect((committed[1] + committed[3]) / 2).toBeCloseTo(PHOTO.height / 2, 6);
   });
 });

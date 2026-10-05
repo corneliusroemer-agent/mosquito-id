@@ -2209,9 +2209,17 @@ function setupCropSurfaces() {
    * under the cursor if a scrollbar appeared.
    *
    * The full panel shows the whole photo; the zoom panel shows the context
-   * region. Both are canvases whose pixels are the photo's pixels at 1:1, so the
-   * frame needs no scale factor - only the context region's offset into the
-   * photo, which `applySquareCrop` adds at commit time.
+   * region. Both canvases are drawn from the photo at 1:1 - `extractContextCrop`
+   * blits 1:1 - so the frame carries no scale factor of its own; the only thing
+   * separating one from the other is where the region starts in the photo, which
+   * `applySquareCrop` adds at commit time.
+   *
+   * The SCALE comes from the panel, not the frame: each panel maps its own
+   * surface onto its frame through its own fit, `contain` on the full panel and
+   * `cover` on the zoom one. That is why this returns a mapping alongside the
+   * frame rather than a bare canvas - the two panels' k values differ by
+   * construction, and sharing one would misplace the crop on whichever panel
+   * does not match.
    */
   function dragFrameFor(target) {
     const p = previews[selectedIndex];
@@ -2285,7 +2293,7 @@ function setupCropSurfaces() {
       // A click that never moved leaves no box, and a box with no area is not a
       // crop however it is shaped - squaring must not turn a stray click into a
       // 1x1 crop that re-runs inference over the whole batch.
-      if (!box || isCropTooSmall(box)) {
+      if (!box || isCropTooSmall(box, frame.img)) {
         sendLog("drag_cancel", { target, reason: box ? "too_small" : "no_rect" });
         return;
       }
@@ -2350,7 +2358,7 @@ async function applySquareCrop(idx, box, target, t0) {
     Math.max(0, Math.min(H, box[3] + oy)),
   ]);
 
-  if (isCropTooSmall(clamped)) return;
+  if (isCropTooSmall(clamped, p.fullCanvas)) return;
 
   sendLog("manual_crop", { target, box: clamped });
   return executeCrop(p, idx, clamped, t0);
