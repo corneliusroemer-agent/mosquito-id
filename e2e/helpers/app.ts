@@ -10,6 +10,28 @@ import { test as base, expect, type Page } from "@playwright/test";
  * working while `main.js` was a classic script and silently reached nothing once
  * it was bundled. Every helper below goes through it.
  */
+/**
+ * What `perf.snapshot()` reports, mirrored from `PerfSnapshot` in
+ * `src/app/perfCounters.ts`.
+ *
+ * Hand-mirrored rather than imported: this file is the seam, and a seam that
+ * imports the module it exists to expose makes a rename of a counter look like
+ * a working test rather than a compile error. `fullResFrames` and `ortSessions`
+ * are nullable because a gauge with no provider registered reports "not
+ * measured" rather than 0.
+ */
+export interface PerfSnapshot {
+  classifierCalls: number;
+  detectorCalls: number;
+  serverViewCalls: number;
+  renders: number;
+  forcedLayouts: number;
+  worstRenderLayouts: number;
+  layoutsByRender: Record<string, number>;
+  fullResFrames: number | null;
+  ortSessions: number | null;
+}
+
 export interface MosqAsync {
   last: unknown;
   frames: number;
@@ -41,6 +63,12 @@ export interface MosqAsync {
   /** How many times a lazy restore has been entered. Tier 1 aborts the weights
    *  fetch, so "the restore was reached" is the only thing observable. */
   idleRestoreAttempts: number;
+  /**
+   * The app's own `GPUDevice`, as `loadWebGPUModels` installs it. Tier 1 aborts
+   * every model fetch so that load never completes; writing this installs one so
+   * a spec can watch the release destroy it and clear `ort.env.webgpu.device`.
+   */
+  appOwnedDevice: { destroy(): void } | null;
   /** The engine whose weights are currently bound, or null when none are. */
   loadedClipEngine: string | null;
   /** The app's "an engine is loaded and usable" flag. */
@@ -53,6 +81,15 @@ export interface MosqAsync {
   selectPhoto: (i: number) => void;
   processFiles: (files: FileList | File[]) => Promise<void>;
   deletePhoto: (i: number) => void;
+  deleteAllPhotos: () => void;
+  /** The crop release, as a drag reaches it. */
+  applyCropFromFullSurface: (idx: number, rect: number[], t0: number) => Promise<unknown>;
+  /** A photo's full-resolution pixels, decoded from its File on demand. */
+  fullCanvasFor: (p: unknown) => Promise<HTMLCanvasElement | null>;
+  /** How many full-resolution frames are held. The bound is a fixed count. */
+  retainedFullCanvasCount: () => number;
+  /** The engine re-run, as the button's action reaches it. */
+  reprocess: () => Promise<unknown>;
   /** The engine re-run's photo-set narrowing, or null. See `main.js` ASYNC. */
   rerunPhotos: Set<any> | null;
   renderThumbnails: () => void;
@@ -60,6 +97,20 @@ export interface MosqAsync {
   updatePooling: () => void;
   renderResultsTable: () => void;
   downloadCSV: () => void;
+  /**
+   * The structural counters (`src/app/perfCounters.ts`).
+   *
+   * `armLayoutCounters` is the only way the layout probe gets installed.
+   * Nothing in the app calls it, so a page a user loads carries no patched
+   * getter and pays nothing for the counting - which is what makes it safe for a
+   * spec to arm mid-page and disarm again.
+   */
+  perf: {
+    snapshot(): PerfSnapshot;
+    resetCounters(): void;
+    armLayoutCounters(): void;
+    disarmLayoutCounters(): void;
+  };
 }
 
 declare global {
@@ -71,6 +122,8 @@ declare global {
     __mosqShiftLog?: string[];
     /** The app's own "engine settled" flag. False once a load has failed. */
     modelsReady?: boolean;
+/** Inferences a counting classifier stub has been asked for. */
+    __countedRuns?: number;
     /** `getBoundingClientRect` calls since the last reset. Set by a probe. */
     __rectReads?: number;
     /** Whether that probe is already installed on `Element.prototype`. */
@@ -173,6 +226,16 @@ export interface PhotoSpec {
   pending?: boolean;
   error?: string | null;
   is_cropped?: boolean;
+  /**
+   * Whether this photo's lack of a crop came from the USER reverting it, rather
+   * than from the detector finding nothing.
+   *
+   * It is the same record shape either way - no crop box - and nothing about the
+   * views differs. What differs is which re-run path the photo takes: one with
+   * no File can only be re-classified if it was reverted, so an uncropped
+   * fixture that wants to exercise the two-view decision needs this set.
+   */
+  revertedToFull?: boolean;
 }
 
 const SPECIES_BY_NAME: Record<string, string> = {
@@ -272,6 +335,17 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
       const hue = (i * 47) % 360;
       const full = makeCanvas(2400, 1800, hue, spec.name.slice(0, 6));
       const crop = makeCanvas(900, 900, (hue + 20) % 360, spec.name.slice(0, 4));
+      // The DISPLAY canvas is a separate, smaller canvas from the frame, which is
+      // the shape the app's own intake produces: displayCanvasFrom reduces a
+      // 12 MP frame to 2048 px on the long edge, and the frame is then released.
+      // (No backticks in these comments: this whole body is a template literal.)
+      //
+      // Aliasing them - making the display canvas the very same object as the
+      // frame - quietly invalidates every test that asks "does this photo hold
+      // its frame?". An uncropped photo's crop canvas is then the same object as
+      // its whole frame, so a check on canvas identity accidentally agrees with
+      // the truth and the test passes on the bug it is meant to catch.
+      const display = makeCanvas(2048, 1536, hue, spec.name.slice(0, 6));
 
       const sname = spec.species ?? (i % 3 === 0 ? "Aedes aegypti" : "Culex pipiens");
       const sidx = emb.species.indexOf(sname);
@@ -320,11 +394,26 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         emb.species.map((s, j) => [s, Math.log(Math.max(spP[j], 1e-9))]),
       );
 
+      const cropped = spec.is_cropped ?? true;
       const p = {
         name: spec.name,
-        fullCanvas: full,
-        cropCanvas: crop,
-        contextCanvas: full,
+        // Fixtures install records directly, so they carry the photo's own
+        // dimensions and its retained pixels the way the app's own intake does.
+        // sourceCanvas rather than fullCanvas: these have no File, so there
+        // is nothing to re-decode from and the frame is what they hold.
+        displayCanvas: display,
+        fullW: 2400,
+        fullH: 1800,
+        sourceCanvas: full,
+        // A cropped photo carries its crop box, in the photograph's own pixels -
+        // that box is what decides whether the photo has two views or one, so a
+        // fixture with a crop canvas but no box cannot tell an uncropped photo
+        // from a cropped one, and the whole-frame tests pass for the wrong
+        // reason. An uncropped photo has no box and shows the display canvas,
+        // which is what the app's own no-detection case looks like.
+        cropCanvas: cropped ? crop : display,
+        cropBox: cropped ? [750, 450, 1650, 1350] : null,
+        contextCanvas: display,
         detail,
         scores,
         logits,
@@ -336,7 +425,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         verdict: null,
         pending: spec.pending ?? false,
         error: spec.error ?? null,
-        is_cropped: spec.is_cropped ?? true,
+        is_cropped: cropped,
         crop_rejected: false,
         status: spec.error ? "failed" : "ok",
         rev: 0,
@@ -345,6 +434,7 @@ export async function populate(page: Page, specs: PhotoSpec[], opts: PopulateOpt
         viewsTotal: 0,
         fingerprint: "fp_" + i,
         manual_full_photo: false,
+        revertedToFull: spec.revertedToFull ?? false,
       };
       // The real gate's answer, not ours - and the nuisance posteriors go with it,
       // because the gate reads that block and the seam drops nothing.

@@ -161,27 +161,35 @@ describe("the preference survives a reload", () => {
     },
   });
 
-  it("defaults to including the whole photo", () => {
-    expect(DEFAULT_INCLUDE_WHOLE_FRAME).toBe(true);
-    expect(readIncludeWholeFrame(store(null))).toBe(true);
-  });
-
-  it("reads a stored exclusion back", () => {
-    expect(readIncludeWholeFrame(store("false"))).toBe(false);
+  it("defaults to crop-only", () => {
+    expect(DEFAULT_INCLUDE_WHOLE_FRAME).toBe(false);
+    expect(readIncludeWholeFrame(store(null))).toBe(false);
   });
 
   it("reads a stored inclusion back", () => {
     expect(readIncludeWholeFrame(store("true"))).toBe(true);
   });
 
-  it("falls back to the default on a stale key rather than throwing", () => {
+  it("reads a stored exclusion back", () => {
+    expect(readIncludeWholeFrame(store("false"))).toBe(false);
+  });
+
+  it("treats a stale key as off, the default, rather than as a third state", () => {
     // A value this build does not write - an older or newer key, a hand edit -
-    // is not a third state.
-    expect(readIncludeWholeFrame(store("no"))).toBe(true);
-    expect(readIncludeWholeFrame(store(""))).toBe(true);
-    expect(readIncludeWholeFrame(store("0"))).toBe(true);
-    expect(readIncludeWholeFrame(store(undefined))).toBe(true);
-    expect(readIncludeWholeFrame(null)).toBe(true);
+    // is not a third state. The default is off, so anything unrecognised is off.
+    expect(readIncludeWholeFrame(store("no"))).toBe(false);
+    expect(readIncludeWholeFrame(store(""))).toBe(false);
+    expect(readIncludeWholeFrame(store("0"))).toBe(false);
+    expect(readIncludeWholeFrame(store("TRUE"))).toBe(false);
+    expect(readIncludeWholeFrame(store(undefined))).toBe(false);
+    expect(readIncludeWholeFrame(null)).toBe(false);
+  });
+
+  it("does not take the whole frame away from a user who asked for it", () => {
+    // The asymmetry is the point: an explicit "true" survives a change of
+    // default, and only the default moves for everyone who never chose.
+    expect(readIncludeWholeFrame(store("true"))).toBe(true);
+    expect(readIncludeWholeFrame(store("false"))).toBe(false);
   });
 
   it("uses a key of its own, so it cannot collide with the engine preference", () => {
@@ -221,10 +229,14 @@ describe("the control", () => {
     expect(label).not.toMatch(/uncropped/i);
   });
 
-  it("starts checked, so a first visit behaves as it always has", () => {
+  it("ships markup that agrees with the default, rather than relying on JS to correct it", () => {
+    // The markup's `checked` attribute and `DEFAULT_INCLUDE_WHOLE_FRAME` are two
+    // statements of the same thing. If they disagree the control is briefly drawn
+    // in the wrong state before `wireWholeFrameToggle` sets `box.checked` from
+    // storage, which is a visible flicker on every load.
     const at = HTML.indexOf('id="chk-whole-frame"');
     const tag = HTML.slice(HTML.lastIndexOf("<input", at), HTML.indexOf(">", at));
-    expect(tag).toMatch(/\bchecked\b/);
+    expect(/\bchecked\b/.test(tag)).toBe(DEFAULT_INCLUDE_WHOLE_FRAME);
   });
 
   it("names the effect of turning it off, on its tooltip", () => {
@@ -248,9 +260,12 @@ describe("every classify path asks the same question", () => {
     // the check above while the shipped path asked no one.
     // The adapter is a `const` arrow, not a declaration, so it is read as the
     // statement rather than as a function body.
-    const adapter = around("const viewsFor = (p, cropCv, cropBox) =>");
-    expect(adapter).toMatch(/_viewsFor\(p, cropCv, cropBox, includeWholeFrame\)/);
-    expect(around("async function classifyViews")).toMatch(/viewsFor\(p, cropCv, cropBox\)/);
+    // The whole frame is passed in rather than read off the photo: the record
+    // holds a display-sized copy, and the classifier's whole-frame view is the
+    // photograph's own pixels.
+    const adapter = around("const viewsFor = (full, cropCv, cropBox) =>");
+    expect(adapter).toMatch(/_viewsFor\(full, cropCv, cropBox, includeWholeFrame\)/);
+    expect(around("async function classifyViews")).toMatch(/viewsFor\(wholeCv, cutCropCv, cropBox\)/);
   });
 
   it("routes the local batch path through viewKinds", () => {

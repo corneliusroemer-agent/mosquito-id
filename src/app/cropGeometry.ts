@@ -6,12 +6,13 @@
  * and a photo object, and nothing else - no session, no classifier state - so
  * the geometry of both crop panels can be read in one place.
  *
- * The two panels deliberately disagree: the full panel fits with contain (the
- * whole photo, letterboxed) and the zoom panel with cover, so each needs its own
+ * Both panels fit with contain, but they map different images - the full panel
+ * the whole photo, the zoom panel the context region - so each needs its own
  * map and neither can be reused for the other.
  */
 
-import type { Box, BoxPercent, CanvasLike, ContextCrop, Mapping, Preview } from "./types";
+import type { Box, BoxPercent, CanvasLike, ContextCrop, Mapping, PhotoFrame, Preview } from "./types";
+import { DISPLAY_MAX_EDGE, displayCanvasFrom } from "./fullResSource";
 
 // Whether there is a crop to draw, and where it sits in each panel, answered in
 // one place. Both panels used to gate the outline on their own independent
@@ -31,45 +32,234 @@ export function hasCropBox(p?: Preview): boolean {
   return Boolean(p && p.cropBox && !p.manual_full_photo);
 }
 
+/**
+ * The photograph's own dimensions, or null when they are not known.
+ *
+ * Every box on a photo is in these pixels, so every placement of a box divides
+ * by them - never by a canvas the photo happens to be holding. A record that
+ * only has the display canvas cannot place its own crop, and says so rather
+ * than placing it against the wrong picture.
+ */
+export function photoFrame(p?: Pick<Preview, "fullW" | "fullH">): PhotoFrame | null {
+  const w = p?.fullW ?? 0;
+  const h = p?.fullH ?? 0;
+  return w > 0 && h > 0 ? { width: w, height: h } : null;
+}
+
 // The same p.cropBox expressed as fractions of each panel's surface. Both take
-// p.cropBox in full-image pixels; each panel shows a different image through a
-// different object-fit, so each needs its own map. The full panel fits with
-// contain (the whole photo, letterboxed) and the zoom panel with cover (a
-// deliberate crop), so the two panels disagree by construction and each has to
-// ask for its own. Returns null when the panel cannot place the box (no image,
-// or no context region).
+// p.cropBox in full-image pixels; each panel shows a different image, so each
+// needs its own map. The full panel fits the whole photo with contain, the
+// zoom panel fits the context region with contain, so the two panels disagree
+// by subject and each has to ask for its own. Returns null when the panel
+// cannot place the box (no image, or no context region).
 export function cropBoxInFullSurface(p: Preview): BoxPercent | null {
-  if (!hasCropBox(p) || !p.fullCanvas) return null;
+  const frame = photoFrame(p);
+  if (!hasCropBox(p) || !frame) return null;
   const surfaceFull = document.getElementById("crop-surface-full");
-  const { kx, ox, ky, oy } = fitMapping(surfaceFull, p.fullCanvas, "contain");
-  const [bx1, by1, bx2, by2] = p.cropBox!;
-  const l = (bx1 / p.fullCanvas.width - ox) / kx;
-  const t = (by1 / p.fullCanvas.height - oy) / ky;
-  return {
-    left: l * 100,
-    top: t * 100,
-    width: ((bx2 / p.fullCanvas.width - ox) / kx - l) * 100,
-    height: ((by2 / p.fullCanvas.height - oy) / ky - t) * 100,
-  };
+  // The photograph's OWN pixels, not a canvas the photo happens to be holding:
+  // the record no longer retains a full-resolution frame (#107), so `frame` is
+  // the only thing that carries the box's unit. Arithmetically identical to
+  // dividing by the frame inline, and shared with the drag preview below.
+  return boxInSurface(p.cropBox!, frame, fitMapping(surfaceFull, frame, "contain"));
+}
+
+// The box expressed as fractions of the surface the frame is painted in, given
+// the same mapping the outline is drawn through. Factored out of
+// cropBoxInFullSurface so the drag preview, which has to place a box that has
+// NOT been committed yet, goes through the identical arithmetic rather than a
+// second copy of it - the preview and the outline disagreeing by a pixel is the
+// whole class of defect this module exists to prevent.
+export function boxInSurface(box: Box, img: CanvasLike, mapping: Mapping): BoxPercent {
+  const { kx, ox, ky, oy } = mapping;
+  const x1 = (box[0] / img.width - ox) / kx;
+  const y1 = (box[1] / img.height - oy) / ky;
+  const x2 = (box[2] / img.width - ox) / kx;
+  const y2 = (box[3] / img.height - oy) / ky;
+  return { left: x1 * 100, top: y1 * 100, width: (x2 - x1) * 100, height: (y2 - y1) * 100 };
+}
+
+// One surface point (fractions of the surface) in the frame's own pixels, the
+// inverse of boxInSurface. A drag is pointer motion on a surface, and the crop
+// is a region of a photo, so every drag has to cross this map - and the square
+// constraint has to be applied on the far side of it, because a square in
+// surface fractions is not a square in photo pixels once the two aspects
+// differ.
+//
+// `boxInSurface` goes image -> surface as `(imageFraction - o) / k`, so this
+// goes surface -> image as `k * surfaceFraction + o` - the other way round, and
+// in the other direction. Writing `(pt - o) / k` here instead is a plausible
+// typo that compiles, type-checks and passes every test that does not compare
+// the two against each other, which is why `squareCropCutsThePixelsUnderTheCursor`
+// and the round-trip test both exist.
+export function surfacePointToFrame(pt: [number, number], img: CanvasLike, mapping: Mapping): [number, number] {
+  const { kx, ox, ky, oy } = mapping;
+  return [(kx * pt[0] + ox) * img.width, (ky * pt[1] + oy) * img.height];
+}
+
+/**
+ * Force a box to be a square, keeping the centre and dropping the overflow off
+ * the longer axis.
+ *
+ * Manual crops are square by force. This is a geometry-consistency decision, not
+ * an accuracy one, and the measurement behind it says so: comparing square
+ * upstream against centre-crop and letterbox on 4,172 held-out images
+ * (`investigations/2026-10-02-mosquito-id/64-crop-geometry.md`, in
+ * `scratch/2026-10-04-square-crop`) found the geometries indistinguishable on
+ * the headline - the candidates disagree with centre-crop on ~8% of images and
+ * split those disagreements evenly. That report also warns its design cannot
+ * resolve the ~2 pp macro-F1 differences this project treats as real, so its
+ * null is not a verdict; it is enough to say a square crop is not buying
+ * accuracy, which is what makes forcing one free to do for consistency's sake.
+ *
+ * That report's one resolved effect is worth stating rather than rediscovering:
+ * a square upstream LOWERS entropy at unchanged accuracy - more confident, not
+ * more righter - the wrong direction for a head feeding a confidence floor. The
+ * box is square here, which moves the geometry in the same direction, and it is
+ * deliberately left there: the crop is resized to the model's input size either
+ * way, so what is constrained is the box the user commits, not the tensor.
+ *
+ * What forcing a square costs is pixels on the longer axis, which is why the box
+ * only ever shrinks and is anchored on its centre.
+ *
+ * Three properties make this the right place for the constraint:
+ *
+ *  - it is in PHOTO pixels, which is the unit the crop is stored, cut and sent
+ *    in. A square enforced in surface fractions would be a rectangle by the
+ *    time it reached the canvas, because the full panel letterboxes and the
+ *    zoom panel crops its frame;
+ *  - it is centred, so it keeps the point the drag started from inside itself.
+ *    Anchoring on the drag's own corner instead would move that corner as the
+ *    cursor travels, and the box would slide out from under the gesture;
+ *  - it is pure, so it can be tested without a DOM - which is the only kind of
+ *    test that could have caught the free-form behaviour at all, since the drag
+ *    handlers it replaces are untestable there.
+ *
+ * The result is integral in x and exact in side length, because a stored box
+ * with half-pixel edges cannot be described as a square by anything reading it
+ * back. `side` floors rather than rounds so the square is never larger than
+ * the box it was asked to constrain - the one property that lets this be
+ * applied to a box the user drew, since it must not claim a pixel the drag did
+ * not cover.
+ *
+ * A degenerate box (no area) stays degenerate: this has no minimum size to
+ * enforce, and inventing one here would silently turn a stray click into a
+ * crop. Callers reject it with `isCropTooSmall`.
+ */
+export function squareBox(box: Box): Box {
+  const w = Math.max(0, box[2] - box[0]);
+  const h = Math.max(0, box[3] - box[1]);
+  const side = Math.floor(Math.min(w, h));
+  if (!(side > 0)) return [box[0], box[1], box[0], box[1]];
+  // Round the near corner, not the centre, so the far corner is exact: left +
+  // side is the same expression on both edges.
+  const x1 = Math.round(box[0] + (w - side) / 2);
+  const y1 = Math.round(box[1] + (h - side) / 2);
+  return [x1, y1, x1 + side, y1 + side];
+}
+
+/**
+ * The square box a drag from `start` to `cur` commits, in the frame's pixels.
+ *
+ * CENTRE-ANCHORED, not anchored on the drag's starting corner. The box keeps the
+ * MIDPOINT of the two points fixed and takes a side of half the larger of the two
+ * separations, so it grows symmetrically in whichever direction the cursor
+ * travels and stays under it. A corner-anchored square instead sits in the
+ * quadrant the cursor started in: the corner the user put down is the one that
+ * matters to them, and once the box is squared the pointer runs away from the
+ * box's own far edge, so on the second half of the drag the pointer leaves the
+ * thing being adjusted. Centre-anchoring keeps the cursor inside the crop for
+ * the whole gesture, which is what makes a constrained drag feel like the shape
+ * is following the cursor rather than fighting it.
+ *
+ * Both surface points go through `surfacePointToFrame` first, so the square is
+ * square in the unit the crop is stored and cut in, and the preview can be
+ * mapped back out of this same box.
+ *
+ * A drag that has not moved yields a zero-area box, which `isCropTooSmall`
+ * rejects rather than committing - see there.
+ */
+export function squareDragBox(
+  start: [number, number],
+  cur: [number, number],
+  img: CanvasLike,
+  mapping: Mapping,
+): Box {
+  const [sx, sy] = surfacePointToFrame(start, img, mapping);
+  const [cx, cy] = surfacePointToFrame(cur, img, mapping);
+  const mx = (sx + cx) / 2;
+  const my = (sy + cy) / 2;
+  // The side is the cursor's LARGER separation - not twice it. Half of it, taken
+  // about the midpoint, spans from halfway back towards the drag's start to
+  // halfway forward, so the cursor lands exactly on the leading edge. Doubling
+  // the separation here instead would overshoot the pointer by half a box.
+  const half = Math.max(Math.abs(cx - sx), Math.abs(cy - sy)) / 2;
+  const [x1, y1] = [mx - half, my - half];
+  return squareBox([x1, y1, x1 + half * 2, y1 + half * 2]);
+}
+
+// The smallest crop, in photo pixels, worth running inference over. A click that
+// never moved produces a zero-area box, and a box with no area is not a crop
+// however it is shaped - squaring must not turn a stray click into a 1x1 crop
+// that re-runs the model over the whole batch.
+//
+// This is the ABSOLUTE floor, and it is not the only one. It used to be the only
+// one, which quietly weakened the guard: 0.015 of a 320px panel is under 5px, but
+// 0.015 of a 2400x1800 photo is 36, and 10 photo px is 0.4% of that photo. An
+// 18x18 crop on a large photo was committing where the old fraction test rejected
+// it - a crop of two dozen pixels of noise, resized to the classifier's input and
+// scored as confidently as a mosquito.
+//
+// The fraction is taken against the FRAME rather than the surface it is painted
+// in, which is what fixes the original problem rather than trading it away: a
+// square built in photo pixels and mapped back onto a letterboxed panel can
+// extend past the surface edge, so its extent in SURFACE fractions can go
+// negative and a surface-fraction test compares the wrong quantity. The frame is
+// the same unit the box is stored in, so it cannot disagree about sign or
+// direction, and the fraction still scales with the photo - which is the property
+// an absolute pixel floor has and cannot express.
+export const MIN_CROP_PX = 10;
+
+// Of the frame's SHORT side, so one number covers a photo of any aspect.
+export const MIN_CROP_FRACTION = 0.015;
+
+/**
+ * Whether `box` is too small to be a crop.
+ *
+ * `frame` is the canvas the box was drawn against - the whole photo on the full
+ * panel, the context region on the zoom panel - and is what the fractional floor
+ * is measured against. Without it only the absolute pixel floor applies, which is
+ * the weaker guard: it is what makes this safe to call on a box whose frame the
+ * caller does not have, and it is not a substitute for the fraction on a photo
+ * large enough for 10px to be a rounding error.
+ */
+export function isCropTooSmall(box: Box, frame?: CanvasLike, minPx = MIN_CROP_PX): boolean {
+  const floor = frame
+    ? Math.max(minPx, Math.min(frame.width, frame.height) * MIN_CROP_FRACTION)
+    : minPx;
+  return box[2] - box[0] < floor || box[3] - box[1] < floor;
 }
 
 // The zoom panel shows the context region, not the whole photo, so the box has
-// to be expressed relative to that region before it goes through the cover map.
+// to be expressed relative to that region before it goes through the zoom map.
 // With no context region the panel shows the whole photo instead (zoomSource
 // falls back the same way), so the whole photo is the coordinate frame here too
 // - which keeps a real crop drawable on both panels in every state.
 export function cropBoxInZoomSurface(p: Preview): BoxPercent | null {
-  if (!hasCropBox(p)) return null;
+  const frame = photoFrame(p);
+  if (!hasCropBox(p) || !frame) return null;
   const surfaceZoomed = document.getElementById("crop-surface-zoomed");
   const [cx1, cy1, cx2, cy2] = p.cropBox!;
   const ctx_x1 = p.contextBox ? p.contextBox[0] : 0;
   const ctx_y1 = p.contextBox ? p.contextBox[1] : 0;
-  const ctx_x2 = p.contextBox ? p.contextBox[2] : p.fullCanvas!.width;
-  const ctx_y2 = p.contextBox ? p.contextBox[3] : p.fullCanvas!.height;
+  const ctx_x2 = p.contextBox ? p.contextBox[2] : frame.width;
+  const ctx_y2 = p.contextBox ? p.contextBox[3] : frame.height;
   const ctx_w = ctx_x2 - ctx_x1;
   const ctx_h = ctx_y2 - ctx_y1;
   if (!(ctx_w > 0) || !(ctx_h > 0)) return null;
-  const { kx, ox, ky, oy } = fitMapping(surfaceZoomed, p.contextCanvas || p.fullCanvas, "cover");
+  // The context region is measured by the canvas that holds it, because that is
+  // the region's shape; with no context canvas the whole photograph is.
+  const region = p.contextCanvas ?? frame;
+  const { kx, ox, ky, oy } = fitMapping(surfaceZoomed, region, "contain");
   const l = ((cx1 - ctx_x1) / ctx_w - ox) / kx;
   const t = ((cy1 - ctx_y1) / ctx_h - oy) / ky;
   return {
@@ -140,11 +330,11 @@ export function fitMapping(surface: HTMLElement | null, img: CanvasLike | null |
  * panel's subject explicit at the call site instead of implied.
  */
 export function zoomedSurfaceMapping(p?: Preview): Mapping {
-  return fitMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas, "cover");
+  return fitMapping(document.getElementById("crop-surface-zoomed"), p?.contextCanvas, "contain");
 }
 
 export function fullSurfaceMapping(p?: Preview): Mapping {
-  return fitMapping(document.getElementById("crop-surface-full"), p?.fullCanvas, "contain");
+  return fitMapping(document.getElementById("crop-surface-full"), photoFrame(p), "contain");
 }
 
 // Aspect ratio (w/h) of the zoomed panel's container, i.e. the box the context
@@ -203,9 +393,28 @@ export function measureViewerAspect(): number | null {
 }
 
 // Compute context crop matching viewer container aspect ratio with 75% border fit along narrower dimension
-export function extractContextCrop(fullCv: HTMLCanvasElement, cropBox: Box | null, targetAspect: number | null = null): ContextCrop {
+//
+// `source` is the pixels to cut from and `frame` is the photograph's own size,
+// which are not the same thing: the record keeps a display-sized canvas and this
+// runs over that when there is no full-resolution frame to hand. The box is
+// solved in the photograph's pixels and then scaled into `source`, so
+// `contextBox` means the same thing whether the cut was made from a 12 MP frame
+// or from its 2048 px stand-in.
+export function extractContextCrop(
+  source: HTMLCanvasElement,
+  frame: PhotoFrame,
+  cropBox: Box | null,
+  targetAspect: number | null = null,
+): ContextCrop {
   if (!cropBox) {
-    return { contextCanvas: fullCv, contextBox: [0, 0, fullCv.width, fullCv.height] };
+    // The whole photograph is the context region. Capped like any other, and
+    // deliberately not `source` itself: `source` here is the full-resolution
+    // frame the caller holds for the cut, and handing it back would put 45 MiB
+    // of photo on the record for every photo the detector found nothing in.
+    return {
+      contextCanvas: displayCanvasFrom(source as HTMLCanvasElement),
+      contextBox: [0, 0, frame.width, frame.height],
+    };
   }
   const [bx1, by1, bx2, by2] = cropBox;
   const cw = Math.max(1, bx2 - bx1);
@@ -228,14 +437,11 @@ export function extractContextCrop(fullCv: HTMLCanvasElement, cropBox: Box | nul
     ctx_w = ctx_h * targetAspect;
   }
 
-  if (ctx_w > fullCv.width) {
-    ctx_w = fullCv.width;
-    ctx_h = ctx_w / targetAspect;
-  }
-  if (ctx_h > fullCv.height) {
-    ctx_h = fullCv.height;
-    ctx_w = ctx_h * targetAspect;
-  }
+  // Clamp each axis against the photo on its own. Re-deriving one axis from
+  // the panel aspect after clamping the other can shrink an axis below the crop
+  // box, and the box then runs off the panel's edge.
+  ctx_w = Math.min(ctx_w, frame.width);
+  ctx_h = Math.min(ctx_h, frame.height);
 
   let x1 = cx - ctx_w / 2;
   let y1 = cy - ctx_h / 2;
@@ -250,29 +456,74 @@ export function extractContextCrop(fullCv: HTMLCanvasElement, cropBox: Box | nul
     y2 -= y1;
     y1 = 0;
   }
-  if (x2 > fullCv.width) {
-    x1 -= (x2 - fullCv.width);
-    x2 = fullCv.width;
+  if (x2 > frame.width) {
+    x1 -= (x2 - frame.width);
+    x2 = frame.width;
   }
-  if (y2 > fullCv.height) {
-    y1 -= (y2 - fullCv.height);
-    y2 = fullCv.height;
+  if (y2 > frame.height) {
+    y1 -= (y2 - frame.height);
+    y2 = frame.height;
   }
 
   x1 = Math.max(0, Math.round(x1));
   y1 = Math.max(0, Math.round(y1));
-  x2 = Math.min(fullCv.width, Math.round(x2));
-  y2 = Math.min(fullCv.height, Math.round(y2));
+  x2 = Math.min(frame.width, Math.round(x2));
+  y2 = Math.min(frame.height, Math.round(y2));
 
   const finalW = Math.max(1, x2 - x1);
   const finalH = Math.max(1, y2 - y1);
 
+  // The region is painted into a canvas no larger than the display cap. Nothing
+  // reads its pixels but the zoom panel, which scales it to fit with
+  // object-fit, and the mappings that place a box over it read its aspect - so
+  // capping it costs the panel no resolution it had anywhere to show.
+  const long = Math.max(finalW, finalH);
+  const cap = long > DISPLAY_MAX_EDGE ? DISPLAY_MAX_EDGE / long : 1;
+  const outW = Math.max(1, Math.round(finalW * cap));
+  const outH = Math.max(1, Math.round(finalH * cap));
+
   const ctxCv = document.createElement("canvas");
-  ctxCv.width = finalW;
-  ctxCv.height = finalH;
+  ctxCv.width = outW;
+  ctxCv.height = outH;
   const ctx2d = ctxCv.getContext("2d");
   if (!ctx2d) throw new Error("Could not get a 2d context for the context crop");
-  ctx2d.drawImage(fullCv, x1, y1, finalW, finalH, 0, 0, finalW, finalH);
+  // `source` may be a fraction of the photograph, so the region is addressed in
+  // its pixels and the destination in the output's.
+  const sx = source.width / frame.width;
+  const sy = source.height / frame.height;
+  ctx2d.drawImage(source, x1 * sx, y1 * sy, finalW * sx, finalH * sy, 0, 0, outW, outH);
 
   return { contextCanvas: ctxCv, contextBox: [x1, y1, x2, y2] };
+}
+
+/**
+ * The pixels a crop box covers, as a canvas.
+ *
+ * `box` is in the photograph's pixels and `source` may be smaller than the
+ * photograph, so the region is addressed in `source`'s coordinates. The result
+ * is capped at the display cap for the same reason the context region is: it is
+ * read by the thumbnail and the classifier, both of which scale it far below
+ * that, and never by anything that needs the crop at full resolution.
+ */
+export function cutCrop(
+  source: HTMLCanvasElement,
+  frame: PhotoFrame,
+  box: Box,
+): HTMLCanvasElement {
+  const [bx1, by1, bx2, by2] = box;
+  const sx = source.width / frame.width;
+  const sy = source.height / frame.height;
+  const rx = bx1 * sx;
+  const ry = by1 * sy;
+  const rw = Math.max(1, (bx2 - bx1) * sx);
+  const rh = Math.max(1, (by2 - by1) * sy);
+  const long = Math.max(rw, rh);
+  const cap = long > DISPLAY_MAX_EDGE ? DISPLAY_MAX_EDGE / long : 1;
+  const outW = Math.max(1, Math.round(rw * cap));
+  const outH = Math.max(1, Math.round(rh * cap));
+  const out = document.createElement("canvas");
+  out.width = outW;
+  out.height = outH;
+  out.getContext("2d")?.drawImage(source, rx, ry, rw, rh, 0, 0, outW, outH);
+  return out;
 }

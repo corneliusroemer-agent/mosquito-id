@@ -14,11 +14,11 @@
  * - **The timer runs only while hidden.** Becoming visible cancels a pending
  *   release outright; a tab that flickers between windows must not pay a reload
  *   it did not need.
- * - **A release in flight cancels any restore, and a restore in flight cancels
- *   any release.** Both are async (session teardown is not synchronous), so
- *   without a generation counter a slow release could land after a restore and
- *   free the sessions the restore had just rebuilt. Every state transition bumps
- *   the generation, and work whose generation is stale does nothing.
+ * - **A release never interleaves with a restore, or the reverse.** Both are
+ *   async (session teardown is not synchronous), so without ordering a slow
+ *   release could land after a restore and free the sessions the restore had
+ *   just rebuilt. Every release and restore runs on one serialised chain, so
+ *   whichever was asked for second runs second.
  * - **Busy means no release.** A batch mid-inference is holding canvases and
  *   tensors that a release would pull out from under it. The timer still runs;
  *   if the tab goes visible again first, nothing happens, and if it goes hidden
@@ -55,6 +55,19 @@ export interface IdleRelease {
   /** True once a release has completed and no restore has been asked for. */
   released(): boolean;
   /**
+   * True when there is something for `ensure` to wait for or do: a release is
+   * running, or one completed and no restore has been asked for.
+   *
+   * This, not `released()`, is what an inference entry point should read before
+   * awaiting. `released()` is false for the whole duration of a release, so
+   * gating on it skips `ensure` exactly when the wait matters. Gating on
+   * nothing costs a microtask on every call, because `ensure` is async and
+   * awaiting it suspends even when it returns without doing anything - which is
+   * enough to let another writer of the progress slot land first and replace the
+   * message the reader was waiting for.
+   */
+  needsEnsure(): boolean;
+  /**
    * Make the expensive state exist again if it was released. Safe to call on
    * every inference: it does nothing when nothing was released.
    */
@@ -75,6 +88,10 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
   let hiddenAt: number | null = null;
   let isReleased = false;
   let inFlight: Promise<void> = Promise.resolve();
+  // How many releases/restores are queued or running. `ensure` waits on this
+  // rather than reading `isReleased`, which is only true once a release has
+  // FINISHED.
+  let pending = 0;
   // Bumped on every transition. Work captures the generation it was started for
   // and returns without touching anything if it no longer matches.
   let generation = 0;
@@ -91,7 +108,6 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
   }
 
   async function doRelease(waitedMs: number): Promise<void> {
-    const gen = generationOf();
     // Read AFTER the await boundary below would be too late; this read is what
     // keeps a release from starting while a batch is running.
     if (isBusy()) return;
@@ -102,7 +118,15 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
       // rest. The state still says released, because the next inference will
       // rebuild through `restore` either way.
     }
-    if (gen !== generation) return;
+    // The sessions are gone whatever the tab did while this was awaiting, so
+    // this has to be recorded unconditionally. A visibility change bumps the
+    // generation, and bailing out here on a stale one used to discard the
+    // completion of a release that had already destroyed everything: the tab
+    // was left holding no sessions and believing it had never released, so
+    // every later `ensure` returned early and nothing rebuilt it. Only a
+    // reload recovered. Ordering against a concurrent restore is the serialised
+    // chain's job, not this flag's - a restore asked for while this release is
+    // in flight is already queued behind it and will see the flag set.
     isReleased = true;
     opts.onRelease?.({ waitedMs });
   }
@@ -115,10 +139,33 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
       const waited = hiddenAt === null ? delayMs : Date.now() - hiddenAt;
       hiddenAt = null;
       const gen = generationOf();
-      inFlight = inFlight.then(() => doRelease(waited)).then(() => {
-        if (gen === generation) generation++;
-      });
+      enqueue(() => doRelease(waited), gen);
     }, delayMs);
+  }
+
+  /**
+   * Serialise every release and restore through one chain.
+   *
+   * The generation counter alone is not enough. It guards the STATE - whether
+   * the tab counts as released - but `release` and `restore` mutate the app's
+   * own state as they run: a release that is still awaiting its sessions can
+   * null out `sessClip` after a restore has already rebuilt it. Once `release`
+   * became async (awaiting `InferenceSession.release()`, which is where the
+   * weight buffers are actually destroyed) that window opened, so all three
+   * entry points queue here instead.
+   */
+  function enqueue(work: () => Promise<void>, gen: number): Promise<void> {
+    pending++;
+    const run = inFlight.then(work).then(() => {
+      if (gen === generation) generation++;
+    });
+    // Swallow a rejection on the chain itself so one failed link cannot poison
+    // every later one; `work` already contains its own error handling.
+    inFlight = run.catch(() => {});
+    void inFlight.finally(() => {
+      pending--;
+    });
+    return run;
   }
 
   return {
@@ -138,24 +185,34 @@ export function createIdleRelease(opts: IdleReleaseOptions): IdleRelease {
     released(): boolean {
       return isReleased;
     },
+    needsEnsure(): boolean {
+      return pending > 0 || isReleased;
+    },
     async ensure(): Promise<void> {
+      // Wait for a release that is already under way rather than reading
+      // `isReleased` and finding it still false. The flag is set at the END of
+      // the release, so an inference arriving mid-release used to see "not
+      // released", skip the restore, and then run against sessions the release
+      // was in the middle of taking away.
+      if (pending > 0) await inFlight;
       if (!isReleased) return;
       const gen = generationOf();
       isReleased = false;
-      try {
-        await opts.restore();
-      } catch {
-        // Left released, so the next `ensure` tries again rather than the app
-        // running inference against sessions that are not there.
-        isReleased = true;
-      }
-      if (gen !== generation) generation++;
+      return enqueue(async () => {
+        try {
+          await opts.restore();
+        } catch {
+          // Left released, so the next `ensure` tries again rather than the app
+          // running inference against sessions that are not there.
+          isReleased = true;
+        }
+      }, gen);
     },
     async releaseNow(): Promise<void> {
       hiddenAt = null;
       generation++;
       cancelTimer();
-      await doRelease(0);
+      return enqueue(() => doRelease(0), generationOf());
     },
     dispose(): void {
       hiddenAt = null;

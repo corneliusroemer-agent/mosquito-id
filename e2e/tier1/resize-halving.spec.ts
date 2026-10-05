@@ -138,7 +138,10 @@ test.describe("resize halving flag", () => {
         const blob = await new Promise<Blob>((r) => cv.toBlob((b) => r(b!), "image/jpeg", 0.95));
         await A.processFiles([new File([blob], "stripes.jpg", { type: "image/jpeg" })]);
         const p = A.previews[0] as any;
-        const expected = Array.from(A.clipTensor(p.fullCanvas));
+        // The whole-frame view with the flag on is the photograph's own pixels,
+        // which the app gets from its File on demand rather than from a field on
+        // the record, so that is what the expected tensor is built from.
+        const expected = Array.from(A.clipTensor((await A.fullCanvasFor(p))!));
         const got = Array.from(w.__tensors[0] as Float32Array);
         let maxDiff = 0;
         for (let i = 0; i < got.length; i++) maxDiff = Math.max(maxDiff, Math.abs(got[i]! - expected[i]!));
