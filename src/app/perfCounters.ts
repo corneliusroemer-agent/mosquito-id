@@ -68,6 +68,113 @@ function zeroCounters(): Counters {
 
 const counters: Counters = zeroCounters();
 
+// ---- Whole-image read probe ----
+
+/**
+ * `drawImage` calls whose SOURCE area was at least this many pixels, counted
+ * while the probe is armed.
+ *
+ * A source area, not a destination area and not an elapsed time: what costs a
+ * photograph is how much of it a step reads. The detector's 640 px letterbox and
+ * a crop cut are both `drawImage`, and only the source area tells them apart.
+ */
+let wholeImageMinSourceArea = 0;
+
+/** Every whole-image read since the last reset, and the threshold it used. */
+const wholeImageReads = { total: 0, minSourceArea: 0, byCaller: new Map<string, number>() };
+
+/**
+ * Count the `drawImage` calls that read a whole photograph.
+ *
+ * Only the tests arm this. The app never does, so a shipped page carries no
+ * patched canvas method and pays nothing for the counting - the same bargain
+ * `armLayoutCounters` makes.
+ *
+ * Idempotent, like that one: arming an armed probe only moves the threshold,
+ * because a second patch would double every count.
+ */
+export function armWholeImageReads(minSourceArea: number): void {
+  if (typeof CanvasRenderingContext2D === "undefined") return;
+  wholeImageMinSourceArea = minSourceArea;
+  wholeImageReads.minSourceArea = minSourceArea;
+  if (drawImagePatched) return;
+  drawImagePatched = true;
+
+  const original = CanvasRenderingContext2D.prototype.drawImage;
+  CanvasRenderingContext2D.prototype.drawImage = function (
+    this: CanvasRenderingContext2D,
+    ...args: unknown[]
+  ): void {
+    const area = sourceAreaOf(args);
+    // Counted BEFORE the call, and only for a call that is going to happen: a
+    // drawImage that throws has read nothing.
+    if (area >= wholeImageMinSourceArea) {
+      wholeImageReads.total++;
+      const where = describeWholeImageRead(args);
+      wholeImageReads.byCaller.set(where, (wholeImageReads.byCaller.get(where) ?? 0) + 1);
+    }
+    (original as (...a: unknown[]) => void).apply(this, args);
+  };
+  restoresDrawImage.push(() => {
+    CanvasRenderingContext2D.prototype.drawImage = original;
+  });
+}
+
+/** Undo `armWholeImageReads`. A page that was never armed is left alone. */
+export function disarmWholeImageReads(): void {
+  if (!drawImagePatched) return;
+  drawImagePatched = false;
+  wholeImageMinSourceArea = 0;
+  for (const restore of restoresDrawImage.splice(0).reverse()) restore();
+}
+
+let drawImagePatched = false;
+const restoresDrawImage: Array<() => void> = [];
+
+/**
+ * The area of the SOURCE rectangle a `drawImage` reads, or 0 when it cannot be
+ * told.
+ *
+ * Three forms, per the HTML spec: 3 and 5 arguments read the whole image, and 9
+ * read the named sub-rectangle. An image with no `width`/`height` - a video
+ * element mid-load, an `ImageData` - cannot be measured and reports 0, which
+ * never clears a positive threshold. That is the safe direction: an unmeasurable
+ * read is not claimed to be a whole-image one.
+ */
+function sourceAreaOf(args: unknown[]): number {
+  const image = args[0] as { width?: number; height?: number } | null | undefined;
+  if (!image) return 0;
+  if (args.length >= 9) {
+    const sw = Number(args[3]);
+    const sh = Number(args[4]);
+    if (!Number.isFinite(sw) || !Number.isFinite(sh)) return 0;
+    return Math.abs(sw * sh);
+  }
+  const w = Number(image.width);
+  const h = Number(image.height);
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return 0;
+  return Math.abs(w * h);
+}
+
+/**
+ * What a whole-image read was, in enough detail to name the line that made it.
+ *
+ * The source's constructor plus its dimensions, because that is what
+ * distinguishes the four reads of one photograph: the full-resolution frame it
+ * was copied into, the display copy, the detector's letterbox. A count with no
+ * breakdown says how many and not which, which is the number a reader cannot
+ * act on.
+ */
+function describeWholeImageRead(args: unknown[]): string {
+  const image = args[0] as { width?: number; height?: number; constructor?: { name?: string } } | null;
+  if (!image) return "unknown";
+  const kind = image.constructor?.name ?? "unknown";
+  const w = Number.isFinite(image.width) ? image.width : "?";
+  const h = Number.isFinite(image.height) ? image.height : "?";
+  const sub = args.length >= 9 ? ` sub ${args[3]}x${args[4]}` : "";
+  return `${kind} ${w}x${h}${sub}`;
+}
+
 /** Layout-forcing reads seen inside a render, and the worst single render. */
 const layouts = { total: 0, worstRender: 0, byRender: new Map<string, number>() };
 
@@ -197,6 +304,12 @@ export interface PerfSnapshot {
   worstRenderLayouts: number;
   /** Layout reads per named render, from the last time each ran. */
   layoutsByRender: Record<string, number>;
+  /** Whole-image `drawImage` reads since the last reset. See `armWholeImageReads`. */
+  wholeImageReads: number;
+  /** What each whole-image read was, so a count can be acted on. */
+  wholeImageReadsBySource: Record<string, number>;
+  /** The source-area threshold the probe was armed with. */
+  wholeImageMinSourceArea: number;
   fullResFrames: number | null;
   ortSessions: number | null;
 }
@@ -207,6 +320,9 @@ export function snapshot(): PerfSnapshot {
     forcedLayouts: layouts.total,
     worstRenderLayouts: layouts.worstRender,
     layoutsByRender: Object.fromEntries(layouts.byRender),
+    wholeImageReads: wholeImageReads.total,
+    wholeImageReadsBySource: Object.fromEntries(wholeImageReads.byCaller),
+    wholeImageMinSourceArea: wholeImageReads.minSourceArea,
     fullResFrames: liveFullResFrames(),
     ortSessions: liveOrtSessions(),
   };
@@ -220,6 +336,8 @@ export function resetCounters(): void {
   layouts.byRender.clear();
   readStack.length = 0;
   renderDepth = 0;
+  wholeImageReads.total = 0;
+  wholeImageReads.byCaller.clear();
 }
 
 // ---- The layout probe ----

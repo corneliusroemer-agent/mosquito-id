@@ -76,7 +76,8 @@ import { classifyCanvasServer as _classifyCanvasServer,
          posteriorSummary as _posteriorSummary, round4, serverView as _serverView,
          verdictSummary as _verdictSummary, viewsFor as _viewsFor,
          aliasesWholeFrame } from "./views";
-import { armLayoutCounters, disarmLayoutCounters,
+import { armLayoutCounters, armWholeImageReads, disarmLayoutCounters,
+         disarmWholeImageReads,
          noteClassifierCall, noteDetectorCall, noteServerViewCall,
          registerFullResSource, registerOrtSessionSource, resetCounters,
          snapshot, withRenderScope } from "./perfCounters";
@@ -505,12 +506,18 @@ const ASYNC = (window.__mosqAsync = {
    * numbers it gets being a moment stale. `armLayoutCounters` is the ONLY way the
    * layout probe gets installed - nothing in the app arms it, so a page a user
    * loads carries no patched getter and pays nothing for the counting.
+   *
+   * `armWholeImageReads(minSourceArea)` is the same bargain for `drawImage`: it
+   * counts the calls that read at least that many SOURCE pixels, and nothing in
+   * the app arms it, so a user's page never carries a patched canvas method.
    */
   perf: {
     snapshot,
     resetCounters,
     armLayoutCounters,
     disarmLayoutCounters,
+    armWholeImageReads,
+    disarmWholeImageReads,
   }
 });
 (function countFrames() {
@@ -1323,7 +1330,7 @@ async function clipEmbed(sourceCanvas, preScaled) {
 // whole frame. Both inferences are done before this returns, so the batch commits
 // one result per photo; the crop-release path, where the views run one at a time,
 // paints each as it lands.
-async function classifyImage(imgBitmap, filename, file) {
+async function classifyImage(imgBitmap, filename, file, prebuiltDisplay) {
   const t0 = performance.now();
   // Read once, so this photo's `scoredBy` names one engine rather than whichever
   // was selected when the commit landed. It does NOT pin the arithmetic: `sessClip`
@@ -1441,7 +1448,12 @@ async function classifyImage(imgBitmap, filename, file) {
 
   const is_cropped = Boolean(best);
   const { contextCanvas, contextBox } = extractContextCrop(fullCv, fullCv, cropBox);
-  const displayCanvas = displayCanvasFrom(fullCv);
+  // `decodeStage` already built this display copy from this same bitmap before
+  // inference started, and a second one reads the whole photograph again for
+  // pixels it has already produced. The passed-in canvas is used as given; the
+  // `displayCanvasFrom` arm is for a caller that has none to hand, and the
+  // whole-image-read counter pins which of the two a batch actually takes.
+  const display = prebuiltDisplay ?? displayCanvasFrom(fullCv);
 
   const base = {
     name: filename,
@@ -1451,7 +1463,7 @@ async function classifyImage(imgBitmap, filename, file) {
     // What the record keeps. The full-resolution frame goes with this function:
     // it has been classified, and the two paths that need it again re-decode it
     // from the File rather than holding it for every photo in the gallery.
-    displayCanvas: displayCanvas,
+    displayCanvas: display,
     fullW: fullCv.width,
     fullH: fullCv.height,
     // Retained only for a photo with no File: with no bytes there is nothing to
@@ -1461,8 +1473,8 @@ async function classifyImage(imgBitmap, filename, file) {
     // of the same picture. A photo the detector found nothing in has one set of
     // pixels and one display size, and splitting them across three canvases
     // would cost exactly what this change reclaimed.
-    cropCanvas: cropCv === fullCv ? displayCanvas : displayCanvasFrom(cropCv),
-    contextCanvas: cropBox ? contextCanvas : displayCanvas,
+    cropCanvas: cropCv === fullCv ? display : displayCanvasFrom(cropCv),
+    contextCanvas: cropBox ? contextCanvas : display,
     cropBox,
     contextBox,
     status,
@@ -1832,7 +1844,10 @@ async function processFiles(fileList) {
           analyzeMs: data.clipTime,
         });
       } else {
-        const res = await classifyImage(slot.bitmap, slot.name, slot.file);
+        // `slot.displayCanvas` is the copy `decodeStage` made from this same
+        // bitmap before inference, so handing it over is what stops
+        // `classifyImage` reading the whole photograph again to rebuild it.
+        const res = await classifyImage(slot.bitmap, slot.name, slot.file, slot.displayCanvas);
         commitBatchSlot(slots[i], startRev, res);
       }
     } catch (err) {
