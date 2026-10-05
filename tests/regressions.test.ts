@@ -154,9 +154,9 @@ describe("two views naming different species cannot reach a species claim", () =
     // View A peaks on aegypti, view B on albopictus. The values are near-mirror
     // images so neither view is "the better one" - the test is about the veto,
     // not about which species happens to win the pool.
-    // Above `CROP_ONLY_MAX_POSTERIOR`, so the pair still reaches the pooling the
+    // Two confident views, so the pair reaches the pooling the
     // veto is tested on - an unconfident crop is scored on its own and never
-    // gets here (`confidence-router.test.ts` covers that branch). Near-mirror
+    // gets here. Near-mirror
     // as before, so neither view is "the better one".
     const viewA = { spP: mk("Aedes aegypti", "Aedes albopictus", 0.898, 0.897), nuTotal: 1e-6, scale: 40 };
     const viewB = { spP: mk("Aedes albopictus", "Aedes aegypti", 0.898, 0.897), nuTotal: 1e-6, scale: 40 };

@@ -51,8 +51,24 @@ const KEY_OWNERS = new Set(["INPUT", "SELECT", "TEXTAREA", "OPTION"]);
  * Roles that stand in for a control. `div[role=slider]` and friends behave like
  * the native element without being one, and `getAttribute` returns null rather
  * than undefined, so the caller may pass either.
+ *
+ * `option` is here as well as `OPTION` in the tag set, because a custom listbox
+ * renders its choices as `role="option"` on a non-option element, and
+ * `textbox` because that is how a rich text field is usually marked. The app
+ * ships neither today - it uses only `role="group"` for the crop surfaces - so
+ * these are anticipatory rather than fixes.
  */
-const KEY_OWNER_ROLES = new Set(["slider", "listbox", "combobox", "spinbutton", "menu"]);
+const KEY_OWNER_ROLES = new Set([
+  "slider",
+  "listbox",
+  "combobox",
+  "spinbutton",
+  "menu",
+  "option",
+  "textbox",
+  "menuitem",
+  "tab",
+]);
 
 export interface KeyModifiers {
   ctrlKey?: boolean;
@@ -70,6 +86,12 @@ export interface KeyModifiers {
  * A modifier counts as the user driving a browser or OS shortcut rather than the
  * app: Alt+Left is Back in every browser, and swallowing it is the same class of
  * bug as swallowing a dropdown's arrows.
+ *
+ * `metaKey` is here for the same reason and costs macOS users something concrete:
+ * `Cmd+Left` / `Cmd+Right` used to drive the selection, and browsers report them
+ * as `Home`/`End`, so they no longer do. That is deliberate — on macOS those are
+ * Back and Forward, and a photo browser is the wrong place to steal them — but
+ * it is a removal, so it is pinned by a test rather than left to be discovered.
  */
 export function keyEventBelongsElsewhere(
   target: KeyTarget | null | undefined,

@@ -129,6 +129,25 @@ test.describe("the keyboard belongs to whatever the user is focused on", () => {
     expect(after).toBe(atEnd);
   });
 
+  test("Cmd+ArrowLeft is the browser's Back on macOS, not the app's selection", async ({ page }) => {
+    // A removal rather than a guard, and the one cost of routing every modifier
+    // to the browser: `Cmd+Left`/`Cmd+Right` used to drive the selection, because
+    // macOS browsers report them as Home/End. They no longer do. Deliberate -
+    // stealing Back/Forward in a photo browser is worse - but pinned, so it is
+    // a decision on the record rather than something a user discovers.
+    await dropTwoPhotos(page);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    const atEnd = await page.evaluate(() => {
+      const last = window.__mosqAsync!.previews.length - 1;
+      window.__mosqAsync!.selectedIndex = last;
+      return last;
+    });
+    expect(atEnd).toBeGreaterThan(0);
+    await page.keyboard.press("Meta+ArrowLeft");
+    const after = await page.evaluate(() => window.__mosqAsync!.selectedIndex);
+    expect(after).toBe(atEnd);
+  });
+
   test("ArrowLeft on the page DOES move the selection, so the tests above can fail", async ({ page }) => {
     // The control on the Alt test. Without it, every "the selection did not
     // move" assertion passes for the wrong reason whenever the selection is
@@ -157,22 +176,31 @@ test.describe("the keyboard belongs to whatever the user is focused on", () => {
       });
     });
     await page.reload();
-    // The engine load starts, which is the first thing after the preference
-    // reads in the initialiser.
     await page.waitForFunction(() => Boolean(window.__mosqAsync), null, { timeout: 15000 });
     const wired = await page.evaluate(() => {
       const A = window.__mosqAsync!;
       return {
         hasSeam: Boolean(A),
+        // Wired AFTER the preference reads, so these are the canary for "init
+        // threw partway through". Measured, not assumed: reverting `readPref`'s
+        // guard leaves all three of these true, because the samples and CSV
+        // buttons are wired a few lines BEFORE the first throwing read — so they
+        // are the canary for the correlation slider and the keydown listener
+        // below, which are wired after it. `hasSeam` is not a canary at all:
+        // `__mosqAsync` is assigned at module scope, long before this.
         samplesButton: Boolean(document.getElementById("btn-samples")?.onclick),
         csvButton: Boolean(document.getElementById("btn-csv")?.onclick),
+        corrSlider: Boolean(
+          (document.getElementById("corr-slider") as HTMLInputElement | null)?.oninput,
+        ),
       };
     });
     expect(wired.hasSeam).toBe(true);
-    // These are wired AFTER the pooling/correlation preference reads, so they
-    // are the canary for "init threw partway through".
     expect(wired.samplesButton).toBe(true);
     expect(wired.csvButton).toBe(true);
+    expect(wired.corrSlider).toBe(true);
+    // And no preference read escaped as an uncaught error. Reverting the guard
+    // fails HERE, not on the canaries above - measured by doing exactly that.
     expect(errors(page).filter((e) => e.includes("SecurityError"))).toEqual([]);
   });
 });
