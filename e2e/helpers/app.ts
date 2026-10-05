@@ -10,6 +10,28 @@ import { test as base, expect, type Page } from "@playwright/test";
  * working while `main.js` was a classic script and silently reached nothing once
  * it was bundled. Every helper below goes through it.
  */
+/**
+ * What `perf.snapshot()` reports, mirrored from `PerfSnapshot` in
+ * `src/app/perfCounters.ts`.
+ *
+ * Hand-mirrored rather than imported: this file is the seam, and a seam that
+ * imports the module it exists to expose makes a rename of a counter look like
+ * a working test rather than a compile error. `fullResFrames` and `ortSessions`
+ * are nullable because a gauge with no provider registered reports "not
+ * measured" rather than 0.
+ */
+export interface PerfSnapshot {
+  classifierCalls: number;
+  detectorCalls: number;
+  serverViewCalls: number;
+  renders: number;
+  forcedLayouts: number;
+  worstRenderLayouts: number;
+  layoutsByRender: Record<string, number>;
+  fullResFrames: number | null;
+  ortSessions: number | null;
+}
+
 export interface MosqAsync {
   last: unknown;
   frames: number;
@@ -75,6 +97,20 @@ export interface MosqAsync {
   updatePooling: () => void;
   renderResultsTable: () => void;
   downloadCSV: () => void;
+  /**
+   * The structural counters (`src/app/perfCounters.ts`).
+   *
+   * `armLayoutCounters` is the only way the layout probe gets installed.
+   * Nothing in the app calls it, so a page a user loads carries no patched
+   * getter and pays nothing for the counting - which is what makes it safe for a
+   * spec to arm mid-page and disarm again.
+   */
+  perf: {
+    snapshot(): PerfSnapshot;
+    resetCounters(): void;
+    armLayoutCounters(): void;
+    disarmLayoutCounters(): void;
+  };
 }
 
 declare global {
