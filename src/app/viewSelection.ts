@@ -39,10 +39,13 @@ export function viewKinds(hasCrop: boolean, includeWholeFrame: boolean): ViewKin
 export const WHOLE_FRAME_KEY = "mosquito_include_whole_frame";
 
 /**
- * On, because it is what the app has always done: the whole frame is in every
- * fusion unless the user says otherwise.
+ * Off, because measured crop-only fusion is at least as accurate as crop+whole
+ * on every fixture tried, so the whole frame is a view that costs work without
+ * buying accuracy. It stays in the UI as a toggle for the photos where the
+ * detector found nothing to crop - that is what the "no crop" branch of
+ * `viewKinds` is for, and a user who turns it on gets it back for every photo.
  */
-export const DEFAULT_INCLUDE_WHOLE_FRAME = true;
+export const DEFAULT_INCLUDE_WHOLE_FRAME = false;
 
 /** The narrow slice of `Storage` this reads, so a test can pass a plain object. */
 export interface PreferenceStore {
@@ -52,13 +55,19 @@ export interface PreferenceStore {
 /**
  * The stored preference, or the default.
  *
- * A stored value that is not exactly `"false"` is treated as on rather than
- * parsed: the only two states this has are "the user asked for crop-only" and
- * "not that", and a key left behind by an older or newer build - or by a hand
- * edit - should not be able to produce a third. Reading storage can throw (a
- * browser with storage disabled, a `localStorage` access denied in a private
- * context), and a preference that cannot be read is the default, not a blank
- * page.
+ * A stored value is compared, not parsed, so a key left behind by an older or
+ * newer build - or by a hand edit - cannot produce a third state: only the exact
+ * string `"true"` turns the whole frame on, and everything else is off. Reading
+ * storage can throw (a browser with storage disabled, a `localStorage` access
+ * denied in a private context), and a preference that cannot be read is the
+ * default, not a blank page.
+ *
+ * Note what that means for the *legacy* key. The default was once on and this
+ * key has never been written by a build that stored `true` for it, so every
+ * existing user's stored value is `"false"` (crop-only, asked for explicitly) or
+ * absent. Absent now reads as off, which is the new default; `"false"` still
+ * reads as off. Nobody who never touched the toggle loses the whole frame
+ * silently - they simply land on the measured-better default.
  */
 export function readIncludeWholeFrame(store: PreferenceStore | null): boolean {
   if (!store) return DEFAULT_INCLUDE_WHOLE_FRAME;
@@ -69,5 +78,5 @@ export function readIncludeWholeFrame(store: PreferenceStore | null): boolean {
     return DEFAULT_INCLUDE_WHOLE_FRAME;
   }
   if (raw === null || raw === undefined) return DEFAULT_INCLUDE_WHOLE_FRAME;
-  return raw !== "false";
+  return raw === "true";
 }

@@ -20,6 +20,7 @@ import { adjacentNames as _adjacentNames, softmaxJoint } from "../confidence/sof
 import { genusScores as _genusScores } from "../confidence/genusScores";
 import { fuseViews as _fuseViews } from "../confidence/fuseViews";
 import { genusOf, speciesGenusIndex } from "../confidence/genus";
+import { assertPartition } from "../confidence/taxonomy";
 import { verdictFrom as _verdictFrom, verdictSentence, nonMosquitoLabel } from "../confidence/verdict";
 import { pooledPosterior as _pooledPosterior,
          splitPoolable, poolingWeights, aggregateLogits, aggregateAdjacent,
@@ -31,7 +32,8 @@ import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTO
          cosineOffsetsFor, floorsFor, resolveModelUrl } from "./modelConfig";
 import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
-import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
+import { canvasUrl, dataUrlToCanvas, prepareThumbnail, setImgSrc, thumbnailUrl } from "./canvasCache";
+import { photoObjectUrl, releasePhotoUrl } from "./photoUrl";
 import { contentFingerprint } from "./contentHash";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, boxInSurface, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
@@ -59,7 +61,8 @@ import { clipTensor, embedCanvas as _embedCanvas } from "./embedding";
 import { halvingEnabled } from "./resizeMode";
 import { isUsableIntermediate } from "./downscale";
 import { beginRecompute, commitScores, markComputeFailed, ownsRecompute,
-         Superseded } from "./photoRecord";
+         readViewCache, writeViewCache, Superseded } from "./photoRecord";
+import { releaseGpuResources } from "./gpuRelease";
 import { classifyCanvasServer as _classifyCanvasServer,
          classifyViewLocal as _classifyViewLocal,
          classifyViewServer as _classifyViewServer, genusTotals as _genusTotals,
@@ -232,6 +235,11 @@ function invalidateScrollGuard() {
 }
 let isProcessingBatch = false;
 let idleRestoreAttempts = 0;
+// The `GPUDevice` `loadWebGPUModels` obtained for itself. onnxruntime-web takes
+// over `ort.env.webgpu.device` on first use, so this is only reachable from here
+// - which is what makes it the one device an idle release can safely destroy.
+// See `gpuRelease.ts` for why the backend's own device must be left alone.
+let appOwnedDevice = null;
 // A re-run in progress: the window between emptying the gallery and the batch
 // that refills it starting. See reprocessLoadedPhotos.
 let reprocessRunning = false;
@@ -293,6 +301,27 @@ const ASYNC = (window.__mosqAsync = {
   // cache and that the next `processFiles` refills it.
   get idleRelease() { return idleRelease; },
   get idleRestoreAttempts() { return idleRestoreAttempts; },
+  /**
+   * The `GPUDevice` the app obtained for itself in `loadWebGPUModels`, which
+   * tier 1 never reaches - it aborts every model fetch, so the load that would
+   * install one never completes. A tier-1 spec that wants to watch the release
+   * destroy a device installs one here, the same way `sessClip` is a replaceable
+   * seam rather than a reimplementation of the load path.
+   *
+   * Write it to BOTH this and `ort.env.webgpu.device`: the first is what the
+   * release destroys (it is the app's to destroy - see `gpuRelease.ts`), the
+   * second is the slot the release has to clear.
+   */
+  set appOwnedDevice(v) {
+    appOwnedDevice = v;
+    if (v && ort?.env?.webgpu) {
+      // `delete` first, for the reason `loadWebGPUModels` does it: once a
+      // webgpu session exists the property is `writable: false`.
+      delete ort.env.webgpu.device;
+      ort.env.webgpu.device = v;
+    }
+  },
+  get appOwnedDevice() { return appOwnedDevice; },
   // Reachable so a spec can put a fake session in and watch the release take it
   // out. `release` is counted rather than asserted on identity, because
   // onnxruntime's own sessions are what a real run releases.
@@ -362,6 +391,11 @@ if (typeof PerformanceObserver === "function") {
 
 
 const embedsCache = {};
+// Taxonomies, keyed by the head they belong to. Kept apart from `embedsCache`
+// because they are a different artefact with a different lifetime: the head is
+// 271 KB of fitted weights, this is 3 KB of labels, and an engine switch should
+// not re-fetch either when the other is already loaded.
+const taxonomyCache = {};
 
 async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   window.modelsReady = false;
@@ -380,6 +414,19 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
         }
         const device = await adapter.requestDevice({ requiredFeatures });
         if (!ort.env.webgpu) ort.env.webgpu = {};
+        // Tracked so an idle release can destroy it. onnxruntime-web replaces
+        // this reference with a device of its own on the first
+        // `InferenceSession.create` (its `WebGpuBackend.initialize` calls
+        // `adapter.requestDevice` again), so this one is orphaned from that
+        // moment - but it is still a live `GPUDevice`, and the release path is
+        // the only thing that can hand it back.
+        appOwnedDevice = device;
+        // `delete` first: once a webgpu session exists, onnxruntime-web has
+        // redefined `env.webgpu.device` as `writable: false`, so assigning to
+        // it throws and the catch below would swallow a spurious warning on
+        // every load after the first. The property is `configurable: true`, so
+        // this is the supported way to replace it.
+        delete ort.env.webgpu.device;
         ort.env.webgpu.device = device;
       }
     } catch (e) {
@@ -407,6 +454,12 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   // not worth a byte slice of its own - what the bar reports for them is that
   // they parsed and the head is now usable.
   if (needsEmbeds) steps.push({ key: "embeds" });
+  // The taxonomy is a few KB beside a 172 MB classifier, so it gets its own slice
+  // of the bar rather than riding on the head's - a missing or malformed
+  // taxonomy has to be visible on the progress bar, not inferred from the head
+  // arriving.
+  const needsTaxonomy = Boolean(clipCfg.taxonomyPath) && !taxonomyCache[targetEmbedsPath];
+  if (needsTaxonomy) steps.push({ key: "taxonomy" });
   beginModelLoad(steps);
 
   // 1. Load detector if not loaded
@@ -480,7 +533,46 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     embedsCache[targetEmbedsPath] = data;
     completeLoadStep("embeds");
   }
-  EMB = embedsCache[targetEmbedsPath];
+  // Attached to the head, so every consumer that reads `head.taxonomy` - the
+  // rank roll-up, the genus index - sees it without threading a second argument
+  // through. A taxonomy that does not match the head is caught here rather than
+  // surfacing as a species filed under the wrong genus.
+  // Read through the cache, not through `data`: that binding lives inside the
+  // `needsEmbeds` block above, and an engine whose head is already loaded has no
+  // `data` at all - which is exactly the path an engine switch takes.
+  const head = embedsCache[targetEmbedsPath];
+  if (needsTaxonomy) {
+    // A taxonomy is an enhancement, and a head without one is fully supported -
+    // genus falls back to the first word of the label. So a taxonomy that is
+    // missing, malformed, or not the array it claims to be degrades to that
+    // fallback and says so in the log rather than leaving a head that silently
+    // has no tree.
+    //
+    // `fetchWithCache` already absorbs a failed fetch, so the catch is not
+    // covering that (measured: tier 1 aborts every model request and the engine
+    // switch still completes). What it IS covering is everything downstream of
+    // the fetch - a truncated body makes `JSON.parse` throw, and that is outside
+    // fetchWithCache's reach. Failing a 172 MB classifier download over 3 KB of
+    // labels would be the wrong trade by a wide margin.
+    try {
+      const taxBuf = await fetchWithCache(resolveModelUrl(clipCfg.taxonomyPath), loadStepProgress("taxonomy", "Taxonomy"), sendLog);
+      const taxDoc = JSON.parse(new TextDecoder().decode(taxBuf));
+      if (Array.isArray(taxDoc?.taxonomy)) {
+        taxonomyCache[targetEmbedsPath] = taxDoc.taxonomy;
+        sendLog("taxonomy_loaded", { head: targetEmbedsPath, entries: taxDoc.taxonomy.length });
+      } else {
+        sendLog("taxonomy_unusable", { head: targetEmbedsPath, reason: "not_an_array" });
+        console.warn("[taxonomy] ignoring", clipCfg.taxonomyPath, "- no `taxonomy` array; using the first-word genus rule");
+      }
+    } catch (err) {
+      sendLog("taxonomy_unusable", { head: targetEmbedsPath, reason: "fetch_failed" });
+      console.warn("[taxonomy]", clipCfg.taxonomyPath, "could not be loaded; using the first-word genus rule:", err);
+    }
+    completeLoadStep("taxonomy");
+  }
+  if (taxonomyCache[targetEmbedsPath]) head.taxonomy = taxonomyCache[targetEmbedsPath];
+  assertPartition(head);
+  EMB = head;
   // Bind the species this head cannot separate to the label helpers. Done where
   // the head is assigned, so an engine switch rebinds them with it.
   setActiveHead(EMB);
@@ -789,7 +881,7 @@ async function reprocessLoadedPhotos() {
     // `processFiles` prepends to whatever is already there. Its own
     // `shiftIncludedForPrepend` then moves `kept`'s checks down by the batch's
     // length, which is the same arithmetic a drop over a populated gallery does.
-    previews.forEach((p) => { if (!kept.includes(p)) p.removed = true; });
+    previews.forEach((p) => { if (!kept.includes(p)) { p.removed = true; releasePhotoUrl(p); } });
     previews = [...kept];
 
     // The already-cropped photos are marked pending for the whole re-run, not
@@ -1076,7 +1168,13 @@ async function classifyImage(imgBitmap, filename) {
   }
 
   const views = [];
-  if (cropView) views.push(cropView);
+  // Each view paired with the kind it is, so the record built below can be filed
+  // with the per-view posteriors the whole-frame toggle re-fuses. A first toggle
+  // after a batch that started empty would otherwise re-run every photo's
+  // inference, which is the case the toggle is most often used for: the photos
+  // were just classified, so their views are exactly what the toggle re-pools.
+  const viewCache = {};
+  if (cropView) { views.push(cropView); viewCache.crop = cropView; }
   // Which views this photo offers is one decision, in `viewKinds`, and it is not
   // "always both": the whole frame is the second opinion on a crop that passed
   // the gate, and that second opinion can be turned off. It stays the only view
@@ -1088,8 +1186,10 @@ async function classifyImage(imgBitmap, filename) {
     // this reads ~0.3 MP rather than reading the 12-50 MP frame a second time.
     const wholeEmb = await clipEmbed(fullCv, lb.content);
     const wholeJ = softmaxJoint(EMB, wholeEmb, { offsets: cosineOffsetsFor(engine) });
-    views.push({ spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
-                 adP: wholeJ.adP, scale: localViewScale() });
+    const wholeView = { spP: wholeJ.spP, nuTotal: wholeJ.nuP.reduce((a, b) => a + b, 0),
+                        adP: wholeJ.adP, scale: localViewScale() };
+    views.push(wholeView);
+    viewCache.whole = wholeView;
   }
 
   const clipTime = Math.round(performance.now() - tClip0);
@@ -1121,6 +1221,17 @@ async function classifyImage(imgBitmap, filename) {
     crop_rejected: cropRejected,
     is_cropped,
     rev: 0,
+    // A photo born from the batch has never been recomputed, so its pixel
+    // generation is 0 - the same value `classifyViews` reads on a toggle. Stamped
+    // here rather than by `writeViewCache` because the record does not exist yet:
+    // this is the object that becomes the record, and a stamp written after
+    // `commitBatchSlot` would have to trust that it landed.
+    contentRev: 0,
+    viewCache: Object.fromEntries(
+      Object.entries(viewCache).map(([kind, result]) => [
+        kind, { contentRev: 0, engine, head: EMB, result },
+      ]),
+    ),
     error: null,
     manual_full_photo: !best,
     detTime,
@@ -1310,6 +1421,7 @@ async function processFiles(fileList) {
           slot.fullCanvas.height = slot.bitmap.height;
           slot.fullCanvas.getContext("2d").drawImage(slot.bitmap, 0, 0);
           slot.status = "decoding… detecting…";
+          await prepareThumbnail(slot.fullCanvas, 0.8, slot.file);
         } catch (err) {
           slot.pending = false;
           slot.error = `Could not read image: ${err.message || err}`;
@@ -1352,6 +1464,27 @@ async function processFiles(fileList) {
         const cropCv = await dataUrlToCanvas(data.cropDataUrl);
         const contextCv = await dataUrlToCanvas(data.contextDataUrl);
 
+        // The photo's bytes become the server's frame, because from here on that
+        // frame is what the app holds: `commitBatchSlot` puts it in `fullCanvas`,
+        // the crop box is in its coordinates, and `cropGeometry` divides by its
+        // width and height. Leaving `file` as the upload would leave the viewer
+        // showing bytes that were never classified, beside a box positioned for
+        // pixels it does not have - and nothing downstream can detect that,
+        // because the server's decode is as correct a decode as the browser's
+        // own. What it is not guaranteed to be is the SAME decode: a re-encode, a
+        // downscale or a different EXIF reading on the server all produce a
+        // frame the browser's copy of the upload does not match.
+        //
+        // So the record is made self-consistent here rather than trusted to be:
+        // the object URL the viewer serves is minted from these bytes, and
+        // `photoObjectUrl` revokes the upload's URL when `file` changes, so the
+        // old one cannot outlive the frame it stood for.
+        //
+        // Encoding here rather than at selection is what keeps this cheap -
+        // `toBlob` is off the click, and it is paid once per photo against a
+        // network round trip that cost far more.
+        const serverFile = await sourceFileFor({ fullCanvas: fullCv, name: data.filename });
+
         // Second view over the same contract, no server change needed: the
         // endpoint already classifies whatever box it is given, so the whole
         // frame is one more request with crop_box spanning it. Skipped when the
@@ -1359,18 +1492,34 @@ async function processFiles(fileList) {
         // anyway - then there is only one view to have - and when the user has
         // turned the whole-frame view off.
         const views = [serverView(data)];
+        // The same per-view filing as the local batch path: the whole-frame
+        // toggle re-pools what is already here rather than re-asking the server
+        // for it. A server view is a `ViewResult` like any other, so nothing
+        // downstream tells a cached one from a fetched one.
+        const viewCache = data.is_cropped ? { crop: views[0] } : { whole: views[0] };
         if (viewKinds(Boolean(data.is_cropped), includeWholeFrame).includes("whole")) {
           const fd2 = new FormData();
           fd2.append("file", slot.file);
           fd2.append("crop_box", JSON.stringify([0, 0, data.fullWidth, data.fullHeight]));
           const res2 = await fetch("/api/predict", { method: "POST", body: fd2 });
           if (!res2.ok) throw new Error("Server inference error " + res2.status);
-          views.push(serverView(await res2.json()));
+          const wholeView = serverView(await res2.json());
+          views.push(wholeView);
+          viewCache.whole = wholeView;
         }
         const fused = fuseViews(views);
 
         commitBatchSlot(slots[i], {
           name: data.filename, scoredBy: engine,
+          // Null when the encode failed, and null is the safe answer here rather
+          // than the old upload: with no file the viewer falls back to encoding
+          // `fullCanvas` itself, which is this frame by definition. Keeping the
+          // upload instead would put back the mismatch this exists to remove.
+          //
+          // A re-run therefore re-classifies these bytes rather than the original
+          // upload, which is what makes it a re-run of the same photograph: the
+          // frame on screen is the frame that was classified.
+          file: serverFile,
           fullCanvas: fullCv, cropCanvas: cropCv, contextCanvas: contextCv,
           cropBox: data.cropBox, contextBox: data.contextBox, scores: fused.labels,
           detail: fused.detail, logits: fused.logits, status: data.status,
@@ -1384,6 +1533,15 @@ async function processFiles(fileList) {
           adjacentDetail: fused.adjacentDetail,
           agreement: fused.agreement,
           viewsLanded: views.length, viewsTotal: views.length,
+          // As in the local batch path: stamped at generation 0, under the engine
+          // that produced it and the head it ran against, so a whole-frame toggle
+          // re-pools these instead of re-asking the server.
+          contentRev: 0,
+          viewCache: Object.fromEntries(
+            Object.entries(viewCache).map(([kind, result]) => [
+              kind, { contentRev: 0, engine, head: EMB, result },
+            ]),
+          ),
           manual_full_photo: !data.is_cropped,
           detTime: data.detTime, clipTime: data.clipTime, totalTime: data.totalTime
         });
@@ -1402,6 +1560,10 @@ async function processFiles(fileList) {
       if (slots[i].pending) markComputeFailed(slots[i], err, sendLog);
       else slots[i].error = `Analysis failed: ${err.message || err}`;
       console.error("Error processing", slot.name, err);
+    }
+    // The crop is a new canvas; give its tile the native resize too.
+    if (slots[i].cropCanvas && slots[i].cropCanvas !== slots[i].fullCanvas) {
+      await prepareThumbnail(slots[i].cropCanvas, 0.8);
     }
     processed++;
     setProgress("batch", `Analyzed ${processed} of ${imageFiles.length} photos…`, (100 * processed) / imageFiles.length);
@@ -1477,6 +1639,7 @@ function deletePhoto(idx) {
   sendLog("delete_photo", { idx, name: deletedName });
   // Any computation still running for this photo now has nothing to write to.
   deleted.removed = true;
+  releasePhotoUrl(deleted);
   previews.splice(idx, 1);
   includedIndices = shiftIncluded(includedIndices, idx);
   // Follow the photo, not the index. Deleting anything before the selected photo
@@ -1766,7 +1929,7 @@ function deleteAllPhotos() {
   // cautious.
   // Mark first, exactly as deletePhoto does, so every in-flight inference for any
   // photo drops its result rather than writing into a slot that no longer exists.
-  previews.forEach((p) => { p.removed = true; });
+  previews.forEach((p) => { p.removed = true; releasePhotoUrl(p); });
   previews.length = 0;
   includedIndices = new Set();
   selectedIndex = 0;
@@ -1892,7 +2055,14 @@ const reclassifyRunner = createReclassifyRunner({
     // drops the result of every photo behind the deleted one, leaving each stuck
     // on the `pending` that `beginRecompute` set. The batch path has always
     // resolved by `indexOf` for exactly this reason.
-    const rev = beginRecompute(p);
+    // `false`: the pixels are not changing here. A whole-frame toggle re-pools
+    // the same crop and the same frame, so the per-view posteriors already on
+    // the record are still valid and `classifyViews` re-fuses them instead of
+    // re-running the classifier. An engine switch reaches the same call with
+    // different pixels in the sense that matters - a different arithmetic over
+    // the same ones - and it is caught by the engine and head fields of the
+    // cache stamp rather than by this counter.
+    const rev = beginRecompute(p, false);
     renderThumbnails();
     try {
       await classifyViews(p, previews.indexOf(p), rev, p.cropCanvas, p.cropBox);
@@ -1991,7 +2161,9 @@ function renderActivePhoto() {
   // image rather than leaving a broken-icon with alt text over an empty panel;
   // the pending notice beside it says what is happening.
   if (p.fullCanvas) {
-    setImgSrc(fullImg, canvasUrl(p.fullCanvas, 0.9));
+    // The original bytes by object URL; a photo with no File falls back to an
+    // encode of its canvas.
+    setImgSrc(fullImg, photoObjectUrl(p) ?? canvasUrl(p.fullCanvas, 0.9));
     fullImg.style.visibility = "visible";
   } else {
     fullImg.removeAttribute("src");
@@ -2022,11 +2194,11 @@ function renderActivePhoto() {
   if (zoomSource) {
     surfaceZoomed.style.width = "100%";
     surfaceZoomed.style.height = "100%";
-    setImgSrc(contextImg, canvasUrl(zoomSource, 0.9));
+    setImgSrc(contextImg, (zoomSource === p.fullCanvas && photoObjectUrl(p)) || canvasUrl(zoomSource, 0.9));
     contextImg.style.display = "block";
     contextImg.style.width = "100%";
     contextImg.style.height = "100%";
-    contextImg.style.objectFit = "cover";
+    contextImg.style.objectFit = "contain";
     cropEmpty.style.display = "none";
 
     // Draw where the crop sits within the context region
@@ -2387,6 +2559,12 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
   const views = viewsFor(p, cropCv, cropBox);
   const landed = [];
   let dropped = false;
+  // The stamp every view lookup in this pass is made against, read once. It
+  // names the photo's pixels (`contentRev`), the engine, and the head object by
+  // identity, so a hit means "this exact view of this exact photo was already
+  // scored, by this arithmetic". See `ViewCacheEntry` in photoRecord.ts.
+  const stamp = { contentRev: p.contentRev || 0, engine, head: EMB };
+  let cached = 0;
   // The fused result for the views that have landed, kept for the log line below.
   // The loop recomputes it once per view as each lands; the last one is the pool
   // of every view, which is what a reader of `views_fused` wants to see.
@@ -2395,9 +2573,27 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
   for (const view of views) {
     await afterNextPaint();
     if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
-    const v = engine === "server-gpu"
-      ? await classifyViewServer(p, view.box)
-      : await classifyViewLocal(view.canvas, engine);
+    // A view the photo record already holds. The whole-frame toggle reaches here
+    // with every view cached, so a toggle is a re-fusion: no ONNX call, and
+    // `landed` carries the same per-view results a fresh pass would have
+    // produced, which is what keeps the fused posterior and `viewAgreement`
+    // identical either way.
+    const hit = readViewCache(p, view.kind, stamp);
+    let v;
+    if (hit) {
+      cached++;
+      v = hit;
+    } else {
+      v = engine === "server-gpu"
+        ? await classifyViewServer(p, view.box)
+        : await classifyViewLocal(view.canvas, engine);
+      // Filed only here, and only after the guard above has passed: a
+      // classification overtaken mid-flight writes neither the record nor the
+      // cache, so a later toggle cannot re-fuse a view of pixels the photo no
+      // longer shows.
+      if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
+      writeViewCache(p, view.kind, stamp, v);
+    }
     if (!ownsRecompute(p, previews, idx, rev)) { dropped = true; break; }
     landed.push(v);
     // Paint what is known so far. The fused verdict is recomputed from the views
@@ -2421,6 +2617,11 @@ async function classifyViews(p, idx, rev, cropCv, cropBox) {
     name: p.name,
     rev,
     views: landed.length,
+    // How many of this photo's views came from the cache. The whole-frame
+    // toggle's structural claim is that this is every view of every photo, which
+    // is the same statement as "no inference ran", and it is checkable from a log
+    // line without a stopwatch.
+    cached,
     ...posteriorSummary(fused || {}),
     ...verdictSummary(p),
   });
@@ -2660,34 +2861,26 @@ async function revertToFullPhoto(idx) {
 // that keeps a release out of a running batch - live in `idleRelease.ts` and are
 // tested there. This is the wiring.
 
-// A session that will not release is not a reason to keep the others: some
-// execution providers have no release at all.
-function releaseSession(entry) {
-  try {
-    entry?.sess?.release?.();
-  } catch (err) {
-    console.warn("Session release failed:", err);
-  }
-}
-
-function releaseIdleMemory() {
+async function releaseIdleMemory() {
   const sessions = Object.values(clipSessions);
   const hadDetector = Boolean(sessDet);
   // Every session, not just the current one: a user who switched engines twice
-  // has three sessions alive, and releasing only the selected engine's leaves
-  // the rest pinned for the rest of the tab's life.
-  for (const entry of sessions) releaseSession(entry);
-  if (sessDet) releaseSession({ sess: sessDet });
+  // has three sessions alive, and onnxruntime-web only empties its weight cache
+  // when the LAST session is released - so releasing a subset frees nothing.
+  const toRelease = [...sessions.map((entry) => entry?.sess)];
+  if (sessDet) toRelease.push(sessDet);
+
+  // The device is cleared and the app's own device destroyed by the same call,
+  // and only after every `release()` has resolved - see `gpuRelease.ts`, which
+  // documents why the backend's device is not destroyed here.
+  const freed = await releaseGpuResources({ sessions: toRelease, ort, ownedDevice: appOwnedDevice });
+  appOwnedDevice = null;
+
   for (const key of Object.keys(clipSessions)) delete clipSessions[key];
   sessClip = null;
   sessDet = null;
   loadedClipEngine = null;
   window.modelsReady = false;
-
-  // The device and everything the provider allocated on it. Dropping the
-  // reference is what lets the browser reclaim it; onnxruntime-web keeps no
-  // registry of its own beyond `ort.env.webgpu.device`.
-  if (ort.env.webgpu) ort.env.webgpu.device = undefined;
 
   // Bitmaps still held by a photo mid-decode. `commitBatchSlot` already
   // releases the ones a finished photo owned, so this is the decode pool's
@@ -2706,7 +2899,15 @@ function releaseIdleMemory() {
   }
 
   updateReprocessButton();
-  sendLog("idle_released", { sessions: sessions.length + (hadDetector ? 1 : 0) });
+  sendLog("idle_released", {
+    sessions: sessions.length + (hadDetector ? 1 : 0),
+    // What actually came back: `releasedSessions` is the count whose
+    // `release()` resolved, which is what destroys the weight `GPUBuffer`s.
+    // A lower number than `sessions` means some weights are still on the device.
+    freed: freed.releasedSessions,
+    unreleased: freed.failedSessions,
+    deviceDestroyed: freed.deviceDestroyed,
+  });
 }
 
 async function restoreIdleMemory() {
