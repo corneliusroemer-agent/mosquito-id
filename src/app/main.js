@@ -17,6 +17,7 @@
 import { localViewScale as _localViewScale, serverViewScale as _serverViewScale,
          DEFAULT_FLOORS } from "../confidence/types";
 import { adjacentNames as _adjacentNames, softmaxJoint } from "../confidence/softmax";
+import { cropPassesGate as _cropPassesGate } from "../confidence/cropGate";
 import { genusScores as _genusScores } from "../confidence/genusScores";
 import { fuseViews as _fuseViews } from "../confidence/fuseViews";
 import { genusOf, speciesGenusIndex } from "../confidence/genus";
@@ -1399,12 +1400,17 @@ async function classifyImage(imgBitmap, filename, file) {
   // either way, and its verdict is the photo's verdict, so a rejected crop
   // leaves a photo that pools on what the frame said rather than one that is
   // struck off the list.
+  //
+  // `cropPassesGate` reads the nuisance rows the verdict gate reads, so the two
+  // cannot disagree about which of them are evidence: a head whose nuisance block
+  // is entirely placeholder rows has no nuisance detector at all, and a crop is
+  // not thrown away on the model's own hesitation. See src/confidence/cropGate.ts.
   let cropView = null;
   let cropRejected = false;
   if (best) {
     const emb = await clipEmbed(cropCv);
     const j = softmaxJoint(EMB, emb, { offsets: cosineOffsetsFor(engine) });
-    if (Math.max(...j.spP) >= Math.max(...j.nuP)) {
+    if (_cropPassesGate(EMB, j.spP, j.nuP)) {
       cropView = { spP: j.spP, nuTotal: j.nuP.reduce((a, b) => a + b, 0), adP: j.adP,
                    scale: localViewScale() };
     } else {
