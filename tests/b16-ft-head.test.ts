@@ -138,7 +138,7 @@ describe("the b16-ft head's shape is what the app expects", () => {
 describe("the b16-ft engine ships without becoming the default", () => {
   it("is in the engine map, with the weights and head it needs", () => {
     const e = WEBGPU_MODELS["webgpu-b16-ft"];
-    expect(e, "webgpu-b16-ft is not in WEBGPU_MODELS").toBeDefined();
+    if (!e) throw new Error("webgpu-b16-ft is not in WEBGPU_MODELS");
     expect(e.path).toBe("bioclip_b16_ft_fp16.onnx");
     expect(e.embedsPath).toBe("text_embeds_b16ft.json");
     expect(e.taxonomyPath).toBe("taxonomy_b16ft.json");
@@ -152,8 +152,9 @@ describe("the b16-ft engine ships without becoming the default", () => {
     // the standing instruction is that the default does not flip if that
     // confirmation comes out against it. So `webgpu-b16` must remain in the map
     // and the page's `selected` option must remain the H/14 default.
-    expect(WEBGPU_MODELS["webgpu-b16"]).toBeDefined();
-    expect(WEBGPU_MODELS["webgpu-b16"].embedsPath).toBe("text_embeds_b16.json");
+    const b16 = WEBGPU_MODELS["webgpu-b16"];
+    if (!b16) throw new Error("webgpu-b16 is not in WEBGPU_MODELS");
+    expect(b16.embedsPath).toBe("text_embeds_b16.json");
     const html = readFileSync(join(here, "..", "index.html"), "utf8");
     const selected = /<option value="([^"]+)" selected>/.exec(html);
     expect(selected, "no engine is marked selected in index.html").not.toBeNull();
