@@ -506,7 +506,7 @@ test.describe("re-running the loaded photos on another engine", () => {
     // A box of the user's own, nowhere near the detector's, so a re-detect could
     // not reproduce it by accident.
     const drawn = [137, 211, 640, 702];
-    await page.evaluate((box) => {
+    await page.evaluate(async (box) => {
       const A = window.__mosqAsync!;
       const p = A.previews[0];
       p.cropBox = box;
@@ -514,7 +514,12 @@ test.describe("re-running the loaded photos on another engine", () => {
       cv.width = box[2]! - box[0]!;
       cv.height = box[3]! - box[1]!;
       p.cropCanvas = cv;
-      p.fullCanvas.getContext("2d")!.drawImage(p.fullCanvas, box[0]!, box[1]!, cv.width, cv.height, 0, 0, cv.width, cv.height);
+      // Cut the crop from the photo's own pixels. The record's canvas is
+      // display-sized now, so this draws the pixels the drawn box actually
+      // covers rather than a 2048-wide reduction of them - which is what a
+      // re-run of this photo will be scored on.
+      const src = await window.__mosqAsync!.fullCanvasFor(p);
+      src!.getContext("2d")!.drawImage(src!, box[0]!, box[1]!, cv.width, cv.height, 0, 0, cv.width, cv.height);
     }, drawn);
     const detsBefore = await detectorRuns(page);
 

@@ -54,20 +54,39 @@ export interface ViewRequest {
  * user reverted to whole. Each view carries its crop box because the server path
  * takes a box where the local path takes the already-cut pixels.
  *
+ * The whole frame is passed in rather than read off the photo because the photo
+ * no longer holds one: it holds a display-sized copy, and the classifier's input
+ * is the pixels the photograph had, not a 2048 px reduction of them. A caller
+ * that has no full-resolution frame to offer passes what it has and accepts that
+ * this is a differently-sourced view, which is its decision to make, not this
+ * function's to make silently.
+ *
  * The decision of which views those are lives in `viewKinds`, shared with the
  * batch paths, so the three places a photo gets classified cannot disagree about
  * what a photo offers.
  */
 export function viewsFor(
-  p: Pick<PhotoState, "fullCanvas">,
+  full: HTMLCanvasElement | null,
   cropCv: HTMLCanvasElement | null,
   cropBox: Box | null,
   includeWholeFrame: boolean,
 ): ViewRequest[] {
-  const full = p.fullCanvas;
   if (!full) return [];
-  const whole: ViewRequest = { canvas: full, box: [0, 0, full.width, full.height], kind: "whole" };
-  return viewKinds(Boolean(cropCv) && cropCv !== full, includeWholeFrame).map((kind) =>
+const whole: ViewRequest = { canvas: full, box: [0, 0, full.width, full.height], kind: "whole" };
+  // The crop box is the predicate, not canvas identity. It used to be identity:
+  // an uncropped photo's `cropCanvas` WAS the same canvas as its whole frame, so
+  // `cropCv !== full` happened to mean "this photo has a crop". Once the record
+  // stopped holding the full-resolution frame, an uncropped photo's `cropCanvas`
+  // is its display canvas - a different object from the frame just decoded - and
+  // the check started saying yes. That costs a second full inference per pass,
+  // pools one photograph against itself as two independent views (the fusion
+  // this function's own contract forbids), and on the server path posts a
+  // literal "null" as the crop box for a whole-frame view. A photo with no crop
+  // has no box, and that is the whole of it.
+  // `cropCv` still has to exist for there to be something to classify, so it is
+  // a null check and nothing more: a photo with a box and no pixels to put in it
+  // is better off with one view than with a crop view that throws.
+  return viewKinds(Boolean(cropBox) && Boolean(cropCv), includeWholeFrame).map((kind) =>
     kind === "crop" ? { canvas: cropCv, box: cropBox, kind } : whole,
   );
 }
@@ -112,6 +131,31 @@ export async function classifyViewLocal(
   scale: number,
 ): Promise<ViewResult> {
   return viewResultFrom(head, await embed(canvas), engineKey, scale);
+}
+
+/**
+ * Which of the server's three images is the same picture as its full frame.
+ *
+ * The server sends the frame three times over - once whole, once as the crop,
+ * once as the context region - and when its own detection found nothing the crop
+ * and the context ARE the whole frame. That is one photograph, and a photo
+ * record should hold it once.
+ *
+ * The question is asked of the data URLs, which is what the server actually
+ * sent, and not of the decoded canvases. Decoding is `dataUrlToCanvas`, which
+ * allocates a fresh canvas per URL, so two canvases decoded from the same URL
+ * are never the same object and an identity comparison is never true - which is
+ * how a path whose comment claimed it shared one canvas ended up holding three
+ * capped copies of the same photograph instead.
+ */
+export function aliasesWholeFrame(data: {
+  fullDataUrl?: string | null;
+  cropDataUrl?: string | null;
+  contextDataUrl?: string | null;
+}): { crop: boolean; context: boolean } {
+  const full = data.fullDataUrl ?? null;
+  const isFull = (u: string | null | undefined) => full !== null && u != null && u === full;
+  return { crop: isFull(data.cropDataUrl), context: isFull(data.contextDataUrl) };
 }
 
 /** The slice of a `/api/predict` response this module reads. */
@@ -160,26 +204,41 @@ export interface ScoredCrop {
  * Server path: the server owns no geometry decision we need for display, only
  * the scores for a crop box we send it.
  *
+ * The canvas and the box must agree on a scale. `cropBox` is in the
+ * photograph's pixels, and the server applies it to whatever image it is sent,
+ * so a downscaled frame sent with a full-resolution box asks the server for a
+ * region of the picture that does not contain the crop - and it answers
+ * confidently about it. So this takes the full-resolution frame explicitly
+ * rather than whatever the photo is holding, and refuses rather than guessing.
+ *
  * If it answers with a different box than the one it was given, its labels
  * describe a crop the user is not looking at, so the box is logged and ignored
  * rather than silently re-displayed.
+ *
+ * A null box is sent as NO `crop_box` field rather than as `JSON.stringify(null)`.
+ * The two are not the same request: the first says "classify whatever you find",
+ * the second posts the four-character string `null` and asks the server to parse
+ * it as a box. A server that does not reject it answers confidently about a
+ * crop that is not one. A test that asserts the request does not CONTAIN the
+ * text "null" is the assertion that catches this - `=== "null"` would pass on
+ * the bug.
  */
 export async function classifyCanvasServer(
-  photo: Pick<PhotoState, "fullCanvas" | "name">,
-  cropBox: Box,
+  canvas: HTMLCanvasElement | null,
+  name: string,
+  cropBox: Box | null,
   log: (event: string, fields: Record<string, unknown>) => void,
 ): Promise<ScoredCrop> {
-  const canvas = photo.fullCanvas;
-  if (!canvas) throw new Error(`No frame to send for ${photo.name}`);
+  if (!canvas) throw new Error(`No frame to send for ${name}`);
   const blob = await new Promise<Blob>((r) => canvas.toBlob(r as (b: Blob | null) => void, "image/jpeg", 0.85));
-  if (!blob) throw new Error(`Could not encode ${photo.name} for the server`);
+  if (!blob) throw new Error(`Could not encode ${name} for the server`);
   const formData = new FormData();
-  formData.append("file", blob, photo.name);
-  formData.append("crop_box", JSON.stringify(cropBox));
+  formData.append("file", blob, name);
+  if (cropBox) formData.append("crop_box", JSON.stringify(cropBox));
   const res = await fetch("/api/predict", { method: "POST", body: formData });
   if (!res.ok) throw new Error(`Server inference error ${res.status}`);
   const data = (await res.json()) as PredictResponse;
-  if (JSON.stringify(data.cropBox) !== JSON.stringify(cropBox)) {
+  if (cropBox && JSON.stringify(data.cropBox) !== JSON.stringify(cropBox)) {
     log("server_crop_box_diverged", { requested: cropBox, returned: data.cropBox });
   }
   return { labels: data.labels, detail: data.detail, logits: data.logits };
@@ -187,13 +246,14 @@ export async function classifyCanvasServer(
 
 /** The server's answer for one crop box, in the shape a fusion takes. */
 export async function classifyViewServer(
-  photo: Pick<PhotoState, "fullCanvas" | "name">,
-  cropBox: Box,
+  canvas: HTMLCanvasElement | null,
+  name: string,
+  cropBox: Box | null,
   head: Head,
   scale: number,
   log: (event: string, fields: Record<string, unknown>) => void,
 ): Promise<ViewResult> {
-  return serverView(await classifyCanvasServer(photo, cropBox, log), head, scale);
+  return serverView(await classifyCanvasServer(canvas, name, cropBox, log), head, scale);
 }
 
 /** Round to 4 dp, or null for anything that is not a finite number. */

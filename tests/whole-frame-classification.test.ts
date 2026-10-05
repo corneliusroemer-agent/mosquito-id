@@ -39,7 +39,9 @@ function classifySource(): string {
 function classified(over: Partial<ClassifiedPhoto>): ClassifiedPhoto {
   return {
     name: "photo.jpg",
-    fullCanvas: null,
+    displayCanvas: null,
+    fullW: null,
+    fullH: null,
     cropCanvas: null,
     cropBox: null,
     contextBox: null,

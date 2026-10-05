@@ -2,8 +2,8 @@ import { boot, errors, expect, populate, test } from "../helpers/app";
 import type { Page } from "@playwright/test";
 
 /**
- * Whatever `fullCanvas` holds, the bytes the viewer serves are the bytes that
- * canvas was decoded from.
+ * Whatever canvas the record holds, the bytes the viewer serves are the bytes
+ * that canvas was decoded from.
  *
  * On the local engine the two are the same object by construction: the canvas
  * is the browser's own decode of `p.file`. On `server-gpu` they stop being the
@@ -187,7 +187,7 @@ test.describe("server-gpu frame", () => {
     // Read what is on screen against what was classified.
     const r = await page.evaluate(async () => {
       const p = window.__mosqAsync!.previews[0];
-      const cv = p.fullCanvas as HTMLCanvasElement;
+      const cv = p.displayCanvas as HTMLCanvasElement;
       const img = document.getElementById("full-img") as HTMLImageElement;
       await img.decode();
       const out = document.createElement("canvas");
@@ -298,7 +298,7 @@ test.describe("server-gpu frame", () => {
 
     const r = await page.evaluate(async () => {
       const p = window.__mosqAsync!.previews[0];
-      const cv = p.fullCanvas as HTMLCanvasElement;
+      const cv = p.displayCanvas as HTMLCanvasElement;
       const img = document.getElementById("full-img") as HTMLImageElement;
       await img.decode();
       const out = document.createElement("canvas");
@@ -308,8 +308,8 @@ test.describe("server-gpu frame", () => {
       const b = out.getContext("2d")!.getImageData(0, 0, cv.width, cv.height).data;
       let d = 0;
       for (let i = 0; i < a.length; i++) d += Math.abs(a[i]! - b[i]!);
-      // The overlay is positioned from `fullCanvas`'s dimensions, so it can only
-      // be right if what is displayed has those dimensions.
+      // The overlay is positioned from the photo's own dimensions, so it can
+      // only be right if what is displayed has those dimensions.
       const box = document.getElementById("full-active-crop-box") as HTMLElement;
       return {
         cvW: cv.width,

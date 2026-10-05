@@ -73,11 +73,29 @@ export interface OrtTensor {
  * crop geometry or the label helpers without dragging the whole app state along.
  *
  * `cropBox` and `contextBox` are null before a crop exists; `contextCanvas`
- * falls back to `fullCanvas` for a photo classified on the whole frame.
+ * falls back to `displayCanvas` for a photo classified on the whole frame.
  */
 export interface Preview {
   name?: string;
-  fullCanvas: HTMLCanvasElement | null;
+  /**
+   * A display-sized copy of the photograph, its longest edge at most
+   * `DISPLAY_MAX_EDGE`. The only canvas a photo holds between operations.
+   *
+   * The photograph itself is not retained - see `fullResSource` - so this is
+   * not the frame: it is what the panels paint and what the thumbnail encodes.
+   */
+  displayCanvas: HTMLCanvasElement | null;
+  /**
+   * The photograph's own pixel dimensions, in the orientation the frame is
+   * drawn in.
+   *
+   * `cropBox` and `contextBox` are expressed in these pixels, so every mapping
+   * between a box and a panel divides by them rather than by
+   * `displayCanvas.width`, which is a different size and would put every box
+   * somewhere else without reporting anything.
+   */
+  fullW?: number | null;
+  fullH?: number | null;
   cropCanvas: HTMLCanvasElement | null;
   contextCanvas?: HTMLCanvasElement | null;
   cropBox: Box | null;
@@ -98,6 +116,18 @@ export interface Preview {
 
 /** Anything the surface-mapping helpers can measure: a canvas or an image. */
 export interface CanvasLike {
+  width: number;
+  height: number;
+}
+
+/**
+ * The photograph's own dimensions, as a thing the surface mappings can measure.
+ *
+ * A `Preview` satisfies this structurally through `fullW`/`fullH` once it is
+ * shaped by `photoFrame`, which is what makes the reading explicit: the frame a
+ * box is placed against is the photograph, and a display canvas is not it.
+ */
+export interface PhotoFrame {
   width: number;
   height: number;
 }
