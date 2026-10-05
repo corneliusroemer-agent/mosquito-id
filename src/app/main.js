@@ -49,6 +49,7 @@ import { badge, canView, checkLabel, contributesToPool, photoRef,
 import { DEFAULT_INCLUDE_WHOLE_FRAME, WHOLE_FRAME_KEY,
          readIncludeWholeFrame, viewKinds } from "./viewSelection";
 import { createReclassifyRunner } from "./reclassifyQueue";
+import { createIdleRelease } from "./idleRelease";
 import { renderReprocessButton, sourceFileFor, splitForRerun, stalePhotos } from "./reprocess";
 import { clipTensor, embedCanvas as _embedCanvas } from "./embedding";
 import { halvingEnabled } from "./resizeMode";
@@ -217,6 +218,7 @@ let previews = [];
 let includedIndices = new Set();
 let selectedIndex = 0;
 let isProcessingBatch = false;
+let idleRestoreAttempts = 0;
 // A re-run in progress: the window between emptying the gallery and the batch
 // that refills it starting. See reprocessLoadedPhotos.
 let reprocessRunning = false;
@@ -271,6 +273,19 @@ const ASYNC = (window.__mosqAsync = {
   // assignment to it a silent no-op outside strict mode, and `page.evaluate`
   // bodies are not strict.
   set sessDet(v) { sessDet = v; },
+  // The idle-release controller, so a tier-1 spec can drive a release without
+  // waiting out the 60 s grace period and without faking `visibilityState`. The
+  // decision logic itself is unit-tested in `tests/idle-release.test.ts`; what
+  // this seam is for is the wiring - that a release really empties the session
+  // cache and that the next `processFiles` refills it.
+  get idleRelease() { return idleRelease; },
+  get idleRestoreAttempts() { return idleRestoreAttempts; },
+  // Reachable so a spec can put a fake session in and watch the release take it
+  // out. `release` is counted rather than asserted on identity, because
+  // onnxruntime's own sessions are what a real run releases.
+  get loadedClipEngine() { return loadedClipEngine; },
+  get modelsReady() { return window.modelsReady; },
+  set modelsReady(v) { window.modelsReady = v; },
   get selectedIndex() { return selectedIndex; },
   set selectedIndex(v) { selectedIndex = v; },
   get includedIndices() { return includedIndices; },
@@ -698,6 +713,11 @@ function updateReprocessButton() {
  * because a parallel path would be a second thing to keep in step with that one.
  */
 async function reprocessLoadedPhotos() {
+  // Same as `processFiles`: a released tab rebuilds on demand rather than
+  // refusing the re-run. The button is disabled for the duration either way,
+  // and the weights come from the Cache API, so the cost is a load the reader
+  // was going to pay on their next photo drop anyway.
+  if (idleRelease.released()) await idleRelease.ensure();
   if (isProcessingBatch || !window.modelsReady || reprocessRunning) return;
   // A whole-frame or crop re-classification holds the single inference slot
   // without ever setting `isProcessingBatch`, and this app runs onnxruntime on
@@ -1139,6 +1159,11 @@ function drainQueuedBatches() {
 }
 
 async function processFiles(fileList) {
+  // A tab that released its sessions while hidden rebuilds them here rather
+  // than queueing the photos and waiting for something else to notice. This is
+  // a no-op unless a release actually happened, so it costs nothing on the
+  // normal path.
+  if (idleRelease.released()) await idleRelease.ensure();
   if (isProcessingBatch) {
     // A drop during a batch is not nothing: the photos have to run, so they
     // queue behind the batch rather than being dropped on the floor. Silently
@@ -2207,6 +2232,10 @@ function setupCropSurfaces() {
 
 // Execute Crop from Full Photo surface
 async function applyCropFromFullSurface(idx, rect, t0) {
+  // Drawing a crop re-runs inference, so a released tab has to come back first.
+  // A drag that started before the tab was hidden and ended after it was
+  // released lands here with no sessions, and used to compute against null.
+  if (idleRelease.released()) await idleRelease.ensure();
   const p = previews[idx];
   const fullCv = p.fullCanvas;
 // Surface fractions -> image fractions through the same contain window
@@ -2233,6 +2262,7 @@ async function applyCropFromFullSurface(idx, rect, t0) {
 
 // Execute Crop from Zoomed 50% Context surface (fine-tuning)
 async function applyCropFromZoomedSurface(idx, rect, t0) {
+  if (idleRelease.released()) await idleRelease.ensure();
   const p = previews[idx];
   if (!p.contextBox) return;
   const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
@@ -2524,6 +2554,118 @@ async function revertToFullPhoto(idx) {
 
 
 
+// ---- Releasing memory while the tab is in the background (#36) ----
+//
+// Several tabs of this app open at once is the normal case. Each holds an
+// onnxruntime session (the classifier alone is 1.26 GB of weights plus whatever
+// the execution provider has put on the device) and a WebGPU device, and
+// browsers keep background tabs alive, so all of it adds up.
+//
+// A hidden tab therefore hands its memory back after a grace period and takes it
+// back when it is next needed. What is kept across the release is everything
+// cheap and everything the reader would be angry to lose: the `File`s, the
+// thumbnails, and every computed result. What goes is the sessions, the device,
+// and the decoded bitmaps - all of which are rebuilt on demand, the weights from
+// the Cache API, so the cost of returning is a load the reader would have paid
+// anyway.
+//
+// The decisions that have to be right - the grace period, the generation
+// counter that stops a slow release landing after a restore, and the busy check
+// that keeps a release out of a running batch - live in `idleRelease.ts` and are
+// tested there. This is the wiring.
+
+// A session that will not release is not a reason to keep the others: some
+// execution providers have no release at all.
+function releaseSession(entry) {
+  try {
+    entry?.sess?.release?.();
+  } catch (err) {
+    console.warn("Session release failed:", err);
+  }
+}
+
+function releaseIdleMemory() {
+  const sessions = Object.values(clipSessions);
+  const hadDetector = Boolean(sessDet);
+  // Every session, not just the current one: a user who switched engines twice
+  // has three sessions alive, and releasing only the selected engine's leaves
+  // the rest pinned for the rest of the tab's life.
+  for (const entry of sessions) releaseSession(entry);
+  if (sessDet) releaseSession({ sess: sessDet });
+  for (const key of Object.keys(clipSessions)) delete clipSessions[key];
+  sessClip = null;
+  sessDet = null;
+  loadedClipEngine = null;
+  window.modelsReady = false;
+
+  // The device and everything the provider allocated on it. Dropping the
+  // reference is what lets the browser reclaim it; onnxruntime-web keeps no
+  // registry of its own beyond `ort.env.webgpu.device`.
+  if (ort.env.webgpu) ort.env.webgpu.device = undefined;
+
+  // Bitmaps still held by a photo mid-decode. `commitBatchSlot` already
+  // releases the ones a finished photo owned, so this is the decode pool's
+  // only, and it is what makes releasing mid-batch safe enough to be worth it:
+  // the slots whose bitmap goes are exactly the ones that have not started
+  // their inference, and a slot with no bitmap is re-decoded on the next run.
+  for (const p of previews) {
+    if (p.bitmap && typeof p.bitmap.close === "function") {
+      try {
+        p.bitmap.close();
+      } catch {
+        // Already closed. Nothing to reclaim.
+      }
+      p.bitmap = undefined;
+    }
+  }
+
+  updateReprocessButton();
+  sendLog("idle_released", { sessions: sessions.length + (hadDetector ? 1 : 0) });
+}
+
+async function restoreIdleMemory() {
+  // Counted on the seam: a tier-1 spec aborts every weights fetch, so the only
+  // thing it can observe about a restore is that it was reached at all. The
+  // failure this pins is the restore never being entered, which leaves the tab
+  // inert with nothing on the page saying why.
+  idleRestoreAttempts++;
+  if (currentEngine === "server-gpu") {
+    // Nothing was held locally: the server does the inference.
+    window.modelsReady = true;
+    updateReprocessButton();
+    drainQueuedBatches();
+    return;
+  }
+  await loadWebGPUModels(currentEngine);
+  updateReprocessButton();
+  drainQueuedBatches();
+}
+
+const idleRelease = createIdleRelease({
+  // A tab that flickers between two windows must not pay a reload it did not
+  // need, and the reader switching back and forth is the common case here - a
+  // reference page open beside the app is how this gets used.
+  delayMs: 60_000,
+  release: releaseIdleMemory,
+  restore: restoreIdleMemory,
+  // Read when the timer fires, not when the tab was hidden: work dropped before
+  // the tab went to the background is still work.
+  isBusy: () => isProcessingBatch || reprocessRunning || reclassifyRunner.inFlight,
+  onRelease: ({ waitedMs }) => sendLog("idle_release_timer_fired", { waitedMs }),
+});
+
+function wireIdleRelease() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      idleRelease.hidden();
+      sendLog("tab_hidden");
+    } else {
+      idleRelease.visible();
+      sendLog("tab_visible", { wasReleased: idleRelease.released() });
+    }
+  });
+}
+
 // ---- Initialization & Event Listeners ----
 window.addEventListener("DOMContentLoaded", () => {
   // First, so the address bar names the build before anything else runs: the
@@ -2537,6 +2679,7 @@ window.addEventListener("DOMContentLoaded", () => {
   setupCropSurfaces();
   wireStripActions();
   wireReprocessButton();
+  wireIdleRelease();
 
   // The viewer-aspect cache lives in the crop geometry module; these listeners
   // are wired here because they belong to the page's lifetime, not to that
