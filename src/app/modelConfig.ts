@@ -235,6 +235,53 @@ export function floorsFor(engineKey: string): Floors {
   return ENGINE_FLOORS[engineKey] ?? DEFAULT_FLOORS;
 }
 
+/**
+ * How much of one photograph's evidence a second photograph of the same specimen
+ * repeats, per engine.
+ *
+ * The pooled card sums the checked photos' species log-probabilities, and n
+ * photographs of one mosquito are not n independent looks at it - they are one
+ * look n times. `w_i = 1 / (1 + (n - 1) * rho)` is the discount: the per-photo
+ * weight falls as the pool grows, while the pool's TOTAL weight still rises,
+ * because a genuinely new view of the specimen is real evidence.
+ *
+ * Fitted per engine, on the calib split only, through this app's own scoring
+ * path: the head's per-genus cosine offsets added on the cosine side
+ * (`softmaxJoint`), the shipped `logit_scale / temperature`, and crop-only view
+ * pooling (`DEFAULT_INCLUDE_WHOLE_FRAME` is false). NLL over the finest
+ * available label per specimen - species where the label is a head species,
+ * genus otherwise - which is the same objective the temperature is fitted on.
+ * Source: `investigations/2026-10-05-multiphoto-fusion-app/`.
+ *
+ *   rho = 0.752  H/14, 95 % CI [0.681, 0.819] over calib split components
+ *
+ * That CI contains the 0.783 fitted offline without the calibration offsets, so
+ * the two fits agree: the offsets move the optimum slightly and do not change
+ * what the rule is. What the offsets DO change is accuracy - genus top-1 on the
+ * test split falls about 1.6 pp with them - which is why this number is not the
+ * offline one and is measured where it is used.
+ *
+ * A cosine-dependent rho (redundancy rising with embedding similarity) was fitted
+ * alongside and buys nothing measurable over a constant on any slice, so the
+ * constant ships: it is one number per engine rather than a matrix operation
+ * over every pair of photos, and on the calibration split the two are within
+ * 0.001 NLL of each other.
+ *
+ * ABSENT means not fitted, explicitly, and `poolRhoFor` returns null rather than
+ * a default. An engine inheriting another engine's correlation is the mistake
+ * `CALIBRATED_ENGINES` above exists to prevent: rho is a property of how that
+ * engine's errors correlate across photographs of one specimen, and no two
+ * engines here share a training distribution.
+ */
+export const POOL_RHO: Readonly<Record<string, number>> = Object.freeze({
+  "webgpu-fp16": 0.752,
+});
+
+/** The fitted correlation for an engine, or null where none was fitted. */
+export function poolRhoFor(engineKey: string): number | null {
+  return POOL_RHO[engineKey] ?? null;
+}
+
 export const MODEL_BASE_URL =
   "https://pub-2bbf73b4e93d40c9af925724fbd48d51.r2.dev/";
 export const FP16_AVAILABLE = true;

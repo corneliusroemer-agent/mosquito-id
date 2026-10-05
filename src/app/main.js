@@ -98,7 +98,7 @@ import { armLayoutCounters, disarmLayoutCounters,
 const renderResultsTable = (previews) =>
   withRenderScope("resultsTable", () => _renderResultsTable(previews));
 const updatePooling = (head, photos, included) =>
-  withRenderScope("pooling", () => _updatePooling(head, photos, included));
+  withRenderScope("pooling", () => _updatePooling(head, photos, included, loadedClipEngine));
 const renderThumbnails = () => withRenderScope("thumbnails", _renderThumbnails);
 const renderActivePhoto = () => withRenderScope("activePhoto", _renderActivePhoto);
 
