@@ -470,6 +470,12 @@ const ASYNC = (window.__mosqAsync = {
   // fetches the full-resolution frame back, so it is also the path a test has to
   // drive to observe that the frame is not left on the record.
   applyCropFromFullSurface,
+  // The same release with the box already in the PHOTOGRAPH's pixels. The seam
+  // above takes surface fractions on purpose, so that a spec asserting on the
+  // surface-to-photo map cannot be satisfied by construction; a spec comparing
+  // two paths over one box has no drag to make and would have to re-derive that
+  // map to name the box it already holds.
+  applyCropBox: (idx, box) => applySquareCrop(idx, box, "full"),
   // The photo's full-resolution pixels, decoded from its File on demand. A test
   // that installs a crop by hand has to cut it from the same pixels the app
   // would, or it is asserting about a different photograph than the re-run will
@@ -1349,7 +1355,7 @@ async function classifyImage(imgBitmap, filename, file) {
   let best = selectDetection(dets);
   const detTime = Math.round(performance.now() - tDet0);
 
-  let cropCv = document.createElement("canvas");
+  let cropCv;
   let cropBox = null;
   if (best) {
     const [x1, y1, x2, y2] = best.box;
@@ -1367,9 +1373,16 @@ async function classifyImage(imgBitmap, filename, file) {
     // when it happens to be square and otherwise trims the longer axis about the
     // detection's centre, so the detection's middle is still what is classified.
     cropBox = squareBox([bx1, by1, bx2, by2]);
-    cropCv.width = Math.max(1, cropBox[2] - cropBox[0]);
-    cropCv.height = Math.max(1, cropBox[3] - cropBox[1]);
-    cropCv.getContext("2d").drawImage(fullCv, cropBox[0], cropBox[1], cropCv.width, cropCv.height, 0, 0, cropCv.width, cropCv.height);
+    // `cutCrop`, not a 1:1 blit of the box's native pixels. The release path has
+    // always cut through `cutCrop`, which caps the long edge at
+    // `DISPLAY_MAX_EDGE`, so a box over the cap was embedded twice from two
+    // different resamplings: re-releasing an unchanged crop could move the
+    // verdict, and the movement was charged to the box rather than to the
+    // sampling (#114). One box, one set of pixels, whichever path produced it.
+    //
+    // The frame IS `fullCv` here, so `cutCrop`'s scale factors are 1 and the
+    // crop is cut from the very pixels the detector read.
+    cropCv = cutCrop(fullCv, { width: fullCv.width, height: fullCv.height }, cropBox);
   } else {
     cropCv = fullCv;
   }

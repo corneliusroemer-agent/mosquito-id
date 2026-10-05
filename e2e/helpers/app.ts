@@ -84,6 +84,8 @@ export interface MosqAsync {
   deleteAllPhotos: () => void;
   /** The crop release, as a drag reaches it. */
   applyCropFromFullSurface: (idx: number, rect: number[], t0: number) => Promise<unknown>;
+  /** The same release with the box already in the photograph's pixels. */
+  applyCropBox: (idx: number, box: number[]) => Promise<unknown>;
   /** A photo's full-resolution pixels, decoded from its File on demand. */
   fullCanvasFor: (p: unknown) => Promise<HTMLCanvasElement | null>;
   /** How many full-resolution frames are held. The bound is a fixed count. */
