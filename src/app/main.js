@@ -31,7 +31,7 @@ import { CACHE_NAME, CLIP_MEAN, CLIP_SIZE, CLIP_STD, CROP_PAD, DET_SIZE, DETECTO
          cosineOffsetsFor, floorsFor, resolveModelUrl } from "./modelConfig";
 import { beginModelLoad, clearProgress, completeLoadStep, loadStepProgress, setProgress, setProgressError } from "./progress";
 import { createLogger } from "./telemetry";
-import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
+import { canvasUrl, dataUrlToCanvas, prepareThumbnail, setImgSrc, thumbnailUrl } from "./canvasCache";
 import { decodeDets, letterbox, selectDetection } from "./detector";
 import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
          fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
@@ -1252,6 +1252,7 @@ async function processFiles(fileList) {
           slot.fullCanvas.height = slot.bitmap.height;
           slot.fullCanvas.getContext("2d").drawImage(slot.bitmap, 0, 0);
           slot.status = "decoding… detecting…";
+          await prepareThumbnail(slot.fullCanvas, 0.8, slot.file);
         } catch (err) {
           slot.pending = false;
           slot.error = `Could not read image: ${err.message || err}`;
@@ -1345,6 +1346,10 @@ async function processFiles(fileList) {
       if (slots[i].pending) markComputeFailed(slots[i], err, sendLog);
       else slots[i].error = `Analysis failed: ${err.message || err}`;
       console.error("Error processing", slot.name, err);
+    }
+    // The crop is a new canvas; give its tile the native resize too.
+    if (slots[i].cropCanvas && slots[i].cropCanvas !== slots[i].fullCanvas) {
+      await prepareThumbnail(slots[i].cropCanvas, 0.8);
     }
     processed++;
     setProgress("batch", `Analyzed ${processed} of ${imageFiles.length} photos…`, (100 * processed) / imageFiles.length);
