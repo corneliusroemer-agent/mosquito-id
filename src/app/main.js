@@ -2066,7 +2066,7 @@ function wireWholeFrameToggle() {
     })(),
   );
   box.checked = includeWholeFrame;
-  box.addEventListener("change", () => {
+  box.addEventListener("change", async () => {
     const on = box.checked;
     if (on === includeWholeFrame) return;
     includeWholeFrame = on;
@@ -2077,6 +2077,10 @@ function wireWholeFrameToggle() {
     const stored = writePref(WHOLE_FRAME_KEY, on ? "true" : "false");
     if (!stored) sendLog("pref_not_stored", { key: WHOLE_FRAME_KEY });
     sendLog("whole_frame_toggled", { includeWholeFrame: on, photos: previews.length });
+    // Turning the toggle on adds the `whole` view to a cropped photo, which is not
+    // in `viewCache`, so the pass below is a real inference - against a session a
+    // tab that released its memory no longer has.
+    if (idleRelease.needsEnsure()) await idleRelease.ensure();
     // A toggle is about every photo on screen, so it withdraws a re-run's scope
     // rather than inheriting it. `request()` during a re-run's pass sets the
     // runner's follow-up flag, and that follow-up is what re-fuses under the new
@@ -2902,6 +2906,10 @@ async function executeCrop(p, idx, cropBoxIn, t0) {
 }
 
 async function revertToFullPhoto(idx) {
+  // Reverting re-runs inference on the full frame, and `beginRecompute` bumps
+  // the content revision, so the view cache cannot answer it: a released tab
+  // would classify against the sessions it gave back.
+  if (idleRelease.needsEnsure()) await idleRelease.ensure();
   const p = previews[idx];
   const frame = photoFrame(p);
   const started = performance.now();
