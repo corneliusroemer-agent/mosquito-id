@@ -165,6 +165,17 @@ export interface PhotoState {
    */
   rev: number;
   /**
+   * The revision the batch claimed this photo at, stamped on the placeholder
+   * when it is queued. Present only on a photo the batch has not yet resolved.
+   *
+   * Distinct from `rev` because the two answer different questions: `rev` is
+   * where the photo's revision is now, and a queued photo can be recomputed
+   * before its own inference runs - it is draggable from the moment its decode
+   * lands. A guard reading `rev` when the photo's turn came would read the
+   * recompute's own number and compare the photo against itself.
+   */
+  batchRev?: number;
+  /**
    * Bumped only when the photo's PIXELS change, not on every recompute.
    *
    * `rev` cannot key the view cache: a whole-frame toggle recomputes without
