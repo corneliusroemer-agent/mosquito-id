@@ -41,16 +41,135 @@ export function hasCropBox(p?: Preview): boolean {
 export function cropBoxInFullSurface(p: Preview): BoxPercent | null {
   if (!hasCropBox(p) || !p.fullCanvas) return null;
   const surfaceFull = document.getElementById("crop-surface-full");
-  const { kx, ox, ky, oy } = fitMapping(surfaceFull, p.fullCanvas, "contain");
-  const [bx1, by1, bx2, by2] = p.cropBox!;
-  const l = (bx1 / p.fullCanvas.width - ox) / kx;
-  const t = (by1 / p.fullCanvas.height - oy) / ky;
-  return {
-    left: l * 100,
-    top: t * 100,
-    width: ((bx2 / p.fullCanvas.width - ox) / kx - l) * 100,
-    height: ((by2 / p.fullCanvas.height - oy) / ky - t) * 100,
-  };
+  return boxInSurface(p.cropBox!, p.fullCanvas, fitMapping(surfaceFull, p.fullCanvas, "contain"));
+}
+
+// The box expressed as fractions of the surface the frame is painted in, given
+// the same mapping the outline is drawn through. Factored out of
+// cropBoxInFullSurface so the drag preview, which has to place a box that has
+// NOT been committed yet, goes through the identical arithmetic rather than a
+// second copy of it - the preview and the outline disagreeing by a pixel is the
+// whole class of defect this module exists to prevent.
+export function boxInSurface(box: Box, img: CanvasLike, mapping: Mapping): BoxPercent {
+  const { kx, ox, ky, oy } = mapping;
+  const x1 = (box[0] / img.width - ox) / kx;
+  const y1 = (box[1] / img.height - oy) / ky;
+  const x2 = (box[2] / img.width - ox) / kx;
+  const y2 = (box[3] / img.height - oy) / ky;
+  return { left: x1 * 100, top: y1 * 100, width: (x2 - x1) * 100, height: (y2 - y1) * 100 };
+}
+
+// One surface point (fractions of the surface) in the frame's own pixels, the
+// inverse of boxInSurface. A drag is pointer motion on a surface, and the crop
+// is a region of a photo, so every drag has to cross this map - and the square
+// constraint has to be applied on the far side of it, because a square in
+// surface fractions is not a square in photo pixels once the two aspects
+// differ.
+export function surfacePointToFrame(pt: [number, number], img: CanvasLike, mapping: Mapping): [number, number] {
+  const { kx, ox, ky, oy } = mapping;
+  return [((pt[0] - ox) / kx) * img.width, ((pt[1] - oy) / ky) * img.height];
+}
+
+/**
+ * Force a box to be a square, keeping the centre and dropping the overflow off
+ * the longer axis.
+ *
+ * Manual crops are square by force. The measurement behind that decision is
+ * `investigations/2026-10-04-granularity/`: at the classifier's input size a
+ * square crop is neither better nor worse than the free-form one it replaces, so
+ * this buys geometry consistency and a predictable aspect across a batch - not
+ * accuracy. What it costs is pixels on the longer axis, which is why the box
+ * only ever shrinks and is anchored on its centre.
+ *
+ * Three properties make this the right place for the constraint:
+ *
+ *  - it is in PHOTO pixels, which is the unit the crop is stored, cut and sent
+ *    in. A square enforced in surface fractions would be a rectangle by the
+ *    time it reached the canvas, because the full panel letterboxes and the
+ *    zoom panel crops its frame;
+ *  - it is centred, so it keeps the point the drag started from inside itself.
+ *    Anchoring on the drag's own corner instead would move that corner as the
+ *    cursor travels, and the box would slide out from under the gesture;
+ *  - it is pure, so it can be tested without a DOM - which is the only kind of
+ *    test that could have caught the free-form behaviour at all, since the drag
+ *    handlers it replaces are untestable there.
+ *
+ * The result is integral in x and exact in side length, because a stored box
+ * with half-pixel edges cannot be described as a square by anything reading it
+ * back. `side` floors rather than rounds so the square is never larger than
+ * the box it was asked to constrain - the one property that lets this be
+ * applied to a box the user drew, since it must not claim a pixel the drag did
+ * not cover.
+ *
+ * A degenerate box (no area) stays degenerate: this has no minimum size to
+ * enforce, and inventing one here would silently turn a stray click into a
+ * crop. Callers reject it with `isCropTooSmall`.
+ */
+export function squareBox(box: Box): Box {
+  const w = Math.max(0, box[2] - box[0]);
+  const h = Math.max(0, box[3] - box[1]);
+  const side = Math.floor(Math.min(w, h));
+  if (!(side > 0)) return [box[0], box[1], box[0], box[1]];
+  // Round the near corner, not the centre, so the far corner is exact: left +
+  // side is the same expression on both edges.
+  const x1 = Math.round(box[0] + (w - side) / 2);
+  const y1 = Math.round(box[1] + (h - side) / 2);
+  return [x1, y1, x1 + side, y1 + side];
+}
+
+/**
+ * The square box a drag from `start` to `cur` commits, in the frame's pixels.
+ *
+ * CENTRE-ANCHORED, not anchored on the drag's starting corner. The box keeps the
+ * MIDPOINT of the two points fixed and takes a side of half the larger of the two
+ * separations, so it grows symmetrically in whichever direction the cursor
+ * travels and stays under it. A corner-anchored square instead sits in the
+ * quadrant the cursor started in: the corner the user put down is the one that
+ * matters to them, and once the box is squared the pointer runs away from the
+ * box's own far edge, so on the second half of the drag the pointer leaves the
+ * thing being adjusted. Centre-anchoring keeps the cursor inside the crop for
+ * the whole gesture, which is what makes a constrained drag feel like the shape
+ * is following the cursor rather than fighting it.
+ *
+ * Both surface points go through `surfacePointToFrame` first, so the square is
+ * square in the unit the crop is stored and cut in, and the preview can be
+ * mapped back out of this same box.
+ *
+ * A drag that has not moved yields a zero-area box, which `isCropTooSmall`
+ * rejects rather than committing - see there.
+ */
+export function squareDragBox(
+  start: [number, number],
+  cur: [number, number],
+  img: CanvasLike,
+  mapping: Mapping,
+): Box {
+  const [sx, sy] = surfacePointToFrame(start, img, mapping);
+  const [cx, cy] = surfacePointToFrame(cur, img, mapping);
+  const mx = (sx + cx) / 2;
+  const my = (sy + cy) / 2;
+  // Half the larger separation gives a full side of twice it, so the cursor ends
+  // up exactly on the edge of the square along whichever axis is leading.
+  const half = Math.max(Math.abs(cx - sx), Math.abs(cy - sy)) / 2;
+  const [x1, y1] = [mx - half, my - half];
+  return squareBox([x1, y1, x1 + half * 2, y1 + half * 2]);
+}
+
+// The smallest crop, in photo pixels, worth running inference over. A click that
+// never moved produces a zero-area box, and a box with no area is not a crop
+// however it is shaped - squaring must not turn a stray click into a 1x1 crop
+// that re-runs the model over the whole batch.
+//
+// It was previously a fraction of the SURFACE (0.015), which cannot be kept:
+// a square built in photo pixels and mapped back onto a letterboxed panel can
+// extend past the surface edge, so its width in surface fractions goes negative
+// and a fraction test would compare the wrong quantity. Pixels are also the unit
+// the 10px guard below already used, so this is the same threshold expressed
+// once, in the unit the crop is actually stored in.
+export const MIN_CROP_PX = 10;
+
+export function isCropTooSmall(box: Box, minPx = MIN_CROP_PX): boolean {
+  return box[2] - box[0] < minPx || box[3] - box[1] < minPx;
 }
 
 // The zoom panel shows the context region, not the whole photo, so the box has

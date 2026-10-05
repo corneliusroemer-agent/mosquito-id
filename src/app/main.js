@@ -34,8 +34,9 @@ import { createLogger } from "./telemetry";
 import { canvasUrl, dataUrlToCanvas, setImgSrc, thumbnailUrl } from "./canvasCache";
 import { contentFingerprint } from "./contentHash";
 import { decodeDets, letterbox, selectDetection } from "./detector";
-import { applyBox, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
-         fitMapping, invalidateViewerAspectCache, zoomedSurfaceMapping } from "./cropGeometry";
+import { applyBox, boxInSurface, cropBoxInFullSurface, cropBoxInZoomSurface, extractContextCrop,
+         fullSurfaceMapping, invalidateViewerAspectCache, isCropTooSmall, squareBox,
+         squareDragBox, zoomedSurfaceMapping } from "./cropGeometry";
 import { downloadCSV, renderResultsTable } from "./resultsTable";
 import { fetchWithCache } from "./modelFetch";
 import { loadSamplePhotos, prefetchSamples } from "./samples";
@@ -1030,10 +1031,17 @@ async function classifyImage(imgBitmap, filename) {
     const by1 = Math.max(0, y1 - ph);
     const bx2 = Math.min(fullCv.width, x2 + pw);
     const by2 = Math.min(fullCv.height, y2 + ph);
-    cropCv.width = Math.max(1, bx2 - bx1);
-    cropCv.height = Math.max(1, by2 - by1);
-    cropCv.getContext("2d").drawImage(fullCv, bx1, by1, cropCv.width, cropCv.height, 0, 0, cropCv.width, cropCv.height);
-    cropBox = [bx1, by1, bx2, by2];
+    // Pad first, then square - the same order as clamp-then-square in
+    // applySquareCrop. Squaring the raw detection and padding afterwards would
+    // re-widen the box along whichever axis the pad grew, so the pad would undo
+    // the constraint; and squaring a box that overhangs the photo would trim it
+    // back to a rectangle. Squaring the padded, already-inside box is a no-op
+    // when it happens to be square and otherwise trims the longer axis about the
+    // detection's centre, so the detection's middle is still what is classified.
+    cropBox = squareBox([bx1, by1, bx2, by2]);
+    cropCv.width = Math.max(1, cropBox[2] - cropBox[0]);
+    cropCv.height = Math.max(1, cropBox[3] - cropBox[1]);
+    cropCv.getContext("2d").drawImage(fullCv, cropBox[0], cropBox[1], cropCv.width, cropCv.height, 0, 0, cropCv.width, cropCv.height);
   } else {
     cropCv = fullCv;
   }
@@ -1923,7 +1931,7 @@ function selectPhoto(idx) {
   isDragging = false;
   currentDragTarget = null;
   dragStartPt = null;
-  dragCurrentRect = null;
+  dragCurrentBox = null;
   const rectFull = document.getElementById("full-drag-rect");
   if (rectFull) rectFull.style.display = "none";
   const rectZoomed = document.getElementById("zoomed-drag-rect");
@@ -2174,7 +2182,7 @@ function renderActivePhoto() {
 let isDragging = false;
 let currentDragTarget = null; // 'full' or 'zoomed'
 let dragStartPt = null;
-let dragCurrentRect = null;
+let dragCurrentBox = null;
 
 function setupCropSurfaces() {
   const surfaceFull = document.getElementById("crop-surface-full");
@@ -2191,6 +2199,32 @@ function setupCropSurfaces() {
     ];
   }
 
+  /**
+   * The frame the panel is showing, in that frame's own pixels, plus the surface
+   * map for it - the same map `cropBoxInFullSurface`/`cropBoxInZoomSurface` draw
+   * the committed outline through.
+   *
+   * Read once at pointerdown rather than per move: the surface's box does not
+   * change mid-drag, and re-reading it per move would let the square resize
+   * under the cursor if a scrollbar appeared.
+   *
+   * The full panel shows the whole photo; the zoom panel shows the context
+   * region. Both are canvases whose pixels are the photo's pixels at 1:1, so the
+   * frame needs no scale factor - only the context region's offset into the
+   * photo, which `applySquareCrop` adds at commit time.
+   */
+  function dragFrameFor(target) {
+    const p = previews[selectedIndex];
+    if (!p) return null;
+    if (target === "zoomed" && p.contextCanvas) {
+      return { img: p.contextCanvas, mapping: zoomedSurfaceMapping(p) };
+    }
+    if (target === "full" && p.fullCanvas) {
+      return { img: p.fullCanvas, mapping: fullSurfaceMapping(p) };
+    }
+    return null;
+  }
+
   function startDrag(target, surface, rectEl, e) {
     if (e.button !== 0 || !previews.length || !previews[selectedIndex]) return;
     e.preventDefault();
@@ -2204,25 +2238,31 @@ function setupCropSurfaces() {
     isDragging = true;
     currentDragTarget = target;
     dragStartPt = getSurfacePoint(surface, e.clientX, e.clientY);
-    dragCurrentRect = null;
+    dragCurrentBox = null;
     rectEl.style.display = "none";
 
     sendLog("drag_start", { target, startPt: dragStartPt });
 
+    // The frame the drag is expressed in, read once here so the square cannot
+    // resize under the cursor mid-gesture.
+    const frame = dragFrameFor(target);
+
     function onPointerMove(ev) {
-      if (!isDragging || currentDragTarget !== target || !dragStartPt) return;
+      if (!isDragging || currentDragTarget !== target || !dragStartPt || !frame) return;
       const pt = getSurfacePoint(surface, ev.clientX, ev.clientY);
-      dragCurrentRect = [
-        Math.min(dragStartPt[0], pt[0]),
-        Math.min(dragStartPt[1], pt[1]),
-        Math.max(dragStartPt[0], pt[0]),
-        Math.max(dragStartPt[1], pt[1])
-      ];
+      dragCurrentBox = squareDragBox(dragStartPt, pt, frame.img, frame.mapping);
+      // The preview is the committed box mapped back through the same mapping,
+      // not a second square computed on the surface. Squaring in surface
+      // fractions would give a different rect on the two panels - the letterbox
+      // on the full panel and the cover crop on the zoom panel do not have the
+      // same aspect - and would not be square in pixels anyway, which is the
+      // unit the crop is stored and cut in.
+      const pct = boxInSurface(dragCurrentBox, frame.img, frame.mapping);
       rectEl.style.display = "block";
-      rectEl.style.left = `${dragCurrentRect[0] * 100}%`;
-      rectEl.style.top = `${dragCurrentRect[1] * 100}%`;
-      rectEl.style.width = `${(dragCurrentRect[2] - dragCurrentRect[0]) * 100}%`;
-      rectEl.style.height = `${(dragCurrentRect[3] - dragCurrentRect[1]) * 100}%`;
+      rectEl.style.left = `${pct.left}%`;
+      rectEl.style.top = `${pct.top}%`;
+      rectEl.style.width = `${pct.width}%`;
+      rectEl.style.height = `${pct.height}%`;
     }
 
     async function onPointerUp(ev) {
@@ -2238,29 +2278,24 @@ function setupCropSurfaces() {
       currentDragTarget = null;
       rectEl.style.display = "none";
 
-      const rect = dragCurrentRect;
-      dragCurrentRect = null;
+      const box = dragCurrentBox;
+      dragCurrentBox = null;
       dragStartPt = null;
 
-      if (!rect) {
-        sendLog("drag_cancel", { target, reason: "no_rect" });
-        return;
-      }
-      const w = rect[2] - rect[0];
-      const h = rect[3] - rect[1];
-      if (w < 0.015 || h < 0.015) {
-        sendLog("drag_cancel", { target, reason: "too_small", w, h });
+      // A click that never moved leaves no box, and a box with no area is not a
+      // crop however it is shaped - squaring must not turn a stray click into a
+      // 1x1 crop that re-runs inference over the whole batch.
+      if (!box || isCropTooSmall(box)) {
+        sendLog("drag_cancel", { target, reason: box ? "too_small" : "no_rect" });
         return;
       }
 
-      sendLog("drag_end", { target, rect, w, h });
+      sendLog("drag_end", { target, box });
 
-      const idx = selectedIndex;
-      if (target === "full") {
-        applyCropFromFullSurface(idx, rect, releasedAt);
-      } else if (target === "zoomed") {
-        applyCropFromZoomedSurface(idx, rect, releasedAt);
-      }
+      // Commits the very box the preview showed, already square in photo
+      // pixels. The commit path takes a pixel box rather than a surface rect, so
+      // nothing downstream can undo the constraint by re-deriving one.
+      applySquareCrop(selectedIndex, box, target, releasedAt);
     }
 
     window.addEventListener("pointermove", onPointerMove);
@@ -2272,60 +2307,53 @@ function setupCropSurfaces() {
   surfaceZoomed.addEventListener("pointerdown", (e) => startDrag("zoomed", surfaceZoomed, rectZoomed, e));
 }
 
-// Execute Crop from Full Photo surface
-async function applyCropFromFullSurface(idx, rect, t0) {
+/**
+ * Commit a manual crop.
+ *
+ * `box` is in the PANEL's own frame - the full photo for `target: "full"`, the
+ * context region for `target: "zoomed"` - in pixels of that frame, and it is
+ * already square: the drag handler squares it in these units via `squareDragBox`
+ * and this function never converts back to surface fractions, so there is no step
+ * at which the committed box could stop being square.
+ *
+ * One function rather than the two panel-specific ones this replaces. Both did
+ * the same three things - map to photo pixels, clamp, run - and the two maps
+ * differed only by the offset the context region sits at inside the photo, which
+ * is a subtraction at the end.
+ */
+async function applySquareCrop(idx, box, target, t0) {
   // Drawing a crop re-runs inference, so a released tab has to come back first.
   // A drag that started before the tab was hidden and ended after it was
   // released lands here with no sessions, and used to compute against null.
   if (idleRelease.released()) await idleRelease.ensure();
   const p = previews[idx];
-  const fullCv = p.fullCanvas;
-// Surface fractions -> image fractions through the same contain window
-  // cropBoxInFullSurface() draws through, so a drag lands on the pixels the
-  // user pointed at rather than on the same fraction of a wider photo.
-  //
-  // The window is per-axis, not a single k: contain fits one axis to the photo
-  // and letterboxes the other, so scaling both by one factor would stretch
-  // whichever axis was not letterboxed.
-  const { kx, ox, ky, oy } = fitMapping(
-    document.getElementById("crop-surface-full"), fullCv, "contain"
-  );
-  const r = [kx * rect[0] + ox, ky * rect[1] + oy, kx * rect[2] + ox, ky * rect[3] + oy];
-  const x1 = Math.max(0, Math.min(fullCv.width, Math.round(r[0] * fullCv.width)));
-  const y1 = Math.max(0, Math.min(fullCv.height, Math.round(r[1] * fullCv.height)));
-  const x2 = Math.max(0, Math.min(fullCv.width, Math.round(r[2] * fullCv.width)));
-  const y2 = Math.max(0, Math.min(fullCv.height, Math.round(r[3] * fullCv.height)));
+  if (!p) return;
 
-  if (x2 - x1 < 10 || y2 - y1 < 10) return;
+  // The context region is cut in photo pixels and the drag was expressed in the
+  // context canvas's pixels, which are the same pixels at the same scale -
+  // extractContextCrop draws it 1:1. So the only difference is where the region
+  // starts. With no context region the zoom panel shows the whole photo, and so
+  // does the frame the drag was taken in, hence a zero offset.
+  const ox = target === "zoomed" && p.contextBox ? p.contextBox[0] : 0;
+  const oy = target === "zoomed" && p.contextBox ? p.contextBox[1] : 0;
 
-  sendLog("manual_crop", { target: "full", rect: [x1, y1, x2, y2] });
-  return executeCrop(p, idx, [x1, y1, x2, y2], t0);
-}
+  // Clamp BEFORE squaring, not after. Clamping a square that overhangs the
+  // photo's edge would trim one side and leave a rectangle again, so the order
+  // is what keeps the invariant; squaring a box already inside the photo is then
+  // a no-op, which is what makes this safe to run on every caller.
+  const W = p.fullCanvas.width;
+  const H = p.fullCanvas.height;
+  const clamped = squareBox([
+    Math.max(0, Math.min(W, box[0] + ox)),
+    Math.max(0, Math.min(H, box[1] + oy)),
+    Math.max(0, Math.min(W, box[2] + ox)),
+    Math.max(0, Math.min(H, box[3] + oy)),
+  ]);
 
-// Execute Crop from Zoomed 50% Context surface (fine-tuning)
-async function applyCropFromZoomedSurface(idx, rect, t0) {
-  if (idleRelease.released()) await idleRelease.ensure();
-  const p = previews[idx];
-  if (!p.contextBox) return;
-  const [ctx_x1, ctx_y1, ctx_x2, ctx_y2] = p.contextBox;
-  const ctx_w = ctx_x2 - ctx_x1;
-  const ctx_h = ctx_y2 - ctx_y1;
+  if (isCropTooSmall(clamped)) return;
 
-  // Surface fractions -> image fractions, through the object-fit:cover window,
-  // so a fine-tune drag lands where the user pointed even if the context canvas
-  // and the surface no longer share an aspect (e.g. after a window resize).
-  const { kx, ox, ky, oy } = zoomedSurfaceMapping(p);
-  const r = [kx * rect[0] + ox, ky * rect[1] + oy, kx * rect[2] + ox, ky * rect[3] + oy];
-
-  const x1 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + r[0] * ctx_w)));
-  const y1 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + r[1] * ctx_h)));
-  const x2 = Math.max(0, Math.min(p.fullCanvas.width, Math.round(ctx_x1 + r[2] * ctx_w)));
-  const y2 = Math.max(0, Math.min(p.fullCanvas.height, Math.round(ctx_y1 + r[3] * ctx_h)));
-
-  if (x2 - x1 < 10 || y2 - y1 < 10) return;
-
-  sendLog("manual_crop", { target: "zoomed", rect: [x1, y1, x2, y2] });
-  return executeCrop(p, idx, [x1, y1, x2, y2], t0);
+  sendLog("manual_crop", { target, box: clamped });
+  return executeCrop(p, idx, clamped, t0);
 }
 
 // One view of one photo, scored. Returns the pieces fusion needs (the species
@@ -2422,7 +2450,15 @@ function afterNextPaint() {
 // re-cut the context around it, and repaint. That is what the user asked for
 // by releasing. Phase two asks the model what the new crop is and commits the
 // answer only if this is still the newest release for this photo.
-async function executeCrop(p, idx, cropBox, t0) {
+async function executeCrop(p, idx, cropBoxIn, t0) {
+  // The invariant is enforced HERE, at the one funnel every crop passes through,
+  // not only in the drag handler. A programmatic caller - the detector box, a
+  // future keyboard nudge, a reprocess - that hands over a non-square box gets it
+  // squared rather than committing a rectangle, which is the case most likely to
+  // be missed because it has no drag behind it and so no preview to disagree
+  // with. The box is already square on the manual path, where squareBox is
+  // idempotent, so this costs nothing there.
+  const cropBox = squareBox(cropBoxIn);
   const [bx1, by1, bx2, by2] = cropBox;
   const fullCv = p.fullCanvas;
   const started = t0 ?? performance.now();
