@@ -20,6 +20,7 @@ import { adjacentNames as _adjacentNames, softmaxJoint } from "../confidence/sof
 import { genusScores as _genusScores } from "../confidence/genusScores";
 import { fuseViews as _fuseViews } from "../confidence/fuseViews";
 import { genusOf, speciesGenusIndex } from "../confidence/genus";
+import { assertPartition } from "../confidence/taxonomy";
 import { verdictFrom as _verdictFrom, verdictSentence, nonMosquitoLabel } from "../confidence/verdict";
 import { pooledPosterior as _pooledPosterior,
          splitPoolable, poolingWeights, aggregateLogits, aggregateAdjacent,
@@ -361,6 +362,11 @@ if (typeof PerformanceObserver === "function") {
 
 
 const embedsCache = {};
+// Taxonomies, keyed by the head they belong to. Kept apart from `embedsCache`
+// because they are a different artefact with a different lifetime: the head is
+// 271 KB of fitted weights, this is 3 KB of labels, and an engine switch should
+// not re-fetch either when the other is already loaded.
+const taxonomyCache = {};
 
 async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   window.modelsReady = false;
@@ -406,6 +412,12 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
   // not worth a byte slice of its own - what the bar reports for them is that
   // they parsed and the head is now usable.
   if (needsEmbeds) steps.push({ key: "embeds" });
+  // The taxonomy is a few KB beside a 172 MB classifier, so it gets its own slice
+  // of the bar rather than riding on the head's - a missing or malformed
+  // taxonomy has to be visible on the progress bar, not inferred from the head
+  // arriving.
+  const needsTaxonomy = Boolean(clipCfg.taxonomyPath) && !taxonomyCache[targetEmbedsPath];
+  if (needsTaxonomy) steps.push({ key: "taxonomy" });
   beginModelLoad(steps);
 
   // 1. Load detector if not loaded
@@ -479,7 +491,46 @@ async function loadWebGPUModels(engineKey = "webgpu-fp16") {
     embedsCache[targetEmbedsPath] = data;
     completeLoadStep("embeds");
   }
-  EMB = embedsCache[targetEmbedsPath];
+  // Attached to the head, so every consumer that reads `head.taxonomy` - the
+  // rank roll-up, the genus index - sees it without threading a second argument
+  // through. A taxonomy that does not match the head is caught here rather than
+  // surfacing as a species filed under the wrong genus.
+  // Read through the cache, not through `data`: that binding lives inside the
+  // `needsEmbeds` block above, and an engine whose head is already loaded has no
+  // `data` at all - which is exactly the path an engine switch takes.
+  const head = embedsCache[targetEmbedsPath];
+  if (needsTaxonomy) {
+    // A taxonomy is an enhancement, and a head without one is fully supported -
+    // genus falls back to the first word of the label. So a taxonomy that is
+    // missing, malformed, or not the array it claims to be degrades to that
+    // fallback and says so in the log rather than leaving a head that silently
+    // has no tree.
+    //
+    // `fetchWithCache` already absorbs a failed fetch, so the catch is not
+    // covering that (measured: tier 1 aborts every model request and the engine
+    // switch still completes). What it IS covering is everything downstream of
+    // the fetch - a truncated body makes `JSON.parse` throw, and that is outside
+    // fetchWithCache's reach. Failing a 172 MB classifier download over 3 KB of
+    // labels would be the wrong trade by a wide margin.
+    try {
+      const taxBuf = await fetchWithCache(resolveModelUrl(clipCfg.taxonomyPath), loadStepProgress("taxonomy", "Taxonomy"), sendLog);
+      const taxDoc = JSON.parse(new TextDecoder().decode(taxBuf));
+      if (Array.isArray(taxDoc?.taxonomy)) {
+        taxonomyCache[targetEmbedsPath] = taxDoc.taxonomy;
+        sendLog("taxonomy_loaded", { head: targetEmbedsPath, entries: taxDoc.taxonomy.length });
+      } else {
+        sendLog("taxonomy_unusable", { head: targetEmbedsPath, reason: "not_an_array" });
+        console.warn("[taxonomy] ignoring", clipCfg.taxonomyPath, "- no `taxonomy` array; using the first-word genus rule");
+      }
+    } catch (err) {
+      sendLog("taxonomy_unusable", { head: targetEmbedsPath, reason: "fetch_failed" });
+      console.warn("[taxonomy]", clipCfg.taxonomyPath, "could not be loaded; using the first-word genus rule:", err);
+    }
+    completeLoadStep("taxonomy");
+  }
+  if (taxonomyCache[targetEmbedsPath]) head.taxonomy = taxonomyCache[targetEmbedsPath];
+  assertPartition(head);
+  EMB = head;
   // Bind the species this head cannot separate to the label helpers. Done where
   // the head is assigned, so an engine switch rebinds them with it.
   setActiveHead(EMB);
